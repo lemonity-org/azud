@@ -9,16 +9,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 )
 
 var buildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Build and push the application image",
-	Long: `Build the Docker image and push it to the registry.
+	Long: `Build the container image and push it to the registry.
 
-This command builds the Docker image locally (or on a remote builder) and
+This command builds the container image locally (or on a remote builder) and
 pushes it to the configured registry.
 
 Example:
@@ -127,11 +127,11 @@ func buildLocal(imageTag, latestTag string) error {
 	}
 	args = append(args, context)
 
-	log.Info("Running docker build...")
-	log.Command("docker " + strings.Join(args, " "))
+	log.Info("Running podman build...")
+	log.Command("podman " + strings.Join(args, " "))
 
 	// Execute build
-	buildCmd := exec.Command("docker", args...)
+	buildCmd := exec.Command("podman", args...)
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 
@@ -148,14 +148,14 @@ func buildRemote(imageTag, latestTag, version string) error {
 
 	// Create SSH client for remote builder
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
-	dockerClient := docker.NewClient(sshClient)
-	imageManager := docker.NewImageManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	imageManager := podman.NewImageManager(podmanClient)
 
-	// Prepare buildx config
-	buildConfig := &docker.BuildxConfig{
-		BuildConfig: docker.BuildConfig{
+	// Prepare multi-platform manifest build config
+	buildConfig := &podman.ManifestBuildConfig{
+		BuildConfig: podman.BuildConfig{
 			Context:    cfg.Builder.Context,
 			Dockerfile: cfg.Builder.Dockerfile,
 			Tag:        imageTag,
@@ -175,7 +175,7 @@ func buildRemote(imageTag, latestTag, version string) error {
 	// For now, we'll assume the code is already on the remote builder
 	// In a production implementation, you'd sync the context first
 
-	if err := imageManager.Buildx(cfg.Builder.Remote.Host, buildConfig); err != nil {
+	if err := imageManager.ManifestBuild(cfg.Builder.Remote.Host, buildConfig); err != nil {
 		return fmt.Errorf("remote build failed: %w", err)
 	}
 
@@ -195,7 +195,7 @@ func pushImage(imageTag, latestTag string) error {
 
 	// Push version tag
 	log.Info("Pushing %s...", imageTag)
-	pushCmd := exec.Command("docker", "push", imageTag)
+	pushCmd := exec.Command("podman", "push", imageTag)
 	pushCmd.Stdout = os.Stdout
 	pushCmd.Stderr = os.Stderr
 	if err := pushCmd.Run(); err != nil {
@@ -204,7 +204,7 @@ func pushImage(imageTag, latestTag string) error {
 
 	// Push latest tag
 	log.Info("Pushing %s...", latestTag)
-	pushCmd = exec.Command("docker", "push", latestTag)
+	pushCmd = exec.Command("podman", "push", latestTag)
 	pushCmd.Stdout = os.Stdout
 	pushCmd.Stderr = os.Stderr
 	if err := pushCmd.Run(); err != nil {
@@ -238,8 +238,8 @@ func loginToRegistry() error {
 		return fmt.Errorf("registry password not found")
 	}
 
-	// Login using docker CLI
-	cmd := exec.Command("docker", "login", "--username", cfg.Registry.Username, "--password-stdin", server)
+	// Login using podman CLI
+	cmd := exec.Command("podman", "login", "--username", cfg.Registry.Username, "--password-stdin", server)
 	cmd.Stdin = strings.NewReader(password)
 	cmd.Stderr = os.Stderr
 

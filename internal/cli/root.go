@@ -24,7 +24,7 @@ var (
 		Short: "Deploy web apps anywhere with zero downtime",
 		Long: `Azud is a deployment tool for containerized web applications.
 
-It deploys your application to any server with Docker, providing:
+It deploys your application to any server with Podman, providing:
   - Zero-downtime deployments
   - Multi-server support with roles
   - Automatic SSL via Let's Encrypt
@@ -63,12 +63,10 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 }
 
-// Execute runs the root command
 func Execute() error {
 	return rootCmd.Execute()
 }
 
-// loadConfig loads the configuration file
 func loadConfig() (*config.Config, error) {
 	path := configPath
 	if path == "" {
@@ -83,7 +81,6 @@ func loadConfig() (*config.Config, error) {
 	return loader.Load()
 }
 
-// findConfigFile searches for a config file in standard locations
 func findConfigFile() string {
 	// Check common locations
 	paths := []string{
@@ -103,12 +100,10 @@ func findConfigFile() string {
 	return ""
 }
 
-// GetConfig returns the loaded configuration
 func GetConfig() *config.Config {
 	return cfg
 }
 
-// GetConfigPath returns the resolved config file path
 func GetConfigPath() string {
 	if configPath != "" {
 		return configPath
@@ -116,17 +111,14 @@ func GetConfigPath() string {
 	return findConfigFile()
 }
 
-// GetDestination returns the destination environment
 func GetDestination() string {
 	return destination
 }
 
-// IsVerbose returns whether verbose mode is enabled
 func IsVerbose() bool {
 	return verbose
 }
 
-// getConfigDir returns the directory containing the config file
 func getConfigDir() string {
 	path := GetConfigPath()
 	if path == "" {

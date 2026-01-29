@@ -157,6 +157,15 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	// Validate Podman configuration
+	validBackends := map[string]bool{"netavark": true, "cni": true}
+	if cfg.Podman.NetworkBackend != "" && !validBackends[cfg.Podman.NetworkBackend] {
+		errs = append(errs, ValidationError{
+			Field:   "podman.network_backend",
+			Message: "network_backend must be 'netavark' or 'cni'",
+		})
+	}
+
 	// Validate deploy configuration
 	if cfg.Deploy.RetainContainers < 0 {
 		errs = append(errs, ValidationError{

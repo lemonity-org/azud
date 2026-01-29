@@ -44,7 +44,7 @@ func (p *Pool) Get(host string) *Connection {
 			p.mu.Lock()
 			delete(p.connections, host)
 			p.mu.Unlock()
-			conn.Close()
+			_ = conn.Close()
 		}()
 		return nil
 	}
@@ -59,7 +59,7 @@ func (p *Pool) Put(host string, conn *Connection) {
 
 	// Close existing connection if any
 	if existing, ok := p.connections[host]; ok {
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	p.connections[host] = conn
@@ -71,7 +71,7 @@ func (p *Pool) Remove(host string) {
 	defer p.mu.Unlock()
 
 	if conn, ok := p.connections[host]; ok {
-		conn.Close()
+		_ = conn.Close()
 		delete(p.connections, host)
 	}
 }
@@ -137,7 +137,7 @@ func (p *Pool) removeIdleConnections() {
 	now := time.Now()
 	for host, conn := range p.connections {
 		if now.Sub(conn.LastUsed()) > p.maxIdle {
-			conn.Close()
+			_ = conn.Close()
 			delete(p.connections, host)
 		}
 	}

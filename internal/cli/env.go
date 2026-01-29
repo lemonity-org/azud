@@ -109,16 +109,15 @@ Example:
 }
 
 var (
-	envHost        string
-	envShowValues  bool
-	envForce       bool
-	envDestination string
+	envHost       string
+	envShowValues bool
+	envForce      bool
 )
 
 func init() {
 	envPushCmd.Flags().StringVar(&envHost, "host", "", "Specific host")
 	envPullCmd.Flags().StringVar(&envHost, "host", "", "Specific host (required)")
-	envPullCmd.MarkFlagRequired("host")
+	_ = envPullCmd.MarkFlagRequired("host")
 
 	envListCmd.Flags().BoolVar(&envShowValues, "reveal", false, "Show secret values")
 
@@ -158,7 +157,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	log.Header("Pushing Secrets")
 	log.Info("Pushing %d secrets to %d host(s)...", len(secrets), len(hosts))
@@ -209,7 +208,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 
 		// Set permissions
 		chmodCmd := "chmod 600 /root/.azud/secrets"
-		result, err = sshClient.Execute(host, chmodCmd)
+		_, err = sshClient.Execute(host, chmodCmd)
 		if err != nil {
 			log.HostError(host, "Failed to set permissions: %v", err)
 			continue
@@ -227,7 +226,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	log.Header("Pulling Secrets from %s", envHost)
 
@@ -499,7 +498,7 @@ func loadSecretsFile(path string) (map[string]string, error) {
 		}
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	secrets := make(map[string]string)
 	scanner := bufio.NewScanner(file)

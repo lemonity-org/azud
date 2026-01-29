@@ -6,7 +6,7 @@
 
 **Deploy web apps anywhere with zero downtime**
 
-Azud is a modern deployment tool for containerized web applications. It deploys Docker-based applications to any server with zero-downtime deployments, combining the simplicity of Dokku with the multi-server capabilities of Kamal—while addressing the pain points of both.
+Azud is a modern deployment tool for containerized web applications. It deploys Podman-based applications to any server with zero-downtime deployments, combining the simplicity of Dokku with the multi-server capabilities of Kamal—while addressing the pain points of both.
 
 ## Why Azud?
 
@@ -215,7 +215,7 @@ Azud is built in Go with a clean internal architecture:
 
 - **CLI** - Cobra-based command interface
 - **Config** - YAML configuration management with secrets handling
-- **Docker** - Container lifecycle, registry, and health checks
+- **Podman** - Container lifecycle, registry, and health checks
 - **Proxy** - Caddy management and route configuration
 - **Deploy** - Blue-green deployment orchestration
 - **SSH** - Remote server communication with bastion support
@@ -223,7 +223,7 @@ Azud is built in Go with a clean internal architecture:
 ## Requirements
 
 - Go 1.21+
-- Docker on target servers
+- Podman on target servers
 - SSH access to target servers
 
 ## License

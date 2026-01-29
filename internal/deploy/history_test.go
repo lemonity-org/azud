@@ -83,19 +83,19 @@ func TestHistoryStore_GetLastSuccessful(t *testing.T) {
 	// Create records with different statuses
 	record1 := NewDeploymentRecord("test-service", "test:v1", "v1", "", []string{"host1"})
 	record1.Complete()
-	store.Record(record1)
+	_ = store.Record(record1)
 
 	time.Sleep(10 * time.Millisecond)
 
 	record2 := NewDeploymentRecord("test-service", "test:v2", "v2", "", []string{"host1"})
 	record2.Fail(nil)
-	store.Record(record2)
+	_ = store.Record(record2)
 
 	time.Sleep(10 * time.Millisecond)
 
 	record3 := NewDeploymentRecord("test-service", "test:v3", "v3", "", []string{"host1"})
 	record3.Complete()
-	store.Record(record3)
+	_ = store.Record(record3)
 
 	// Get last successful
 	last, err := store.GetLastSuccessful("test-service")
@@ -115,13 +115,13 @@ func TestHistoryStore_GetLastDeployment(t *testing.T) {
 	// Create records
 	record1 := NewDeploymentRecord("test-service", "test:v1", "v1", "", []string{"host1"})
 	record1.Complete()
-	store.Record(record1)
+	_ = store.Record(record1)
 
 	time.Sleep(10 * time.Millisecond)
 
 	record2 := NewDeploymentRecord("test-service", "test:v2", "v2", "", []string{"host1"})
 	record2.Fail(nil)
-	store.Record(record2)
+	_ = store.Record(record2)
 
 	// Get last deployment (regardless of status)
 	last, err := store.GetLastDeployment("test-service")

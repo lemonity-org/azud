@@ -253,7 +253,7 @@ func (h *HistoryStore) cleanup(service string) {
 	if h.retainDays > 0 && len(files) > h.retainDays {
 		toRemove := files[:len(files)-h.retainDays]
 		for _, file := range toRemove {
-			os.Remove(file)
+			_ = os.Remove(file)
 		}
 	}
 }

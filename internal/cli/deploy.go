@@ -97,7 +97,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Create deployer
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
@@ -126,7 +126,7 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 	log.Header("Azud Redeploy")
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
@@ -153,7 +153,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	log.Header("Rolling back to %s", version)
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -133,10 +134,10 @@ func getConfigTemplate() string {
 # Service name (used as container name prefix)
 service: my-app
 
-# Docker image name (registry/user/image)
+# Container image name (registry/user/image)
 image: my-user/my-app
 
-# Docker registry configuration
+# Container registry configuration
 registry:
   # Registry server (omit for Docker Hub)
   # server: ghcr.io
@@ -315,7 +316,7 @@ echo "Running pre-connect hook..."
 func getPreBuildHook() string {
 	return `#!/bin/sh
 # Pre-build hook
-# Runs before building the Docker image
+# Runs before building the container image
 # Exit with non-zero to abort deployment
 
 echo "Running pre-build hook..."
@@ -348,8 +349,7 @@ func appendToGitignore() {
 		return
 	}
 
-	// Check if already present
-	if contains(string(content), ".azud/secrets") {
+	if strings.Contains(string(content), ".azud/secrets") {
 		return
 	}
 
@@ -358,23 +358,10 @@ func appendToGitignore() {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	_, _ = f.WriteString("\n# Azud secrets\n.azud/secrets\n")
 	fmt.Println("Added .azud/secrets to .gitignore")
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsString(s, substr))
-}
-
-func containsString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func getGitHubActionsWorkflow() string {
@@ -427,8 +414,10 @@ jobs:
           EOF
           chmod 600 .azud/secrets
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
 
       - name: Login to Container Registry
         uses: docker/login-action@v3
@@ -437,7 +426,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Docker Image
+      - name: Build and Push Container Image
         run: |
           azud build --no-cache
 

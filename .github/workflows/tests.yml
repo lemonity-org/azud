@@ -1,0 +1,75 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Go test & lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.8.0
+
+      - name: Run tests
+        run: go test ./...
+
+  integration:
+    name: Integration (setup)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Install Podman and SSH server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman netavark aardvark-dns openssh-server
+
+      - name: Configure SSH for root
+        run: |
+          sudo mkdir -p /root/.ssh
+          ssh-keygen -t ed25519 -N "" -f /tmp/azud_ci_key
+          sudo tee /root/.ssh/authorized_keys < /tmp/azud_ci_key.pub >/dev/null
+          sudo chmod 600 /root/.ssh/authorized_keys
+          sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo service ssh restart
+
+      - name: Run setup integration test
+        env:
+          AZUD_INTEGRATION: "1"
+          AZUD_INTEGRATION_HOST: "127.0.0.1"
+          AZUD_INTEGRATION_USER: "root"
+          AZUD_INTEGRATION_PORT: "22"
+          AZUD_INTEGRATION_KEY: "/tmp/azud_ci_key"
+        run: go test ./... -run TestSetupIntegration -count=1
+
+      - name: Cleanup podman artifacts
+        if: always()
+        run: |
+          sudo podman rm -f azud-proxy azud-it 2>/dev/null || true
+          sudo podman network rm azud 2>/dev/null || true
+          sudo podman volume rm caddy_data caddy_config 2>/dev/null || true

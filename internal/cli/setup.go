@@ -9,8 +9,8 @@ import (
 
 	"github.com/adriancarayol/azud/internal/config"
 	"github.com/adriancarayol/azud/internal/deploy"
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
 	"github.com/adriancarayol/azud/internal/server"
 	"github.com/adriancarayol/azud/internal/ssh"
@@ -22,8 +22,8 @@ var setupCmd = &cobra.Command{
 	Long: `Setup servers and deploy the application.
 
 This command performs a complete setup:
-  1. Bootstraps servers (installs Docker)
-  2. Logs into the Docker registry
+  1. Bootstraps servers (installs Podman)
+  2. Logs into the container registry
   3. Starts the Caddy proxy
   4. Deploys accessories (databases, caches)
   5. Deploys the application
@@ -62,9 +62,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	log.Info("Setting up %d server(s)...", len(hosts))
 
-	// Create SSH client
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	// Step 1: Bootstrap servers
 	if !setupSkipBootstrap {
@@ -80,14 +79,14 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 2: Registry login
 	log.Header("Step 2: Registry Login")
 	if cfg.Registry.Username != "" {
-		dockerClient := docker.NewClient(sshClient)
-		registryManager := docker.NewRegistryManager(dockerClient)
+		podmanClient := podman.NewClient(sshClient)
+		registryManager := podman.NewRegistryManager(podmanClient)
 
 		password := getRegistryPassword()
 		if password == "" {
 			log.Warn("Registry password not found, skipping login")
 		} else {
-			regConfig := &docker.RegistryConfig{
+			regConfig := &podman.RegistryConfig{
 				Server:   cfg.Registry.Server,
 				Username: cfg.Registry.Username,
 				Password: password,
@@ -205,17 +204,13 @@ func getRegistryPassword() string {
 }
 
 func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	for name, accessory := range cfg.Accessories {
 		log.Info("Deploying accessory: %s", name)
 
-		// Determine host
-		host := accessory.Host
-		if host == "" && len(accessory.Hosts) > 0 {
-			host = accessory.Hosts[0]
-		}
+		host := accessory.PrimaryHost()
 		if host == "" {
 			log.Warn("No host configured for accessory %s, skipping", name)
 			continue
@@ -230,7 +225,7 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		}
 
 		// Build container config
-		containerConfig := &docker.ContainerConfig{
+		containerConfig := &podman.ContainerConfig{
 			Name:    containerName,
 			Image:   accessory.Image,
 			Detach:  true,
@@ -264,7 +259,7 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		}
 
 		// Pull image
-		imageManager := docker.NewImageManager(dockerClient)
+		imageManager := podman.NewImageManager(podmanClient)
 		if err := imageManager.Pull(host, accessory.Image); err != nil {
 			log.HostError(host, "Failed to pull image for %s: %v", name, err)
 			continue

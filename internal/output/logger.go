@@ -54,7 +54,7 @@ func (l *Logger) Info(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s\n", cyan("INFO"), msg)
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", cyan("INFO"), msg)
 }
 
 // Success prints a success message
@@ -62,7 +62,7 @@ func (l *Logger) Success(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s\n", green("OK"), msg)
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", green("OK"), msg)
 }
 
 // Warn prints a warning message
@@ -70,7 +70,7 @@ func (l *Logger) Warn(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s\n", yellow("WARN"), msg)
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", yellow("WARN"), msg)
 }
 
 // Error prints an error message
@@ -78,7 +78,7 @@ func (l *Logger) Error(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.err, "%s %s\n", red("ERROR"), msg)
+	_, _ = fmt.Fprintf(l.err, "%s %s\n", red("ERROR"), msg)
 }
 
 // Fatal prints an error message and exits
@@ -95,7 +95,7 @@ func (l *Logger) Debug(format string, args ...interface{}) {
 		return
 	}
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s\n", faint("DEBUG"), faint(msg))
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", faint("DEBUG"), faint(msg))
 }
 
 // Host prints a message prefixed with the host
@@ -103,7 +103,7 @@ func (l *Logger) Host(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s\n", magenta(fmt.Sprintf("[%s]", host)), msg)
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", magenta(fmt.Sprintf("[%s]", host)), msg)
 }
 
 // HostSuccess prints a success message for a host
@@ -111,7 +111,7 @@ func (l *Logger) HostSuccess(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s %s\n", magenta(fmt.Sprintf("[%s]", host)), green("OK"), msg)
+	_, _ = fmt.Fprintf(l.out, "%s %s %s\n", magenta(fmt.Sprintf("[%s]", host)), green("OK"), msg)
 }
 
 // HostError prints an error message for a host
@@ -119,7 +119,7 @@ func (l *Logger) HostError(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.err, "%s %s %s\n", magenta(fmt.Sprintf("[%s]", host)), red("ERROR"), msg)
+	_, _ = fmt.Fprintf(l.err, "%s %s %s\n", magenta(fmt.Sprintf("[%s]", host)), red("ERROR"), msg)
 }
 
 // Step prints a step message
@@ -127,14 +127,14 @@ func (l *Logger) Step(step int, total int, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "%s %s\n", cyan(fmt.Sprintf("[%d/%d]", step, total)), msg)
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", cyan(fmt.Sprintf("[%d/%d]", step, total)), msg)
 }
 
 // Command prints a command being executed
 func (l *Logger) Command(cmd string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Fprintf(l.out, "%s %s\n", faint("$"), faint(cmd))
+	_, _ = fmt.Fprintf(l.out, "%s %s\n", faint("$"), faint(cmd))
 }
 
 // Output prints command output
@@ -146,7 +146,7 @@ func (l *Logger) Output(output string) {
 	}
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for _, line := range lines {
-		fmt.Fprintf(l.out, "  %s\n", line)
+		_, _ = fmt.Fprintf(l.out, "  %s\n", line)
 	}
 }
 
@@ -155,22 +155,22 @@ func (l *Logger) Header(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.out, "\n%s\n", bold(msg))
-	fmt.Fprintf(l.out, "%s\n", strings.Repeat("-", len(msg)))
+	_, _ = fmt.Fprintf(l.out, "\n%s\n", bold(msg))
+	_, _ = fmt.Fprintf(l.out, "%s\n", strings.Repeat("-", len(msg)))
 }
 
 // Print prints a plain message
 func (l *Logger) Print(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Fprintf(l.out, format, args...)
+	_, _ = fmt.Fprintf(l.out, format, args...)
 }
 
 // Println prints a plain message with newline
 func (l *Logger) Println(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Fprintf(l.out, format+"\n", args...)
+	_, _ = fmt.Fprintf(l.out, format+"\n", args...)
 }
 
 // Timer tracks and logs operation duration
@@ -247,24 +247,24 @@ func (l *Logger) Table(headers []string, rows [][]string) {
 
 	// Print header
 	for i, h := range headers {
-		fmt.Fprintf(l.out, "%-*s  ", widths[i], bold(h))
+		_, _ = fmt.Fprintf(l.out, "%-*s  ", widths[i], bold(h))
 	}
-	fmt.Fprintln(l.out)
+	_, _ = fmt.Fprintln(l.out)
 
 	// Print separator
 	for i := range headers {
-		fmt.Fprintf(l.out, "%s  ", strings.Repeat("-", widths[i]))
+		_, _ = fmt.Fprintf(l.out, "%s  ", strings.Repeat("-", widths[i]))
 	}
-	fmt.Fprintln(l.out)
+	_, _ = fmt.Fprintln(l.out)
 
 	// Print rows
 	for _, row := range rows {
 		for i, cell := range row {
 			if i < len(widths) {
-				fmt.Fprintf(l.out, "%-*s  ", widths[i], cell)
+				_, _ = fmt.Fprintf(l.out, "%-*s  ", widths[i], cell)
 			}
 		}
-		fmt.Fprintln(l.out)
+		_, _ = fmt.Fprintln(l.out)
 	}
 }
 

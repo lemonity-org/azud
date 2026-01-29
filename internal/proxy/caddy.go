@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -325,40 +323,3 @@ func (c *CaddyClient) Stop(host string) error {
 	return err
 }
 
-// directAPIRequest makes a direct HTTP request (for local testing)
-func (c *CaddyClient) directAPIRequest(baseURL, method, path string, body interface{}) ([]byte, error) {
-	var bodyReader io.Reader
-	if body != nil {
-		bodyJSON, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		bodyReader = bytes.NewReader(bodyJSON)
-	}
-
-	req, err := http.NewRequest(method, baseURL+path, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
-	}
-
-	return data, nil
-}

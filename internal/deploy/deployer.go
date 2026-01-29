@@ -7,41 +7,40 @@ import (
 	"time"
 
 	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
-// Deployer handles application deployments
+// Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
 	cfg          *config.Config
 	sshClient    *ssh.Client
-	docker       *docker.Client
-	containers   *docker.ContainerManager
-	images       *docker.ImageManager
-	registry     *docker.RegistryManager
+	podman       *podman.Client
+	containers   *podman.ContainerManager
+	images       *podman.ImageManager
+	registry     *podman.RegistryManager
 	proxy        *proxy.Manager
 	hooks        *HookRunner
 	history      *HistoryStore
 	log          *output.Logger
 }
 
-// NewDeployer creates a new deployer
 func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) *Deployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}
 
-	dockerClient := docker.NewClient(sshClient)
+	podmanClient := podman.NewClient(sshClient)
 
 	return &Deployer{
 		cfg:        cfg,
 		sshClient:  sshClient,
-		docker:     dockerClient,
-		containers: docker.NewContainerManager(dockerClient),
-		images:     docker.NewImageManager(dockerClient),
-		registry:   docker.NewRegistryManager(dockerClient),
+		podman:     podmanClient,
+		containers: podman.NewContainerManager(podmanClient),
+		images:     podman.NewImageManager(podmanClient),
+		registry:   podman.NewRegistryManager(podmanClient),
 		proxy:      proxy.NewManager(sshClient, log),
 		hooks:      NewHookRunner(cfg.HooksPath, log),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
@@ -49,7 +48,6 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 	}
 }
 
-// DeployOptions holds deployment options
 type DeployOptions struct {
 	// Image tag to deploy (default: latest)
 	Version string
@@ -70,7 +68,8 @@ type DeployOptions struct {
 	Destination string
 }
 
-// Deploy performs a full deployment
+// Deploy pulls the image, starts new containers, health-checks them,
+// registers them with the proxy, and drains old containers.
 func (d *Deployer) Deploy(opts *DeployOptions) error {
 	timer := d.log.NewTimer("Deployment")
 	defer timer.Stop()
@@ -95,7 +94,6 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 			version = image[idx+1:]
 		}
 	}
-	// Otherwise use the image as-is from config (with its tag)
 	d.log.Header("Deploying %s", image)
 
 	// Get target hosts
@@ -116,7 +114,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	// Run pre-deploy hook
 	if err := d.hooks.Run("pre-deploy"); err != nil {
 		record.Fail(err)
-		d.history.Record(record)
+		_ = d.history.Record(record)
 		return fmt.Errorf("pre-deploy hook failed: %w", err)
 	}
 
@@ -127,7 +125,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 		d.log.Info("Pulling image on all hosts...")
 		if err := d.pullImageOnHosts(hosts, image); err != nil {
 			record.Fail(err)
-			d.history.Record(record)
+			_ = d.history.Record(record)
 			return fmt.Errorf("failed to pull image: %w", err)
 		}
 	}
@@ -146,7 +144,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	if len(deployErrors) > 0 {
 		err := fmt.Errorf("deployment failed on %d host(s): %s", len(deployErrors), strings.Join(deployErrors, "; "))
 		record.Fail(err)
-		d.history.Record(record)
+		_ = d.history.Record(record)
 		return err
 	}
 
@@ -165,21 +163,14 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	return nil
 }
 
-// deployToHost deploys the application to a single host
 func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	d.log.Host(host, "Starting deployment...")
 
-	// Generate container names
 	newContainerName := d.generateContainerName("new")
 	oldContainerName := d.cfg.Service
-
-	// Check if old container exists
 	oldExists, _ := d.containers.Exists(host, oldContainerName)
-
-	// Build container configuration
 	containerConfig := d.buildContainerConfig(image, newContainerName)
 
-	// Start new container
 	d.log.Host(host, "Starting new container...")
 	_, err := d.containers.Run(host, containerConfig)
 	if err != nil {
@@ -197,7 +188,7 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 
 		if err := d.waitForHealthy(host, newContainerName); err != nil {
 			// Cleanup failed container
-			d.containers.Remove(host, newContainerName, true)
+			_ = d.containers.Remove(host, newContainerName, true)
 			return fmt.Errorf("health check failed: %w", err)
 		}
 	}
@@ -249,88 +240,14 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	return nil
 }
 
-// buildContainerConfig creates a container configuration from the app config
-func (d *Deployer) buildContainerConfig(image, name string) *docker.ContainerConfig {
-	config := &docker.ContainerConfig{
-		Name:    name,
-		Image:   image,
-		Detach:  true,
-		Restart: "unless-stopped",
-		Network: "azud",
-		Labels: map[string]string{
-			"azud.managed": "true",
-			"azud.service": d.cfg.Service,
-		},
-		Env: make(map[string]string),
-	}
-
-	// Add environment variables
-	for key, value := range d.cfg.Env.Clear {
-		config.Env[key] = value
-	}
-
-	// Add secret environment variable names
-	config.SecretEnv = d.cfg.Env.Secret
-
-	// Add volumes
-	config.Volumes = d.cfg.Volumes
-
-	// Add resource limits from server config
-	// These would come from role-specific options
-
-	// Add health check if configured
-	if d.cfg.Proxy.Healthcheck.Path != "" {
-		config.HealthCmd = fmt.Sprintf("curl -f http://localhost:%d%s || exit 1",
-			d.cfg.Proxy.AppPort, d.cfg.Proxy.Healthcheck.Path)
-		config.HealthInterval = d.cfg.Proxy.Healthcheck.Interval
-		config.HealthTimeout = d.cfg.Proxy.Healthcheck.Timeout
-		config.HealthRetries = 3
-	}
-
-	return config
+func (d *Deployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
+	return newAppContainerConfig(d.cfg, image, name, nil)
 }
 
-// waitForHealthy waits for a container to pass health checks
 func (d *Deployer) waitForHealthy(host, container string) error {
-	timeout := d.cfg.Deploy.DeployTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-
-	deadline := time.Now().Add(timeout)
-	checkInterval := 2 * time.Second
-
-	for time.Now().Before(deadline) {
-		// Check container health status
-		result, err := d.docker.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
-		if err == nil && result.ExitCode == 0 {
-			status := strings.Trim(result.Stdout, "'\n ")
-			switch status {
-			case "healthy":
-				return nil
-			case "unhealthy":
-				return fmt.Errorf("container is unhealthy")
-			}
-		}
-
-		// Also try direct health check
-		healthPath := d.cfg.Proxy.Healthcheck.Path
-		if healthPath != "" {
-			checkCmd := fmt.Sprintf("docker exec %s curl -sf http://localhost:%d%s",
-				container, d.cfg.Proxy.AppPort, healthPath)
-			result, err := d.sshClient.Execute(host, checkCmd)
-			if err == nil && result.ExitCode == 0 {
-				return nil
-			}
-		}
-
-		time.Sleep(checkInterval)
-	}
-
-	return fmt.Errorf("timeout waiting for container to become healthy")
+	return waitForContainerHealthy(d.cfg, d.podman, d.sshClient, host, container)
 }
 
-// registerWithProxy registers the service with Caddy
 func (d *Deployer) registerWithProxy(host, upstream string) error {
 	serviceConfig := &proxy.ServiceConfig{
 		Name:           d.cfg.Service,
@@ -344,18 +261,13 @@ func (d *Deployer) registerWithProxy(host, upstream string) error {
 	return d.proxy.RegisterService(host, serviceConfig)
 }
 
-// updateProxyUpstream updates the upstream address in the proxy
 func (d *Deployer) updateProxyUpstream(host, oldUpstream, newUpstream string) error {
-	// Add new upstream first
 	if err := d.proxy.AddUpstream(host, d.cfg.Proxy.Host, newUpstream); err != nil {
 		return err
 	}
-
-	// Remove old upstream
 	return d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, oldUpstream)
 }
 
-// pullImageOnHosts pulls the image on multiple hosts in parallel
 func (d *Deployer) pullImageOnHosts(hosts []string, image string) error {
 	errors := d.images.PullAll(hosts, image)
 	if len(errors) > 0 {
@@ -368,7 +280,6 @@ func (d *Deployer) pullImageOnHosts(hosts []string, image string) error {
 	return nil
 }
 
-// getTargetHosts returns the hosts to deploy to
 func (d *Deployer) getTargetHosts(opts *DeployOptions) []string {
 	if len(opts.Hosts) > 0 {
 		return opts.Hosts
@@ -385,12 +296,11 @@ func (d *Deployer) getTargetHosts(opts *DeployOptions) []string {
 	return d.cfg.GetAllHosts()
 }
 
-// generateContainerName generates a unique container name
 func (d *Deployer) generateContainerName(suffix string) string {
 	return fmt.Sprintf("%s-%s-%d", d.cfg.Service, suffix, time.Now().Unix())
 }
 
-// Rollback rolls back to a previous version
+// Rollback re-deploys a previous version.
 func (d *Deployer) Rollback(version string) error {
 	d.log.Header("Rolling back to %s", version)
 
@@ -401,95 +311,37 @@ func (d *Deployer) Rollback(version string) error {
 	return d.Deploy(opts)
 }
 
-// Redeploy performs a quick redeployment without building
 func (d *Deployer) Redeploy(opts *DeployOptions) error {
 	d.log.Header("Redeploying %s", d.cfg.Service)
 	return d.Deploy(opts)
 }
 
-// Stop stops the application on all hosts
 func (d *Deployer) Stop(hosts []string) error {
-	if len(hosts) == 0 {
-		hosts = d.cfg.GetAllHosts()
-	}
-
-	d.log.Info("Stopping %s on %d host(s)...", d.cfg.Service, len(hosts))
-
-	var wg sync.WaitGroup
-	errors := make(chan error, len(hosts))
-
-	for _, host := range hosts {
-		wg.Add(1)
-		go func(h string) {
-			defer wg.Done()
-			if err := d.containers.Stop(h, d.cfg.Service, 30); err != nil {
-				errors <- fmt.Errorf("%s: %w", h, err)
-				return
-			}
-			d.log.HostSuccess(h, "stopped")
-		}(host)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	var errs []string
-	for err := range errors {
-		errs = append(errs, err.Error())
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("stop failed: %s", strings.Join(errs, "; "))
-	}
-
-	return nil
+	return d.runOnHosts("stop", hosts, func(host string) error {
+		return d.containers.Stop(host, d.cfg.Service, 30)
+	})
 }
 
-// Start starts the application on all hosts
 func (d *Deployer) Start(hosts []string) error {
-	if len(hosts) == 0 {
-		hosts = d.cfg.GetAllHosts()
-	}
-
-	d.log.Info("Starting %s on %d host(s)...", d.cfg.Service, len(hosts))
-
-	var wg sync.WaitGroup
-	errors := make(chan error, len(hosts))
-
-	for _, host := range hosts {
-		wg.Add(1)
-		go func(h string) {
-			defer wg.Done()
-			if err := d.containers.Start(h, d.cfg.Service); err != nil {
-				errors <- fmt.Errorf("%s: %w", h, err)
-				return
-			}
-			d.log.HostSuccess(h, "started")
-		}(host)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	var errs []string
-	for err := range errors {
-		errs = append(errs, err.Error())
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("start failed: %s", strings.Join(errs, "; "))
-	}
-
-	return nil
+	return d.runOnHosts("start", hosts, func(host string) error {
+		return d.containers.Start(host, d.cfg.Service)
+	})
 }
 
-// Restart restarts the application on all hosts
 func (d *Deployer) Restart(hosts []string) error {
+	return d.runOnHosts("restart", hosts, func(host string) error {
+		return d.containers.Restart(host, d.cfg.Service, 30)
+	})
+}
+
+// runOnHosts executes an operation on all hosts in parallel, collecting errors.
+func (d *Deployer) runOnHosts(operation string, hosts []string, fn func(host string) error) error {
 	if len(hosts) == 0 {
 		hosts = d.cfg.GetAllHosts()
 	}
 
-	d.log.Info("Restarting %s on %d host(s)...", d.cfg.Service, len(hosts))
+	label := strings.ToUpper(operation[:1]) + operation[1:]
+	d.log.Info("%sing %s on %d host(s)...", label, d.cfg.Service, len(hosts))
 
 	var wg sync.WaitGroup
 	errors := make(chan error, len(hosts))
@@ -498,11 +350,11 @@ func (d *Deployer) Restart(hosts []string) error {
 		wg.Add(1)
 		go func(h string) {
 			defer wg.Done()
-			if err := d.containers.Restart(h, d.cfg.Service, 30); err != nil {
+			if err := fn(h); err != nil {
 				errors <- fmt.Errorf("%s: %w", h, err)
 				return
 			}
-			d.log.HostSuccess(h, "restarted")
+			d.log.HostSuccess(h, "%sed", operation)
 		}(host)
 	}
 
@@ -515,7 +367,7 @@ func (d *Deployer) Restart(hosts []string) error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("restart failed: %s", strings.Join(errs, "; "))
+		return fmt.Errorf("%s failed: %s", operation, strings.Join(errs, "; "))
 	}
 
 	return nil
