@@ -85,6 +85,8 @@ proxy:
   http_port: 8080
   https_port: 8443
   app_port: 80
+  healthcheck:
+    path: /
 
 ssh:
   user: %s
