@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="azud-logo.png" alt="Azud Logo" width="200">
+</p>
+
 # Azud
 
 **Deploy web apps anywhere with zero downtime**
