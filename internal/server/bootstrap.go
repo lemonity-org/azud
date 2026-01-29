@@ -240,7 +240,7 @@ func (b *Bootstrapper) createNetwork(host string) error {
 		return nil
 	}
 
-	result, err = b.sshClient.Execute(host, "podman network create --dns-enabled azud")
+	result, err = b.sshClient.Execute(host, "podman network create azud")
 	if err != nil {
 		return err
 	}
