@@ -138,7 +138,7 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 
 	// Create proxy manager
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManager(sshClient, log)
 
@@ -192,7 +192,7 @@ func runProxyStop(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManager(sshClient, log)
 
@@ -217,7 +217,7 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManager(sshClient, log)
 
@@ -250,7 +250,7 @@ func runProxyLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManager(sshClient, log)
 
@@ -277,7 +277,7 @@ func runProxyStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManager(sshClient, log)
 
@@ -314,7 +314,7 @@ func runProxyRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManager(sshClient, log)
 

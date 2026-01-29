@@ -270,7 +270,7 @@ func (b *Bootstrapper) CheckPodman(host string) (*PodmanStatus, error) {
 
 	result, err = b.sshClient.Execute(host, "podman ps -q | wc -l")
 	if err == nil && result.ExitCode == 0 {
-		fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &status.ContainerCount)
+		_, _ = fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &status.ContainerCount)
 	}
 
 	return status, nil

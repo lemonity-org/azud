@@ -78,7 +78,7 @@ func runServerBootstrap(cmd *cobra.Command, args []string) error {
 	output.Info("Bootstrapping %d server(s)...", len(hosts))
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	bootstrapper := server.NewBootstrapper(sshClient, output.DefaultLogger)
 	return bootstrapper.BootstrapAll(hosts)
@@ -105,7 +105,7 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	output.Info("Executing on %d host(s): %s", len(hosts), command)
 	results := sshClient.ExecuteParallel(hosts, command)

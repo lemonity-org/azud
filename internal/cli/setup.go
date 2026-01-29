@@ -63,7 +63,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	log.Info("Setting up %d server(s)...", len(hosts))
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	// Step 1: Bootstrap servers
 	if !setupSkipBootstrap {

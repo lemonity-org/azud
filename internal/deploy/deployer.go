@@ -114,7 +114,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	// Run pre-deploy hook
 	if err := d.hooks.Run("pre-deploy"); err != nil {
 		record.Fail(err)
-		d.history.Record(record)
+		_ = d.history.Record(record)
 		return fmt.Errorf("pre-deploy hook failed: %w", err)
 	}
 
@@ -125,7 +125,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 		d.log.Info("Pulling image on all hosts...")
 		if err := d.pullImageOnHosts(hosts, image); err != nil {
 			record.Fail(err)
-			d.history.Record(record)
+			_ = d.history.Record(record)
 			return fmt.Errorf("failed to pull image: %w", err)
 		}
 	}
@@ -144,7 +144,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	if len(deployErrors) > 0 {
 		err := fmt.Errorf("deployment failed on %d host(s): %s", len(deployErrors), strings.Join(deployErrors, "; "))
 		record.Fail(err)
-		d.history.Record(record)
+		_ = d.history.Record(record)
 		return err
 	}
 
@@ -188,7 +188,7 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 
 		if err := d.waitForHealthy(host, newContainerName); err != nil {
 			// Cleanup failed container
-			d.containers.Remove(host, newContainerName, true)
+			_ = d.containers.Remove(host, newContainerName, true)
 			return fmt.Errorf("health check failed: %w", err)
 		}
 	}

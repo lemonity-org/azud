@@ -144,14 +144,14 @@ func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh
 	targetAddr := fmt.Sprintf("%s:%d", host, c.config.Port)
 	conn, err := proxyClient.Dial("tcp", targetAddr)
 	if err != nil {
-		proxyClient.Close()
+		_ = proxyClient.Close()
 		return nil, fmt.Errorf("failed to connect to %s via proxy: %w", targetAddr, err)
 	}
 
 	ncc, chans, reqs, err := ssh.NewClientConn(conn, targetAddr, sshConfig)
 	if err != nil {
-		conn.Close()
-		proxyClient.Close()
+		_ = conn.Close()
+		_ = proxyClient.Close()
 		return nil, fmt.Errorf("failed to create SSH connection to %s: %w", targetAddr, err)
 	}
 
@@ -276,7 +276,7 @@ func (c *Client) getAgentAuth() ssh.AuthMethod {
 	// Check if agent has any keys before adding it as auth method
 	signers, err := agentClient.Signers()
 	if err != nil || len(signers) == 0 {
-		conn.Close()
+		_ = conn.Close()
 		return nil
 	}
 

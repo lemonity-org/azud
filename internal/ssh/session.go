@@ -54,7 +54,7 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
@@ -94,7 +94,7 @@ func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr 
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	// Request pseudo-terminal
 	modes := ssh.TerminalModes{
@@ -125,7 +125,7 @@ func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	session.Stdout = stdout
 	session.Stderr = stderr
@@ -145,7 +145,7 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open local file: %w", err)
 	}
-	defer localFile.Close()
+	defer func() { _ = localFile.Close() }()
 
 	stat, err := localFile.Stat()
 	if err != nil {
@@ -157,7 +157,7 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	// Get remote directory and filename
 	remoteDir := filepath.Dir(remotePath)
@@ -166,16 +166,16 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 	// Start SCP in sink mode
 	go func() {
 		w, _ := session.StdinPipe()
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 
 		// Send file info
-		fmt.Fprintf(w, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), remoteFile)
+		_, _ = fmt.Fprintf(w, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), remoteFile)
 
 		// Send file content
-		io.Copy(w, localFile)
+		_, _ = io.Copy(w, localFile)
 
 		// Send end marker
-		fmt.Fprint(w, "\x00")
+		_, _ = fmt.Fprint(w, "\x00")
 	}()
 
 	// Run SCP command
@@ -198,18 +198,18 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	remoteDir := filepath.Dir(remotePath)
 	remoteFile := filepath.Base(remotePath)
 
 	go func() {
 		w, _ := session.StdinPipe()
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 
-		fmt.Fprintf(w, "C%04o %d %s\n", mode, len(content), remoteFile)
-		w.Write(content)
-		fmt.Fprint(w, "\x00")
+		_, _ = fmt.Fprintf(w, "C%04o %d %s\n", mode, len(content), remoteFile)
+		_, _ = w.Write(content)
+		_, _ = fmt.Fprint(w, "\x00")
 	}()
 
 	cmd := fmt.Sprintf("scp -t %s", remoteDir)
@@ -231,14 +231,14 @@ func (c *Connection) Download(remotePath, localPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	// Create local file
 	localFile, err := os.Create(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to create local file: %w", err)
 	}
-	defer localFile.Close()
+	defer func() { _ = localFile.Close() }()
 
 	// Get remote file content via cat
 	var stdout bytes.Buffer

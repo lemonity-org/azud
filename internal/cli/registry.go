@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -100,7 +99,7 @@ func runRegistryLogin(cmd *cobra.Command, args []string) error {
 
 	// Create SSH client
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	// Create registry manager
 	podmanClient := podman.NewClient(sshClient)
@@ -153,7 +152,7 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 
 	// Create SSH client
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	// Create registry manager
 	podmanClient := podman.NewClient(sshClient)
@@ -176,35 +175,3 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-var registryListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List images in a registry",
-	Long: `List images in the configured registry.
-
-This command uses the container registry API to list available images.
-
-Example:
-  azud registry list`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// This would require implementing registry API calls
-		// For now, just show a helpful message
-		server := cfg.Registry.Server
-		if server == "" {
-			server = "docker.io"
-		}
-
-		output.Info("Registry: %s", server)
-		output.Info("Image: %s", cfg.Image)
-		output.Println("")
-		output.Println("To list tags, use:")
-		output.Println("  podman images %s", cfg.Image)
-		return nil
-	},
-}
-
-func maskPassword(s string) string {
-	if len(s) <= 4 {
-		return "****"
-	}
-	return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
-}

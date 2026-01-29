@@ -79,7 +79,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -143,7 +143,7 @@ func runScaleStatus(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)

@@ -358,7 +358,7 @@ func appendToGitignore() {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	_, _ = f.WriteString("\n# Azud secrets\n.azud/secrets\n")
 	fmt.Println("Added .azud/secrets to .gitignore")

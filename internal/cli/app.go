@@ -141,7 +141,7 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -183,7 +183,7 @@ func runAppExec(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -217,7 +217,7 @@ func runAppStart(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
@@ -230,7 +230,7 @@ func runAppStop(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
@@ -243,7 +243,7 @@ func runAppRestart(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
@@ -261,7 +261,7 @@ func runAppDetails(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -379,7 +379,7 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	log.Info("Starting accessory %s on %s...", name, host)
 
@@ -400,7 +400,7 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 	host := accessory.PrimaryHost()
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -428,7 +428,7 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 	host := accessory.PrimaryHost()
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -474,7 +474,7 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 	host := accessory.PrimaryHost()
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)

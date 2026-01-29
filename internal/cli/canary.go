@@ -114,7 +114,7 @@ func init() {
 	canaryDeployCmd.Flags().IntVar(&canaryInitialWeight, "weight", 0, "Initial traffic percentage (default: from config or 10)")
 	canaryDeployCmd.Flags().BoolVar(&canarySkipPull, "skip-pull", false, "Skip image pull")
 	canaryDeployCmd.Flags().BoolVar(&canarySkipHealth, "skip-health", false, "Skip health check")
-	canaryDeployCmd.MarkFlagRequired("version")
+	_ = canaryDeployCmd.MarkFlagRequired("version")
 
 	// Add subcommands
 	canaryCmd.AddCommand(canaryDeployCmd)

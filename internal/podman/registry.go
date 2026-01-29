@@ -206,9 +206,7 @@ func ParseImageRef(image string) (registry, repository, tag string) {
 
 func BuildImageRef(registry, repository, tag string) string {
 	if registry == "docker.io" {
-		if strings.HasPrefix(repository, "library/") {
-			repository = strings.TrimPrefix(repository, "library/")
-		}
+		repository = strings.TrimPrefix(repository, "library/")
 		if tag == "latest" {
 			return repository
 		}

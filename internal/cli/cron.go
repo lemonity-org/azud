@@ -137,7 +137,7 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -201,7 +201,7 @@ func runCronStop(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -262,7 +262,7 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -310,7 +310,7 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -369,7 +369,7 @@ func runCronList(cmd *cobra.Command, args []string) error {
 	}
 
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)

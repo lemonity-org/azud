@@ -104,7 +104,7 @@ func (l *Loader) loadSecrets(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	secrets := make(map[string]string)
 	scanner := bufio.NewScanner(file)

@@ -185,7 +185,7 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 
 			if err := c.waitForHealthy(host, canaryContainerName); err != nil {
 				// Cleanup failed canary
-				c.containers.Remove(host, canaryContainerName, true)
+				_ = c.containers.Remove(host, canaryContainerName, true)
 				c.state.Status = CanaryStatusNone
 				return fmt.Errorf("canary health check failed on %s: %w", host, err)
 			}
@@ -232,7 +232,7 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 	record.Metadata["type"] = "canary"
 	record.Metadata["weight"] = fmt.Sprintf("%d", initialWeight)
 	record.Complete()
-	c.history.Record(record)
+	_ = c.history.Record(record)
 
 	return nil
 }
@@ -361,7 +361,7 @@ func (c *CanaryDeployer) Rollback() error {
 		Metadata:        map[string]string{"type": "canary_rollback"},
 	}
 	record.Duration = record.CompletedAt.Sub(record.StartedAt)
-	c.history.Record(record)
+	_ = c.history.Record(record)
 
 	// Reset state
 	c.state = &CanaryState{

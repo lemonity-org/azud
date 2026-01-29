@@ -118,7 +118,7 @@ func cleanupRemote(t *testing.T, host, user, keyPath string, port int) {
 		Keys:                  []string{keyPath},
 		InsecureIgnoreHostKey: true,
 	})
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, _ = client.Execute(host, "podman rm -f azud-proxy azud-it 2>/dev/null || true")
 	_, _ = client.Execute(host, "podman network rm azud 2>/dev/null || true")

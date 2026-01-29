@@ -246,14 +246,14 @@ func (c *Client) GetInfo(host string) (*Info, error) {
 	parts := strings.Split(output, "|")
 	if len(parts) >= 9 {
 		info.ServerVersion = parts[0]
-		fmt.Sscanf(parts[1], "%d", &info.ContainersTotal)
-		fmt.Sscanf(parts[2], "%d", &info.ContainersRunning)
-		fmt.Sscanf(parts[3], "%d", &info.ContainersPaused)
-		fmt.Sscanf(parts[4], "%d", &info.ContainersStopped)
-		fmt.Sscanf(parts[5], "%d", &info.Images)
+		_, _ = fmt.Sscanf(parts[1], "%d", &info.ContainersTotal)
+		_, _ = fmt.Sscanf(parts[2], "%d", &info.ContainersRunning)
+		_, _ = fmt.Sscanf(parts[3], "%d", &info.ContainersPaused)
+		_, _ = fmt.Sscanf(parts[4], "%d", &info.ContainersStopped)
+		_, _ = fmt.Sscanf(parts[5], "%d", &info.Images)
 		info.Driver = parts[6]
 		info.MemoryTotal = parts[7]
-		fmt.Sscanf(parts[8], "%d", &info.CPUs)
+		_, _ = fmt.Sscanf(parts[8], "%d", &info.CPUs)
 	}
 
 	return info, nil

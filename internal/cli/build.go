@@ -148,7 +148,7 @@ func buildRemote(imageTag, latestTag, version string) error {
 
 	// Create SSH client for remote builder
 	sshClient := createSSHClient()
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	imageManager := podman.NewImageManager(podmanClient)
