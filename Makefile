@@ -111,15 +111,15 @@ verify:
 run: build
 	./$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
 
-## docker-build: Build Docker image for azud-proxy
-docker-build:
-	@echo "Building Docker image..."
-	docker build -t azud-proxy:$(VERSION) -f Dockerfile.proxy .
+## podman-build: Build container image for azud-proxy
+podman-build:
+	@echo "Building container image..."
+	podman build -t azud-proxy:$(VERSION) -f Dockerfile.proxy .
 
-## docker-push: Push Docker image
-docker-push:
-	@echo "Pushing Docker image..."
-	docker push azud-proxy:$(VERSION)
+## podman-push: Push container image
+podman-push:
+	@echo "Pushing container image..."
+	podman push azud-proxy:$(VERSION)
 
 ## help: Show this help message
 help:

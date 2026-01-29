@@ -1,4 +1,4 @@
-package docker
+package podman
 
 import (
 	"encoding/base64"
@@ -7,40 +7,30 @@ import (
 	"strings"
 )
 
-// RegistryConfig holds registry authentication configuration
+// RegistryConfig holds registry authentication configuration.
 type RegistryConfig struct {
-	// Registry server URL (e.g., docker.io, ghcr.io, gcr.io)
-	Server string
-
-	// Username
+	Server   string // e.g., docker.io, ghcr.io, gcr.io
 	Username string
-
-	// Password or token
 	Password string
-
-	// Email (optional, some registries require it)
-	Email string
+	Email    string
 }
 
-// RegistryManager handles registry operations
+// RegistryManager handles container registry operations via Podman.
 type RegistryManager struct {
 	client *Client
 }
 
-// NewRegistryManager creates a new registry manager
 func NewRegistryManager(client *Client) *RegistryManager {
 	return &RegistryManager{client: client}
 }
 
-// Login logs into a Docker registry
 func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 	server := config.Server
 	if server == "" {
 		server = "docker.io"
 	}
 
-	// Use --password-stdin for security
-	cmd := fmt.Sprintf("echo %q | docker login --username %q --password-stdin %s",
+	cmd := fmt.Sprintf("echo %q | podman login --username %q --password-stdin %s",
 		config.Password, config.Username, server)
 
 	result, err := m.client.ssh.Execute(host, cmd)
@@ -55,14 +45,13 @@ func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 	return nil
 }
 
-// LoginAll logs into a registry on multiple hosts
 func (m *RegistryManager) LoginAll(hosts []string, config *RegistryConfig) map[string]error {
 	server := config.Server
 	if server == "" {
 		server = "docker.io"
 	}
 
-	cmd := fmt.Sprintf("echo %q | docker login --username %q --password-stdin %s",
+	cmd := fmt.Sprintf("echo %q | podman login --username %q --password-stdin %s",
 		config.Password, config.Username, server)
 
 	results := m.client.ssh.ExecuteParallel(hosts, cmd)
@@ -77,7 +66,6 @@ func (m *RegistryManager) LoginAll(hosts []string, config *RegistryConfig) map[s
 	return errors
 }
 
-// Logout logs out from a Docker registry
 func (m *RegistryManager) Logout(host, server string) error {
 	if server == "" {
 		server = "docker.io"
@@ -95,7 +83,6 @@ func (m *RegistryManager) Logout(host, server string) error {
 	return nil
 }
 
-// LogoutAll logs out from a registry on multiple hosts
 func (m *RegistryManager) LogoutAll(hosts []string, server string) map[string]error {
 	if server == "" {
 		server = "docker.io"
@@ -113,41 +100,37 @@ func (m *RegistryManager) LogoutAll(hosts []string, server string) map[string]er
 	return errors
 }
 
-// IsLoggedIn checks if already logged into a registry
 func (m *RegistryManager) IsLoggedIn(host, server string) (bool, error) {
 	if server == "" {
 		server = "docker.io"
 	}
 
-	// Check docker config for auth entry
-	result, err := m.client.Execute(host, "cat", "~/.docker/config.json")
+	checkCmd := `cat ${XDG_RUNTIME_DIR}/containers/auth.json 2>/dev/null || cat ~/.config/containers/auth.json 2>/dev/null || cat /run/containers/0/auth.json 2>/dev/null`
+	result, err := m.client.ssh.Execute(host, checkCmd)
 	if err != nil {
-		return false, nil // Config doesn't exist, not logged in
+		return false, nil // Auth file doesn't exist, not logged in
 	}
 
 	if result.ExitCode != 0 {
 		return false, nil
 	}
 
-	var config dockerConfigFile
+	var config containerAuthFile
 	if err := json.Unmarshal([]byte(result.Stdout), &config); err != nil {
 		return false, nil
 	}
 
-	// Check for auth entry
 	serverKey := normalizeRegistry(server)
 	_, hasAuth := config.Auths[serverKey]
 	return hasAuth, nil
 }
 
-// GetAuthToken generates an auth token for a registry
 func (m *RegistryManager) GetAuthToken(config *RegistryConfig) string {
 	auth := config.Username + ":" + config.Password
 	return base64.StdEncoding.EncodeToString([]byte(auth))
 }
 
-// dockerConfigFile represents the Docker config.json structure
-type dockerConfigFile struct {
+type containerAuthFile struct {
 	Auths       map[string]authConfig `json:"auths"`
 	CredsStore  string                `json:"credsStore,omitempty"`
 	CredHelpers map[string]string     `json:"credHelpers,omitempty"`
@@ -158,14 +141,11 @@ type authConfig struct {
 	Email string `json:"email,omitempty"`
 }
 
-// normalizeRegistry normalizes registry server names
 func normalizeRegistry(server string) string {
-	// Handle common registry aliases
 	server = strings.TrimPrefix(server, "https://")
 	server = strings.TrimPrefix(server, "http://")
 	server = strings.TrimSuffix(server, "/")
 
-	// Docker Hub has special handling
 	if server == "docker.io" || server == "registry-1.docker.io" || server == "" {
 		return "https://index.docker.io/v1/"
 	}
@@ -173,7 +153,6 @@ func normalizeRegistry(server string) string {
 	return server
 }
 
-// CommonRegistries holds configurations for common registries
 var CommonRegistries = map[string]string{
 	"dockerhub": "docker.io",
 	"docker":    "docker.io",
@@ -189,7 +168,6 @@ var CommonRegistries = map[string]string{
 	"gitlab":    "registry.gitlab.com",
 }
 
-// ResolveRegistry resolves a registry alias to its server URL
 func ResolveRegistry(name string) string {
 	name = strings.ToLower(name)
 	if server, ok := CommonRegistries[name]; ok {
@@ -198,13 +176,11 @@ func ResolveRegistry(name string) string {
 	return name
 }
 
-// ParseImageRef parses an image reference into registry, repository, and tag
+// ParseImageRef parses an image reference into registry, repository, and tag.
 func ParseImageRef(image string) (registry, repository, tag string) {
-	// Default values
 	registry = "docker.io"
 	tag = "latest"
 
-	// Split off tag/digest
 	if idx := strings.LastIndex(image, ":"); idx != -1 && !strings.Contains(image[idx:], "/") {
 		tag = image[idx+1:]
 		image = image[:idx]
@@ -213,15 +189,12 @@ func ParseImageRef(image string) (registry, repository, tag string) {
 		image = image[:idx]
 	}
 
-	// Split registry from repository
 	parts := strings.SplitN(image, "/", 2)
 	if len(parts) == 2 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":")) {
 		registry = parts[0]
 		repository = parts[1]
 	} else {
-		// No registry specified, use docker.io
 		if len(parts) == 1 {
-			// Official image (e.g., "nginx")
 			repository = "library/" + parts[0]
 		} else {
 			repository = image
@@ -231,10 +204,8 @@ func ParseImageRef(image string) (registry, repository, tag string) {
 	return registry, repository, tag
 }
 
-// BuildImageRef builds a full image reference from components
 func BuildImageRef(registry, repository, tag string) string {
 	if registry == "docker.io" {
-		// For Docker Hub, we can omit the registry
 		if strings.HasPrefix(repository, "library/") {
 			repository = strings.TrimPrefix(repository, "library/")
 		}
@@ -250,11 +221,10 @@ func BuildImageRef(registry, repository, tag string) string {
 	return registry + "/" + repository + ":" + tag
 }
 
-// ECRLogin handles AWS ECR login which requires special handling
+// ECRLogin handles AWS ECR login via the AWS CLI.
 func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
-	// ECR login requires AWS CLI
 	cmd := fmt.Sprintf(
-		"aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com",
+		"aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com",
 		region, accountID, region,
 	)
 
@@ -270,10 +240,10 @@ func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 	return nil
 }
 
-// GCRLogin handles Google Container Registry login
+// GCRLogin handles Google Container Registry login via a JSON key file.
 func (m *RegistryManager) GCRLogin(host, keyFile string) error {
 	cmd := fmt.Sprintf(
-		"cat %s | docker login -u _json_key --password-stdin https://gcr.io",
+		"cat %s | podman login -u _json_key --password-stdin https://gcr.io",
 		keyFile,
 	)
 

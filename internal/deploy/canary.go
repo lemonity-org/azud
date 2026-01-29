@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
@@ -38,13 +38,14 @@ type CanaryState struct {
 	StableContainer string       `json:"stable_container"`
 }
 
-// CanaryDeployer handles canary deployment operations
+// CanaryDeployer manages weighted traffic-shifting deployments where a new
+// version receives a fraction of traffic before full promotion.
 type CanaryDeployer struct {
 	cfg        *config.Config
 	sshClient  *ssh.Client
-	docker     *docker.Client
-	containers *docker.ContainerManager
-	images     *docker.ImageManager
+	podman     *podman.Client
+	containers *podman.ContainerManager
+	images     *podman.ImageManager
 	proxy      *proxy.Manager
 	history    *HistoryStore
 	log        *output.Logger
@@ -52,20 +53,19 @@ type CanaryDeployer struct {
 	stateMu    sync.RWMutex
 }
 
-// NewCanaryDeployer creates a new canary deployer
 func NewCanaryDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) *CanaryDeployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}
 
-	dockerClient := docker.NewClient(sshClient)
+	podmanClient := podman.NewClient(sshClient)
 
 	return &CanaryDeployer{
 		cfg:        cfg,
 		sshClient:  sshClient,
-		docker:     dockerClient,
-		containers: docker.NewContainerManager(dockerClient),
-		images:     docker.NewImageManager(dockerClient),
+		podman:     podmanClient,
+		containers: podman.NewContainerManager(podmanClient),
+		images:     podman.NewImageManager(podmanClient),
 		proxy:      proxy.NewManager(sshClient, log),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
@@ -75,7 +75,6 @@ func NewCanaryDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Lo
 	}
 }
 
-// CanaryDeployOptions holds options for canary deployment
 type CanaryDeployOptions struct {
 	// Version/tag to deploy as canary
 	Version string
@@ -96,7 +95,6 @@ type CanaryDeployOptions struct {
 	Destination string
 }
 
-// Deploy starts a canary deployment
 func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -239,7 +237,7 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 	return nil
 }
 
-// Promote promotes the canary to full production traffic
+// Promote shifts all traffic to the canary and removes the old stable container.
 func (c *CanaryDeployer) Promote() error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -309,7 +307,7 @@ func (c *CanaryDeployer) Promote() error {
 	return nil
 }
 
-// Rollback removes the canary and restores full traffic to stable
+// Rollback removes the canary and restores full traffic to the stable version.
 func (c *CanaryDeployer) Rollback() error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -374,7 +372,6 @@ func (c *CanaryDeployer) Rollback() error {
 	return nil
 }
 
-// Status returns the current canary deployment status
 func (c *CanaryDeployer) Status() *CanaryState {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
@@ -384,7 +381,6 @@ func (c *CanaryDeployer) Status() *CanaryState {
 	return &stateCopy
 }
 
-// SetWeight adjusts the traffic weight for the canary
 func (c *CanaryDeployer) SetWeight(weight int) error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -419,81 +415,12 @@ func (c *CanaryDeployer) SetWeight(weight int) error {
 	return nil
 }
 
-// buildContainerConfig creates a container configuration for the canary
-func (c *CanaryDeployer) buildContainerConfig(image, name string) *docker.ContainerConfig {
-	containerConfig := &docker.ContainerConfig{
-		Name:    name,
-		Image:   image,
-		Detach:  true,
-		Restart: "unless-stopped",
-		Network: "azud",
-		Labels: map[string]string{
-			"azud.managed": "true",
-			"azud.service": c.cfg.Service,
-			"azud.canary":  "true",
-		},
-		Env: make(map[string]string),
-	}
-
-	// Add environment variables
-	for key, value := range c.cfg.Env.Clear {
-		containerConfig.Env[key] = value
-	}
-
-	// Add secret environment variable names
-	containerConfig.SecretEnv = c.cfg.Env.Secret
-
-	// Add volumes
-	containerConfig.Volumes = c.cfg.Volumes
-
-	// Add health check if configured
-	if c.cfg.Proxy.Healthcheck.Path != "" {
-		containerConfig.HealthCmd = fmt.Sprintf("curl -f http://localhost:%d%s || exit 1",
-			c.cfg.Proxy.AppPort, c.cfg.Proxy.Healthcheck.Path)
-		containerConfig.HealthInterval = c.cfg.Proxy.Healthcheck.Interval
-		containerConfig.HealthTimeout = c.cfg.Proxy.Healthcheck.Timeout
-		containerConfig.HealthRetries = 3
-	}
-
-	return containerConfig
+func (c *CanaryDeployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
+	return newAppContainerConfig(c.cfg, image, name, map[string]string{
+		"azud.canary": "true",
+	})
 }
 
-// waitForHealthy waits for the container to pass health checks
 func (c *CanaryDeployer) waitForHealthy(host, container string) error {
-	timeout := c.cfg.Deploy.DeployTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-
-	deadline := time.Now().Add(timeout)
-	checkInterval := 2 * time.Second
-
-	for time.Now().Before(deadline) {
-		// Check container health status
-		result, err := c.docker.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
-		if err == nil && result.ExitCode == 0 {
-			status := strings.Trim(result.Stdout, "'\n ")
-			switch status {
-			case "healthy":
-				return nil
-			case "unhealthy":
-				return fmt.Errorf("container is unhealthy")
-			}
-		}
-
-		// Also try direct health check
-		healthPath := c.cfg.Proxy.Healthcheck.Path
-		if healthPath != "" {
-			checkCmd := fmt.Sprintf("docker exec %s curl -sf http://localhost:%d%s",
-				container, c.cfg.Proxy.AppPort, healthPath)
-			result, err := c.sshClient.Execute(host, checkCmd)
-			if err == nil && result.ExitCode == 0 {
-				return nil
-			}
-		}
-
-		time.Sleep(checkInterval)
-	}
-
-	return fmt.Errorf("timeout waiting for container to become healthy")
+	return waitForContainerHealthy(c.cfg, c.podman, c.sshClient, host, container)
 }

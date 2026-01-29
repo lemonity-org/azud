@@ -7,20 +7,20 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 )
 
 var registryCmd = &cobra.Command{
 	Use:   "registry",
-	Short: "Manage Docker registry authentication",
-	Long:  `Commands for managing Docker registry authentication on deployment servers.`,
+	Short: "Manage container registry authentication",
+	Long:  `Commands for managing container registry authentication on deployment servers.`,
 }
 
 var registryLoginCmd = &cobra.Command{
 	Use:   "login",
-	Short: "Login to Docker registry on all servers",
-	Long: `Login to the configured Docker registry on all deployment servers.
+	Short: "Login to container registry on all servers",
+	Long: `Login to the configured container registry on all deployment servers.
 
 The registry credentials are read from the configuration file and secrets.
 
@@ -32,8 +32,8 @@ Example:
 
 var registryLogoutCmd = &cobra.Command{
 	Use:   "logout",
-	Short: "Logout from Docker registry on all servers",
-	Long: `Logout from the configured Docker registry on all deployment servers.
+	Short: "Logout from container registry on all servers",
+	Long: `Logout from the configured container registry on all deployment servers.
 
 Example:
   azud registry logout`,
@@ -103,11 +103,11 @@ func runRegistryLogin(cmd *cobra.Command, args []string) error {
 	defer sshClient.Close()
 
 	// Create registry manager
-	dockerClient := docker.NewClient(sshClient)
-	registryManager := docker.NewRegistryManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	registryManager := podman.NewRegistryManager(podmanClient)
 
 	// Login on all hosts
-	registryConfig := &docker.RegistryConfig{
+	registryConfig := &podman.RegistryConfig{
 		Server:   server,
 		Username: username,
 		Password: password,
@@ -156,8 +156,8 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 	defer sshClient.Close()
 
 	// Create registry manager
-	dockerClient := docker.NewClient(sshClient)
-	registryManager := docker.NewRegistryManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	registryManager := podman.NewRegistryManager(podmanClient)
 
 	// Logout on all hosts
 	errors := registryManager.LogoutAll(hosts, server)
@@ -176,14 +176,12 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// Additional registry utility commands
-
 var registryListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List images in a registry",
 	Long: `List images in the configured registry.
 
-This command uses the Docker registry API to list available images.
+This command uses the container registry API to list available images.
 
 Example:
   azud registry list`,
@@ -199,12 +197,11 @@ Example:
 		output.Info("Image: %s", cfg.Image)
 		output.Println("")
 		output.Println("To list tags, use:")
-		output.Println("  docker images %s", cfg.Image)
+		output.Println("  podman images %s", cfg.Image)
 		return nil
 	},
 }
 
-// Helper function to mask password in logs
 func maskPassword(s string) string {
 	if len(s) <= 4 {
 		return "****"

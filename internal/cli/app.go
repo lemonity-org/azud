@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/adriancarayol/azud/internal/deploy"
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 )
 
 var appCmd = &cobra.Command{
@@ -143,10 +143,10 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
-	logsConfig := &docker.LogsConfig{
+	logsConfig := &podman.LogsConfig{
 		Container: cfg.Service,
 		Follow:    appFollow,
 		Tail:      appTail,
@@ -185,10 +185,10 @@ func runAppExec(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
-	execConfig := &docker.ExecConfig{
+	execConfig := &podman.ExecConfig{
 		Container:   cfg.Service,
 		Command:     args,
 		Interactive: appInteractive,
@@ -263,8 +263,8 @@ func runAppDetails(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	log.Header("Application Details: %s", cfg.Service)
 
@@ -310,8 +310,6 @@ func getAppHosts() []string {
 	}
 	return cfg.GetAllHosts()
 }
-
-// Accessory commands
 
 var accessoryCmd = &cobra.Command{
 	Use:   "accessory",
@@ -375,10 +373,7 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.Host
-	if host == "" && len(accessory.Hosts) > 0 {
-		host = accessory.Hosts[0]
-	}
+	host := accessory.PrimaryHost()
 	if host == "" {
 		return fmt.Errorf("no host configured for accessory %s", name)
 	}
@@ -388,12 +383,7 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 
 	log.Info("Starting accessory %s on %s...", name, host)
 
-	// Use the setup function
-	if err := deployAccessories(sshClient, log); err != nil {
-		return err
-	}
-
-	return nil
+	return deployAccessories(sshClient, log)
 }
 
 func runAccessoryStop(cmd *cobra.Command, args []string) error {
@@ -407,16 +397,13 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.Host
-	if host == "" && len(accessory.Hosts) > 0 {
-		host = accessory.Hosts[0]
-	}
+	host := accessory.PrimaryHost()
 
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	containerName := fmt.Sprintf("%s-%s", cfg.Service, name)
 
@@ -438,20 +425,17 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.Host
-	if host == "" && len(accessory.Hosts) > 0 {
-		host = accessory.Hosts[0]
-	}
+	host := accessory.PrimaryHost()
 
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	containerName := fmt.Sprintf("%s-%s", cfg.Service, name)
 
-	logsConfig := &docker.LogsConfig{
+	logsConfig := &podman.LogsConfig{
 		Container: containerName,
 		Follow:    appFollow,
 		Tail:      appTail,
@@ -487,20 +471,17 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.Host
-	if host == "" && len(accessory.Hosts) > 0 {
-		host = accessory.Hosts[0]
-	}
+	host := accessory.PrimaryHost()
 
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	containerName := fmt.Sprintf("%s-%s", cfg.Service, name)
 
-	execConfig := &docker.ExecConfig{
+	execConfig := &podman.ExecConfig{
 		Container:   containerName,
 		Command:     cmdArgs,
 		Interactive: appInteractive,
@@ -519,8 +500,6 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
-
-// Config command
 
 var configCmd = &cobra.Command{
 	Use:   "config",

@@ -19,8 +19,8 @@ var serverCmd = &cobra.Command{
 
 var serverBootstrapCmd = &cobra.Command{
 	Use:   "bootstrap [hosts...]",
-	Short: "Bootstrap servers with Docker",
-	Long: `Install Docker and configure servers for deployment.
+	Short: "Bootstrap servers with Podman",
+	Long: `Install Podman and configure servers for deployment.
 
 If no hosts are specified, all hosts from the configuration will be bootstrapped.
 
@@ -37,9 +37,9 @@ var serverExecCmd = &cobra.Command{
 	Long: `Execute a command on one or more servers.
 
 Example:
-  azud server exec "docker ps"                  # Run on all servers
+  azud server exec "podman ps"                  # Run on all servers
   azud server exec --host 192.168.1.1 "uptime"  # Run on specific host
-  azud server exec --role web "docker ps"       # Run on servers with role`,
+  azud server exec --role web "podman ps"       # Run on servers with role`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runServerExec,
 }
@@ -65,12 +65,10 @@ func init() {
 func runServerBootstrap(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 
-	// Determine hosts to bootstrap
 	var hosts []string
 	if len(args) > 0 {
 		hosts = args
 	} else {
-		// Get all hosts from config
 		hosts = cfg.GetAllHosts()
 		if len(hosts) == 0 {
 			return fmt.Errorf("no hosts configured")
@@ -79,18 +77,11 @@ func runServerBootstrap(cmd *cobra.Command, args []string) error {
 
 	output.Info("Bootstrapping %d server(s)...", len(hosts))
 
-	// Create SSH client
 	sshClient := createSSHClient()
+	defer sshClient.Close()
 
-	// Create bootstrapper
 	bootstrapper := server.NewBootstrapper(sshClient, output.DefaultLogger)
-
-	// Bootstrap all hosts
-	if err := bootstrapper.BootstrapAll(hosts); err != nil {
-		return err
-	}
-
-	return nil
+	return bootstrapper.BootstrapAll(hosts)
 }
 
 func runServerExec(cmd *cobra.Command, args []string) error {
@@ -98,7 +89,6 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 
 	command := strings.Join(args, " ")
 
-	// Determine hosts
 	var hosts []string
 	if serverExecHost != "" {
 		hosts = []string{serverExecHost}
@@ -114,16 +104,12 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create SSH client
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
 	output.Info("Executing on %d host(s): %s", len(hosts), command)
-
-	// Execute on all hosts
 	results := sshClient.ExecuteParallel(hosts, command)
 
-	// Print results
 	var hasErrors bool
 	for _, result := range results {
 		if result.Success() {
@@ -150,7 +136,6 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// createSSHClient creates an SSH client from the configuration
 func createSSHClient() *ssh.Client {
 	sshConfig := &ssh.Config{
 		User:                  cfg.SSH.User,

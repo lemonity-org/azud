@@ -1,4 +1,4 @@
-package docker
+package podman
 
 import (
 	"fmt"
@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// Image represents a Docker image
 type Image struct {
 	ID         string
 	Repository string
@@ -15,17 +14,15 @@ type Image struct {
 	Created    time.Time
 }
 
-// ImageManager handles image operations
+// ImageManager handles image operations via Podman.
 type ImageManager struct {
 	client *Client
 }
 
-// NewImageManager creates a new image manager
 func NewImageManager(client *Client) *ImageManager {
 	return &ImageManager{client: client}
 }
 
-// Pull pulls an image from a registry
 func (m *ImageManager) Pull(host, image string) error {
 	result, err := m.client.Execute(host, "pull", image)
 	if err != nil {
@@ -39,7 +36,6 @@ func (m *ImageManager) Pull(host, image string) error {
 	return nil
 }
 
-// PullAll pulls an image on multiple hosts in parallel
 func (m *ImageManager) PullAll(hosts []string, image string) map[string]error {
 	results := m.client.ExecuteAll(hosts, "pull", image)
 	errors := make(map[string]error)
@@ -53,7 +49,6 @@ func (m *ImageManager) PullAll(hosts []string, image string) map[string]error {
 	return errors
 }
 
-// Push pushes an image to a registry
 func (m *ImageManager) Push(host, image string) error {
 	result, err := m.client.Execute(host, "push", image)
 	if err != nil {
@@ -67,7 +62,6 @@ func (m *ImageManager) Push(host, image string) error {
 	return nil
 }
 
-// Tag tags an image
 func (m *ImageManager) Tag(host, source, target string) error {
 	result, err := m.client.Execute(host, "tag", source, target)
 	if err != nil {
@@ -81,55 +75,26 @@ func (m *ImageManager) Tag(host, source, target string) error {
 	return nil
 }
 
-// BuildConfig holds configuration for building an image
+// BuildConfig holds configuration for building an image.
 type BuildConfig struct {
-	// Context directory
-	Context string
-
-	// Dockerfile path
+	Context    string
 	Dockerfile string
-
-	// Image tag
-	Tag string
-
-	// Additional tags
-	Tags []string
-
-	// Build arguments
-	Args map[string]string
-
-	// Target stage
-	Target string
-
-	// Cache from images
-	CacheFrom []string
-
-	// Platform
-	Platform string
-
-	// Don't use cache
-	NoCache bool
-
-	// Always pull base image
-	Pull bool
-
-	// Squash layers
-	Squash bool
-
-	// Build secrets
-	Secrets []string
-
-	// SSH agent sockets or keys
-	SSH []string
-
-	// Additional build options
-	Options []string
+	Tag        string
+	Tags       []string
+	Args       map[string]string
+	Target     string
+	CacheFrom  []string
+	Platform   string
+	NoCache    bool
+	Pull       bool
+	Squash     bool
+	Secrets    []string
+	SSH        []string
+	Options    []string
 }
 
-// BuildCommand generates a docker build command
 func (c *BuildConfig) BuildCommand() string {
-	var args []string
-	args = append(args, "build")
+	args := []string{"build"}
 
 	if c.Dockerfile != "" {
 		args = append(args, "-f", c.Dockerfile)
@@ -177,17 +142,15 @@ func (c *BuildConfig) BuildCommand() string {
 
 	args = append(args, c.Options...)
 
-	// Context must be last
 	context := c.Context
 	if context == "" {
 		context = "."
 	}
 	args = append(args, context)
 
-	return "docker " + strings.Join(args, " ")
+	return "podman " + strings.Join(args, " ")
 }
 
-// Build builds an image on a host
 func (m *ImageManager) Build(host string, config *BuildConfig) error {
 	cmd := config.BuildCommand()
 	result, err := m.client.ssh.Execute(host, cmd)
@@ -202,124 +165,104 @@ func (m *ImageManager) Build(host string, config *BuildConfig) error {
 	return nil
 }
 
-// BuildxConfig holds configuration for buildx builds
-type BuildxConfig struct {
+// ManifestBuildConfig holds configuration for multi-arch manifest builds.
+type ManifestBuildConfig struct {
 	BuildConfig
-
-	// Builder instance
-	Builder string
-
-	// Push after build
-	Push bool
-
-	// Load into docker
-	Load bool
-
-	// Cache to
-	CacheTo string
-
-	// Output
-	Output string
-
-	// Provenance
-	Provenance string
-
-	// SBOM
-	SBOM string
+	Platforms []string // e.g., ["linux/amd64", "linux/arm64"]
+	Push      bool
+	CacheTo   string
+	Output    string
 }
 
-// BuildxCommand generates a docker buildx build command
-func (c *BuildxConfig) BuildxCommand() string {
-	var args []string
-	args = append(args, "buildx", "build")
+// ManifestBuildCommands generates manifest create, per-platform builds,
+// and optional manifest push commands.
+func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
+	var commands []string
 
-	if c.Builder != "" {
-		args = append(args, "--builder", c.Builder)
+	tag := c.Tag
+	if tag == "" {
+		tag = "localhost/build:latest"
+	}
+
+	commands = append(commands, fmt.Sprintf("podman manifest create %s", tag))
+
+	for _, platform := range c.Platforms {
+		args := []string{"build"}
+
+		args = append(args, "--platform", platform)
+		args = append(args, "--manifest", tag)
+
+		if c.Dockerfile != "" {
+			args = append(args, "-f", c.Dockerfile)
+		}
+
+		for _, t := range c.Tags {
+			args = append(args, "-t", t)
+		}
+
+		for key, value := range c.Args {
+			args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
+		}
+
+		if c.Target != "" {
+			args = append(args, "--target", c.Target)
+		}
+
+		for _, cache := range c.CacheFrom {
+			args = append(args, "--cache-from", cache)
+		}
+
+		if c.NoCache {
+			args = append(args, "--no-cache")
+		}
+
+		if c.Pull {
+			args = append(args, "--pull")
+		}
+
+		for _, secret := range c.Secrets {
+			args = append(args, "--secret", secret)
+		}
+
+		for _, s := range c.SSH {
+			args = append(args, "--ssh", s)
+		}
+
+		args = append(args, c.Options...)
+
+		context := c.Context
+		if context == "" {
+			context = "."
+		}
+		args = append(args, context)
+
+		commands = append(commands, "podman "+strings.Join(args, " "))
 	}
 
 	if c.Push {
-		args = append(args, "--push")
+		commands = append(commands, fmt.Sprintf("podman manifest push %s %s", tag, tag))
 	}
 
-	if c.Load {
-		args = append(args, "--load")
-	}
-
-	if c.Dockerfile != "" {
-		args = append(args, "-f", c.Dockerfile)
-	}
-
-	if c.Tag != "" {
-		args = append(args, "-t", c.Tag)
-	}
-
-	for _, tag := range c.Tags {
-		args = append(args, "-t", tag)
-	}
-
-	for key, value := range c.Args {
-		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
-	}
-
-	if c.Target != "" {
-		args = append(args, "--target", c.Target)
-	}
-
-	for _, cache := range c.CacheFrom {
-		args = append(args, "--cache-from", cache)
-	}
-
-	if c.CacheTo != "" {
-		args = append(args, "--cache-to", c.CacheTo)
-	}
-
-	if c.Platform != "" {
-		args = append(args, "--platform", c.Platform)
-	}
-
-	if c.NoCache {
-		args = append(args, "--no-cache")
-	}
-
-	if c.Output != "" {
-		args = append(args, "--output", c.Output)
-	}
-
-	if c.Provenance != "" {
-		args = append(args, "--provenance", c.Provenance)
-	}
-
-	if c.SBOM != "" {
-		args = append(args, "--sbom", c.SBOM)
-	}
-
-	args = append(args, c.Options...)
-
-	context := c.Context
-	if context == "" {
-		context = "."
-	}
-	args = append(args, context)
-
-	return "docker " + strings.Join(args, " ")
+	return commands
 }
 
-// Buildx builds an image using buildx
-func (m *ImageManager) Buildx(host string, config *BuildxConfig) error {
-	cmd := config.BuildxCommand()
-	result, err := m.client.ssh.Execute(host, cmd)
-	if err != nil {
-		return err
-	}
+func (m *ImageManager) ManifestBuild(host string, config *ManifestBuildConfig) error {
+	commands := config.ManifestBuildCommands()
 
-	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to build image: %s", result.Stderr)
+	for _, cmd := range commands {
+		result, err := m.client.ssh.Execute(host, cmd)
+		if err != nil {
+			return err
+		}
+
+		if result.ExitCode != 0 {
+			return fmt.Errorf("failed to build image: %s", result.Stderr)
+		}
 	}
 
 	return nil
 }
 
-// List lists images on a host
 func (m *ImageManager) List(host string, filters map[string]string) ([]Image, error) {
 	args := []string{"images", "--format", "'{{.ID}}|{{.Repository}}|{{.Tag}}|{{.Size}}|{{.CreatedAt}}'"}
 
@@ -366,7 +309,6 @@ func (m *ImageManager) List(host string, filters map[string]string) ([]Image, er
 	return images, nil
 }
 
-// Remove removes an image
 func (m *ImageManager) Remove(host, image string, force bool) error {
 	args := []string{"rmi"}
 	if force {
@@ -386,7 +328,6 @@ func (m *ImageManager) Remove(host, image string, force bool) error {
 	return nil
 }
 
-// Prune removes unused images
 func (m *ImageManager) Prune(host string, all bool) error {
 	args := []string{"image", "prune", "-f"}
 	if all {
@@ -405,7 +346,6 @@ func (m *ImageManager) Prune(host string, all bool) error {
 	return nil
 }
 
-// Exists checks if an image exists on a host
 func (m *ImageManager) Exists(host, image string) (bool, error) {
 	result, err := m.client.Execute(host, "image", "inspect", image, "--format", "'{{.Id}}'")
 	if err != nil {
@@ -415,7 +355,6 @@ func (m *ImageManager) Exists(host, image string) (bool, error) {
 	return result.ExitCode == 0, nil
 }
 
-// GetDigest retrieves the digest of an image
 func (m *ImageManager) GetDigest(host, image string) (string, error) {
 	result, err := m.client.Execute(host, "image", "inspect", image, "--format", "'{{index .RepoDigests 0}}'")
 	if err != nil {
@@ -435,7 +374,6 @@ func (m *ImageManager) GetDigest(host, image string) (string, error) {
 	return digest, nil
 }
 
-// Save saves an image to a tar archive
 func (m *ImageManager) Save(host, image, outputPath string) error {
 	result, err := m.client.Execute(host, "save", "-o", outputPath, image)
 	if err != nil {
@@ -449,7 +387,6 @@ func (m *ImageManager) Save(host, image, outputPath string) error {
 	return nil
 }
 
-// Load loads an image from a tar archive
 func (m *ImageManager) Load(host, inputPath string) error {
 	result, err := m.client.Execute(host, "load", "-i", inputPath)
 	if err != nil {

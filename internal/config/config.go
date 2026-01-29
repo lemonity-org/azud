@@ -10,10 +10,10 @@ type Config struct {
 	// loadedSecrets holds secrets loaded from the secrets file (internal)
 	loadedSecrets map[string]string `yaml:"-"`
 
-	// Docker image name
+	// Container image name (OCI)
 	Image string `yaml:"image"`
 
-	// Docker registry configuration
+	// Container registry configuration
 	Registry RegistryConfig `yaml:"registry"`
 
 	// Target servers configuration by role
@@ -33,6 +33,9 @@ type Config struct {
 
 	// Deployment settings
 	Deploy DeployConfig `yaml:"deploy"`
+
+	// Podman configuration
+	Podman PodmanConfig `yaml:"podman"`
 
 	// SSH configuration
 	SSH SSHConfig `yaml:"ssh"`
@@ -62,7 +65,19 @@ type Config struct {
 	Aliases map[string]string `yaml:"aliases"`
 }
 
-// RegistryConfig holds Docker registry settings
+// PodmanConfig holds Podman runtime settings
+type PodmanConfig struct {
+	// Run containers in rootless mode
+	Rootless bool `yaml:"rootless"`
+
+	// Quadlet file directory path (auto-detected if empty)
+	QuadletPath string `yaml:"quadlet_path"`
+
+	// Network backend: netavark (default) or cni
+	NetworkBackend string `yaml:"network_backend"`
+}
+
+// RegistryConfig holds container registry settings
 type RegistryConfig struct {
 	// Registry server (e.g., ghcr.io, docker.io)
 	Server string `yaml:"server"`
@@ -102,6 +117,9 @@ type BuilderConfig struct {
 
 	// Target architecture
 	Arch string `yaml:"arch"`
+
+	// Target platforms for manifest builds (e.g., ["linux/amd64", "linux/arm64"])
+	Platforms []string `yaml:"platforms"`
 
 	// Cache configuration
 	Cache CacheConfig `yaml:"cache"`
@@ -246,7 +264,7 @@ type LoggingConfig struct {
 
 // AccessoryConfig holds accessory (database, cache, etc.) settings
 type AccessoryConfig struct {
-	// Docker image
+	// Container image (OCI)
 	Image string `yaml:"image"`
 
 	// Single host
@@ -401,6 +419,18 @@ type CronConfig struct {
 
 	// Environment variables specific to this job
 	Env map[string]string `yaml:"env"`
+}
+
+// PrimaryHost returns the first configured host for this accessory,
+// checking Host first, then Hosts[0].
+func (a *AccessoryConfig) PrimaryHost() string {
+	if a.Host != "" {
+		return a.Host
+	}
+	if len(a.Hosts) > 0 {
+		return a.Hosts[0]
+	}
+	return ""
 }
 
 // GetAllHosts returns all unique hosts from all roles

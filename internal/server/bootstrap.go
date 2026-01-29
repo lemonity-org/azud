@@ -8,13 +8,12 @@ import (
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
-// Bootstrapper handles server setup operations
+// Bootstrapper installs Podman and configures remote servers for deployment.
 type Bootstrapper struct {
 	sshClient *ssh.Client
 	log       *output.Logger
 }
 
-// NewBootstrapper creates a new server bootstrapper
 func NewBootstrapper(sshClient *ssh.Client, log *output.Logger) *Bootstrapper {
 	if log == nil {
 		log = output.DefaultLogger
@@ -25,7 +24,8 @@ func NewBootstrapper(sshClient *ssh.Client, log *output.Logger) *Bootstrapper {
 	}
 }
 
-// Bootstrap sets up a server with Docker and required components
+// Bootstrap installs Podman, configures the network backend, and creates
+// the azud network on the given host.
 func (b *Bootstrapper) Bootstrap(host string) error {
 	b.log.Host(host, "Starting bootstrap...")
 
@@ -36,27 +36,27 @@ func (b *Bootstrapper) Bootstrap(host string) error {
 	}
 	b.log.Host(host, "Detected OS: %s", osInfo.Name)
 
-	// Check if Docker is already installed
-	dockerInstalled, err := b.isDockerInstalled(host)
+	// Check if Podman is already installed
+	podmanInstalled, err := b.isPodmanInstalled(host)
 	if err != nil {
-		return fmt.Errorf("failed to check Docker: %w", err)
+		return fmt.Errorf("failed to check Podman: %w", err)
 	}
 
-	if dockerInstalled {
-		b.log.HostSuccess(host, "Docker already installed")
+	if podmanInstalled {
+		b.log.HostSuccess(host, "Podman already installed")
 	} else {
-		// Install Docker
-		b.log.Host(host, "Installing Docker...")
-		if err := b.installDocker(host, osInfo); err != nil {
-			return fmt.Errorf("failed to install Docker: %w", err)
+		// Install Podman
+		b.log.Host(host, "Installing Podman...")
+		if err := b.installPodman(host, osInfo); err != nil {
+			return fmt.Errorf("failed to install Podman: %w", err)
 		}
-		b.log.HostSuccess(host, "Docker installed")
+		b.log.HostSuccess(host, "Podman installed")
 	}
 
-	// Configure Docker daemon
-	b.log.Host(host, "Configuring Docker daemon...")
-	if err := b.configureDocker(host); err != nil {
-		return fmt.Errorf("failed to configure Docker: %w", err)
+	// Configure Podman (netavark network backend)
+	b.log.Host(host, "Configuring Podman...")
+	if err := b.configurePodman(host); err != nil {
+		return fmt.Errorf("failed to configure Podman: %w", err)
 	}
 
 	// Create azud network if it doesn't exist
@@ -69,7 +69,6 @@ func (b *Bootstrapper) Bootstrap(host string) error {
 	return nil
 }
 
-// BootstrapAll bootstraps multiple servers in parallel
 func (b *Bootstrapper) BootstrapAll(hosts []string) error {
 	b.log.Header("Bootstrapping %d server(s)", len(hosts))
 
@@ -96,7 +95,6 @@ func (b *Bootstrapper) BootstrapAll(hosts []string) error {
 	return nil
 }
 
-// OSInfo holds operating system information
 type OSInfo struct {
 	Name    string
 	Version string
@@ -104,9 +102,7 @@ type OSInfo struct {
 	Family  string // debian, rhel, etc.
 }
 
-// detectOS detects the operating system on the remote host
 func (b *Bootstrapper) detectOS(host string) (*OSInfo, error) {
-	// Try /etc/os-release first (most Linux distros)
 	result, err := b.sshClient.Execute(host, "cat /etc/os-release 2>/dev/null || true")
 	if err != nil {
 		return nil, err
@@ -137,7 +133,6 @@ func (b *Bootstrapper) detectOS(host string) (*OSInfo, error) {
 		}
 	}
 
-	// Determine family if not set
 	if info.Family == "" {
 		switch info.ID {
 		case "ubuntu", "debian", "linuxmint", "pop":
@@ -158,116 +153,69 @@ func (b *Bootstrapper) detectOS(host string) (*OSInfo, error) {
 	return info, nil
 }
 
-// isDockerInstalled checks if Docker is installed and running
-func (b *Bootstrapper) isDockerInstalled(host string) (bool, error) {
-	result, err := b.sshClient.Execute(host, "docker --version 2>/dev/null && docker info >/dev/null 2>&1 && echo 'ok'")
+func (b *Bootstrapper) isPodmanInstalled(host string) (bool, error) {
+	result, err := b.sshClient.Execute(host, "podman --version 2>/dev/null && echo 'ok'")
 	if err != nil {
-		return false, nil // Docker not installed or not running
+		return false, nil // Podman not installed
 	}
 	return strings.Contains(result.Stdout, "ok"), nil
 }
 
-// installDocker installs Docker on the remote host
-func (b *Bootstrapper) installDocker(host string, osInfo *OSInfo) error {
+func (b *Bootstrapper) installPodman(host string, osInfo *OSInfo) error {
 	var installCmd string
 
 	switch osInfo.Family {
 	case "debian":
-		installCmd = b.getDebianDockerInstall()
+		installCmd = b.getDebianPodmanInstall()
 	case "rhel":
-		installCmd = b.getRHELDockerInstall()
+		installCmd = b.getRHELPodmanInstall()
 	case "alpine":
-		installCmd = b.getAlpineDockerInstall()
+		installCmd = b.getAlpinePodmanInstall()
 	default:
-		// Try the convenience script as fallback
-		installCmd = b.getConvenienceScriptInstall()
+		return fmt.Errorf("unsupported OS family: %s", osInfo.Family)
 	}
 
 	result, err := b.sshClient.Execute(host, installCmd)
 	if err != nil {
-		return fmt.Errorf("docker installation failed: %w", err)
+		return fmt.Errorf("podman installation failed: %w", err)
 	}
 
 	if result.ExitCode != 0 {
-		return fmt.Errorf("docker installation failed: %s", result.Stderr)
-	}
-
-	// Start and enable Docker
-	startCmd := "systemctl start docker && systemctl enable docker"
-	result, err = b.sshClient.Execute(host, startCmd)
-	if err != nil {
-		return fmt.Errorf("failed to start Docker: %w", err)
-	}
-
-	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to start Docker: %s", result.Stderr)
+		return fmt.Errorf("podman installation failed: %s", result.Stderr)
 	}
 
 	return nil
 }
 
-// getDebianDockerInstall returns the Docker installation command for Debian/Ubuntu
-func (b *Bootstrapper) getDebianDockerInstall() string {
+func (b *Bootstrapper) getDebianPodmanInstall() string {
 	return `
 set -e
 apt-get update
-apt-get install -y ca-certificates curl gnupg
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt-get install -y podman netavark aardvark-dns
 `
 }
 
-// getRHELDockerInstall returns the Docker installation command for RHEL/CentOS
-func (b *Bootstrapper) getRHELDockerInstall() string {
+func (b *Bootstrapper) getRHELPodmanInstall() string {
 	return `
 set -e
-yum install -y yum-utils
-yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+dnf install -y podman netavark aardvark-dns
 `
 }
 
-// getAlpineDockerInstall returns the Docker installation command for Alpine
-func (b *Bootstrapper) getAlpineDockerInstall() string {
+func (b *Bootstrapper) getAlpinePodmanInstall() string {
 	return `
 set -e
-apk add --update docker docker-cli-compose
-rc-update add docker boot
+apk add --update podman netavark aardvark-dns
 `
 }
 
-// getConvenienceScriptInstall returns the convenience script installation
-func (b *Bootstrapper) getConvenienceScriptInstall() string {
-	return `
-set -e
-curl -fsSL https://get.docker.com | sh
+func (b *Bootstrapper) configurePodman(host string) error {
+	containersConf := `[network]
+network_backend = "netavark"
 `
-}
 
-// configureDocker configures the Docker daemon
-func (b *Bootstrapper) configureDocker(host string) error {
-	// Create daemon.json with optimized settings
-	daemonConfig := `{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  },
-  "storage-driver": "overlay2",
-  "live-restore": true
-}`
-
-	// Write daemon.json
-	cmd := fmt.Sprintf(`mkdir -p /etc/docker && cat > /etc/docker/daemon.json << 'EOF'
-%s
-EOF`, daemonConfig)
+	cmd := fmt.Sprintf(`mkdir -p /etc/containers && cat > /etc/containers/containers.conf << 'EOF'
+%sEOF`, containersConf)
 
 	result, err := b.sshClient.Execute(host, cmd)
 	if err != nil {
@@ -275,22 +223,14 @@ EOF`, daemonConfig)
 	}
 
 	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to write daemon.json: %s", result.Stderr)
-	}
-
-	// Reload Docker
-	result, err = b.sshClient.Execute(host, "systemctl reload docker 2>/dev/null || systemctl restart docker")
-	if err != nil {
-		return err
+		return fmt.Errorf("failed to write containers.conf: %s", result.Stderr)
 	}
 
 	return nil
 }
 
-// createNetwork creates the azud Docker network
 func (b *Bootstrapper) createNetwork(host string) error {
-	// Check if network exists
-	result, err := b.sshClient.Execute(host, "docker network inspect azud >/dev/null 2>&1 && echo 'exists'")
+	result, err := b.sshClient.Execute(host, "podman network inspect azud >/dev/null 2>&1 && echo 'exists'")
 	if err != nil {
 		return err
 	}
@@ -300,8 +240,7 @@ func (b *Bootstrapper) createNetwork(host string) error {
 		return nil
 	}
 
-	// Create network
-	result, err = b.sshClient.Execute(host, "docker network create azud")
+	result, err = b.sshClient.Execute(host, "podman network create --dns-enabled azud")
 	if err != nil {
 		return err
 	}
@@ -313,29 +252,23 @@ func (b *Bootstrapper) createNetwork(host string) error {
 	return nil
 }
 
-// CheckDocker checks Docker status on a host
-func (b *Bootstrapper) CheckDocker(host string) (*DockerStatus, error) {
-	status := &DockerStatus{Host: host}
+func (b *Bootstrapper) CheckPodman(host string) (*PodmanStatus, error) {
+	status := &PodmanStatus{Host: host}
 
-	// Check if Docker is installed
-	result, err := b.sshClient.Execute(host, "docker --version")
+	result, err := b.sshClient.Execute(host, "podman --version")
 	if err != nil || result.ExitCode != 0 {
-		status.Installed = false
 		return status, nil
 	}
 	status.Installed = true
 	status.Version = strings.TrimSpace(result.Stdout)
 
-	// Check if Docker is running
-	result, err = b.sshClient.Execute(host, "docker info --format '{{.ServerVersion}}'")
+	result, err = b.sshClient.Execute(host, "podman info --format '{{.Version.Version}}'")
 	if err != nil || result.ExitCode != 0 {
-		status.Running = false
 		return status, nil
 	}
 	status.Running = true
 
-	// Get container count
-	result, err = b.sshClient.Execute(host, "docker ps -q | wc -l")
+	result, err = b.sshClient.Execute(host, "podman ps -q | wc -l")
 	if err == nil && result.ExitCode == 0 {
 		fmt.Sscanf(strings.TrimSpace(result.Stdout), "%d", &status.ContainerCount)
 	}
@@ -343,8 +276,7 @@ func (b *Bootstrapper) CheckDocker(host string) (*DockerStatus, error) {
 	return status, nil
 }
 
-// DockerStatus holds Docker status information
-type DockerStatus struct {
+type PodmanStatus struct {
 	Host           string
 	Installed      bool
 	Running        bool
@@ -352,7 +284,6 @@ type DockerStatus struct {
 	ContainerCount int
 }
 
-// ExecuteOnAll executes a command on all hosts
 func (b *Bootstrapper) ExecuteOnAll(hosts []string, cmd string) []*ssh.Result {
 	return b.sshClient.ExecuteParallel(hosts, cmd)
 }

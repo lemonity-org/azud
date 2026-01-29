@@ -1,4 +1,4 @@
-package docker
+package podman
 
 import (
 	"fmt"
@@ -8,92 +8,57 @@ import (
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
-// Client executes Docker commands on remote hosts via SSH
+// Client executes Podman commands on remote hosts via SSH.
 type Client struct {
 	ssh *ssh.Client
 }
 
-// NewClient creates a new Docker client
 func NewClient(sshClient *ssh.Client) *Client {
 	return &Client{
 		ssh: sshClient,
 	}
 }
 
-// Execute runs a docker command on the specified host
 func (c *Client) Execute(host string, args ...string) (*ssh.Result, error) {
-	cmd := "docker " + strings.Join(args, " ")
+	cmd := "podman " + strings.Join(args, " ")
 	return c.ssh.Execute(host, cmd)
 }
 
-// ExecuteAll runs a docker command on multiple hosts in parallel
 func (c *Client) ExecuteAll(hosts []string, args ...string) []*ssh.Result {
-	cmd := "docker " + strings.Join(args, " ")
+	cmd := "podman " + strings.Join(args, " ")
 	return c.ssh.ExecuteParallel(hosts, cmd)
 }
 
-// ContainerConfig holds configuration for running a container
+// ContainerConfig holds configuration for running a container.
 type ContainerConfig struct {
-	// Container name
-	Name string
+	Name      string
+	Image     string
+	Command   []string
+	Env       map[string]string
+	SecretEnv []string // Secret env var names (resolved from secrets file)
+	Ports     []string // host:container or ip:host:container
+	Volumes   []string // host:container or host:container:options
+	Labels    map[string]string
+	Network   string
+	Networks  []string
+	Memory    string // e.g., "512m"
+	CPUs      string // e.g., "0.5"
+	Restart   string // no, always, unless-stopped, on-failure[:max-retries]
+	Detach    bool
+	Remove    bool
+	Pull      bool
 
-	// Image to run
-	Image string
-
-	// Command to execute (optional)
-	Command []string
-
-	// Environment variables
-	Env map[string]string
-
-	// Secret environment variables (from secrets file)
-	SecretEnv []string
-
-	// Port mappings (host:container or ip:host:container)
-	Ports []string
-
-	// Volume mounts (host:container or host:container:options)
-	Volumes []string
-
-	// Labels
-	Labels map[string]string
-
-	// Network to connect to
-	Network string
-
-	// Additional networks to connect to
-	Networks []string
-
-	// Resource limits
-	Memory string // e.g., "512m"
-	CPUs   string // e.g., "0.5"
-
-	// Restart policy
-	Restart string // no, always, unless-stopped, on-failure[:max-retries]
-
-	// Run in detached mode
-	Detach bool
-
-	// Remove container when it exits
-	Remove bool
-
-	// Pull image before running
-	Pull bool
-
-	// Healthcheck configuration
+	// Healthcheck
 	HealthCmd      string
 	HealthInterval string
 	HealthTimeout  string
 	HealthRetries  int
 
-	// Additional docker run options
-	Options []string
+	Options []string // Additional run options
 }
 
-// BuildRunCommand builds a docker run command from the configuration
 func (c *ContainerConfig) BuildRunCommand() string {
-	var args []string
-	args = append(args, "run")
+	args := []string{"run"}
 
 	if c.Detach {
 		args = append(args, "-d")
@@ -107,42 +72,34 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		args = append(args, "--name", c.Name)
 	}
 
-	// Environment variables
 	for key, value := range c.Env {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// Secret environment variables (resolved from secrets file)
 	for _, key := range c.SecretEnv {
 		if value, ok := config.GetSecret(key); ok && value != "" {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 		} else {
-			// Fallback: pass just the key, expecting env to be set on server
 			args = append(args, "-e", key)
 		}
 	}
 
-	// Port mappings
 	for _, port := range c.Ports {
 		args = append(args, "-p", port)
 	}
 
-	// Volume mounts
 	for _, vol := range c.Volumes {
 		args = append(args, "-v", vol)
 	}
 
-	// Labels
 	for key, value := range c.Labels {
 		args = append(args, "-l", fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// Network
 	if c.Network != "" {
 		args = append(args, "--network", c.Network)
 	}
 
-	// Resource limits
 	if c.Memory != "" {
 		args = append(args, "--memory", c.Memory)
 	}
@@ -150,14 +107,11 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		args = append(args, "--cpus", c.CPUs)
 	}
 
-	// Restart policy
 	if c.Restart != "" {
 		args = append(args, "--restart", c.Restart)
 	}
 
-	// Healthcheck
 	if c.HealthCmd != "" {
-		// Quote the health command to prevent shell interpretation
 		quotedCmd := fmt.Sprintf("'%s'", strings.ReplaceAll(c.HealthCmd, "'", "'\\''"))
 		args = append(args, "--health-cmd", quotedCmd)
 		if c.HealthInterval != "" {
@@ -171,51 +125,30 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		}
 	}
 
-	// Additional options
 	args = append(args, c.Options...)
-
-	// Image
 	args = append(args, c.Image)
 
-	// Command
 	if len(c.Command) > 0 {
 		args = append(args, c.Command...)
 	}
 
-	return "docker " + strings.Join(args, " ")
+	return "podman " + strings.Join(args, " ")
 }
 
-// ExecConfig holds configuration for executing a command in a container
+// ExecConfig holds configuration for executing a command in a container.
 type ExecConfig struct {
-	// Container name or ID
-	Container string
-
-	// Command to execute
-	Command []string
-
-	// Interactive mode (keep STDIN open)
+	Container   string
+	Command     []string
 	Interactive bool
-
-	// Allocate a pseudo-TTY
-	TTY bool
-
-	// Run as user
-	User string
-
-	// Working directory
-	WorkDir string
-
-	// Environment variables
-	Env map[string]string
-
-	// Detached mode
-	Detach bool
+	TTY         bool
+	User        string
+	WorkDir     string
+	Env         map[string]string
+	Detach      bool
 }
 
-// BuildExecCommand builds a docker exec command from the configuration
 func (c *ExecConfig) BuildExecCommand() string {
-	var args []string
-	args = append(args, "exec")
+	args := []string{"exec"}
 
 	if c.Interactive {
 		args = append(args, "-i")
@@ -244,34 +177,21 @@ func (c *ExecConfig) BuildExecCommand() string {
 	args = append(args, c.Container)
 	args = append(args, c.Command...)
 
-	return "docker " + strings.Join(args, " ")
+	return "podman " + strings.Join(args, " ")
 }
 
-// LogsConfig holds configuration for viewing container logs
+// LogsConfig holds configuration for viewing container logs.
 type LogsConfig struct {
-	// Container name or ID
-	Container string
-
-	// Follow log output
-	Follow bool
-
-	// Number of lines to show from the end
-	Tail string
-
-	// Show timestamps
+	Container  string
+	Follow     bool
+	Tail       string
 	Timestamps bool
-
-	// Show logs since timestamp or relative time
-	Since string
-
-	// Show logs until timestamp or relative time
-	Until string
+	Since      string
+	Until      string
 }
 
-// BuildLogsCommand builds a docker logs command from the configuration
 func (c *LogsConfig) BuildLogsCommand() string {
-	var args []string
-	args = append(args, "logs")
+	args := []string{"logs"}
 
 	if c.Follow {
 		args = append(args, "-f")
@@ -295,23 +215,21 @@ func (c *LogsConfig) BuildLogsCommand() string {
 
 	args = append(args, c.Container)
 
-	return "docker " + strings.Join(args, " ")
+	return "podman " + strings.Join(args, " ")
 }
 
-// Info represents Docker system info
 type Info struct {
-	ServerVersion  string
-	ContainersTotal int
+	ServerVersion     string
+	ContainersTotal   int
 	ContainersRunning int
-	ContainersPaused int
+	ContainersPaused  int
 	ContainersStopped int
-	Images         int
-	Driver         string
-	MemoryTotal    string
-	CPUs           int
+	Images            int
+	Driver            string
+	MemoryTotal       string
+	CPUs              int
 }
 
-// GetInfo retrieves Docker system information from a host
 func (c *Client) GetInfo(host string) (*Info, error) {
 	format := `{{.ServerVersion}}|{{.Containers}}|{{.ContainersRunning}}|{{.ContainersPaused}}|{{.ContainersStopped}}|{{.Images}}|{{.Driver}}|{{.MemTotal}}|{{.NCPU}}`
 	result, err := c.Execute(host, "info", "--format", fmt.Sprintf("'%s'", format))
@@ -320,7 +238,7 @@ func (c *Client) GetInfo(host string) (*Info, error) {
 	}
 
 	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("docker info failed: %s", result.Stderr)
+		return nil, fmt.Errorf("podman info failed: %s", result.Stderr)
 	}
 
 	info := &Info{}
@@ -341,7 +259,6 @@ func (c *Client) GetInfo(host string) (*Info, error) {
 	return info, nil
 }
 
-// Version returns the Docker version on a host
 func (c *Client) Version(host string) (string, error) {
 	result, err := c.Execute(host, "version", "--format", "'{{.Server.Version}}'")
 	if err != nil {
@@ -349,7 +266,7 @@ func (c *Client) Version(host string) (string, error) {
 	}
 
 	if result.ExitCode != 0 {
-		return "", fmt.Errorf("docker version failed: %s", result.Stderr)
+		return "", fmt.Errorf("podman version failed: %s", result.Stderr)
 	}
 
 	return strings.Trim(result.Stdout, "'\n"), nil

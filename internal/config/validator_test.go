@@ -228,6 +228,68 @@ func TestValidate_HostAddresses(t *testing.T) {
 	}
 }
 
+func TestValidate_PodmanConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid netavark backend",
+			backend: "netavark",
+			wantErr: false,
+		},
+		{
+			name:    "valid cni backend",
+			backend: "cni",
+			wantErr: false,
+		},
+		{
+			name:    "empty backend (valid, uses default)",
+			backend: "",
+			wantErr: false,
+		},
+		{
+			name:    "invalid backend",
+			backend: "bridge",
+			wantErr: true,
+			errMsg:  "network_backend",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Service: "test",
+				Image:   "test:latest",
+				Servers: map[string]RoleConfig{
+					"web": {Hosts: []string{"localhost"}},
+				},
+				Podman: PodmanConfig{
+					NetworkBackend: tt.backend,
+				},
+				SSH: SSHConfig{Port: 22},
+			}
+
+			err := Validate(cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.errMsg)
+					return
+				}
+				if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("expected error containing %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("expected no error, got %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestIsValidHost(t *testing.T) {
 	tests := []struct {
 		host  string

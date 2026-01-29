@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
 )
 
@@ -81,9 +81,9 @@ func runScale(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
-	imageManager := docker.NewImageManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
+	imageManager := podman.NewImageManager(podmanClient)
 	proxyManager := proxy.NewManager(sshClient, log)
 
 	log.Header("Scaling Application")
@@ -145,8 +145,8 @@ func runScaleStatus(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	log.Header("Scale Status")
 
@@ -180,31 +180,14 @@ type scaleOperation struct {
 }
 
 func parseScaleOperation(s string) (scaleOperation, error) {
-	op := scaleOperation{}
+	isRelative := strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-")
 
-	if strings.HasPrefix(s, "+") {
-		op.isRelative = true
-		val, err := strconv.Atoi(s[1:])
-		if err != nil {
-			return op, err
-		}
-		op.value = val
-	} else if strings.HasPrefix(s, "-") {
-		op.isRelative = true
-		val, err := strconv.Atoi(s[1:])
-		if err != nil {
-			return op, err
-		}
-		op.value = -val
-	} else {
-		val, err := strconv.Atoi(s)
-		if err != nil {
-			return op, err
-		}
-		op.value = val
+	val, err := strconv.Atoi(s)
+	if err != nil {
+		return scaleOperation{}, err
 	}
 
-	return op, nil
+	return scaleOperation{isRelative: isRelative, value: val}, nil
 }
 
 func (op scaleOperation) calculateTarget(current int) int {
@@ -214,7 +197,7 @@ func (op scaleOperation) calculateTarget(current int) int {
 	return op.value
 }
 
-func countRunningInstances(cm *docker.ContainerManager, host, role string) (int, error) {
+func countRunningInstances(cm *podman.ContainerManager, host, role string) (int, error) {
 	filters := map[string]string{
 		"label": fmt.Sprintf("azud.service=%s", cfg.Service),
 	}
@@ -236,7 +219,7 @@ func countRunningInstances(cm *docker.ContainerManager, host, role string) (int,
 	return count, nil
 }
 
-func scaleUp(cm *docker.ContainerManager, im *docker.ImageManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
+func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
 	// Pull image first
 	if err := im.Pull(host, cfg.Image); err != nil {
 		return fmt.Errorf("failed to pull image: %w", err)
@@ -256,7 +239,7 @@ func scaleUp(cm *docker.ContainerManager, im *docker.ImageManager, pm *proxy.Man
 			log.Host(host, "Starting instance %s", containerName)
 
 			// Build container config
-			containerConfig := &docker.ContainerConfig{
+			containerConfig := &podman.ContainerConfig{
 				Name:    containerName,
 				Image:   cfg.Image,
 				Detach:  true,
@@ -280,7 +263,7 @@ func scaleUp(cm *docker.ContainerManager, im *docker.ImageManager, pm *proxy.Man
 			}
 			containerConfig.SecretEnv = cfg.Env.Secret
 
-			// Add role-specific options (convert map to docker run flags)
+			// Add role-specific options (convert map to podman run flags)
 			for opt, val := range roleConfig.Options {
 				switch opt {
 				case "memory":
@@ -355,7 +338,7 @@ func scaleUp(cm *docker.ContainerManager, im *docker.ImageManager, pm *proxy.Man
 	return nil
 }
 
-func scaleDown(cm *docker.ContainerManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
+func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
 	var wg sync.WaitGroup
 	errors := make(chan error, from-to)
 

@@ -23,7 +23,7 @@ Kamal 2 replaced Traefik with their own kamal-proxy. This caused:
 
 ### 3. Push-Based Architecture Problems
 
-- Deploys from local machine require uploading entire Docker images
+- Deploys from local machine require uploading entire container images
 - Asymmetric ISP connections make first deploys extremely slow
 - No native CI/CD-first design - requires workarounds for GitHub Actions
 
@@ -127,7 +127,7 @@ No pre-validation of nginx configurations before deployment - failures happen at
 | Health check configuration complexity | ✓ | ✓ | Sensible defaults with simple override options |
 | Registry/image cleanup issues | ✓ | ✓ | Automatic cleanup with configurable retention |
 | Learning curve despite "simple" branding | ✓ | ✓ | Minimal configuration for simple cases, power when needed |
-| Production readiness concerns | ✓ | ✓ | Battle-tested components (Caddy, Docker), comprehensive testing |
+| Production readiness concerns | ✓ | ✓ | Battle-tested components (Caddy, Podman), comprehensive testing |
 
 ---
 
@@ -138,6 +138,6 @@ No pre-validation of nginx configurations before deployment - failures happen at
 3. **Multi-Server First** - Scaling is not an afterthought
 4. **Zero-Downtime Always** - Blue-green deployments by default
 5. **CI/CD Native** - Designed for automation, not just local use
-6. **Battle-Tested Components** - Use proven tools (Caddy, Docker), don't reinvent
+6. **Battle-Tested Components** - Use proven tools (Caddy, Podman), don't reinvent
 7. **Clear Output** - Know what's happening without parsing logs
 8. **Stateless CLI** - Server state derived from config, not stored in CLI

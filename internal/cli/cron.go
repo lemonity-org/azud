@@ -9,8 +9,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 )
 
 var cronCmd = &cobra.Command{
@@ -19,7 +19,7 @@ var cronCmd = &cobra.Command{
 	Long: `Commands for managing scheduled cron jobs.
 
 Cron jobs are defined in your deploy.yml and run on a schedule.
-They use the same Docker image as your application.
+They use the same container image as your application.
 
 Example configuration in deploy.yml:
   cron:
@@ -139,9 +139,9 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
-	imageManager := docker.NewImageManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
+	imageManager := podman.NewImageManager(podmanClient)
 
 	log.Header("Starting Cron Jobs")
 
@@ -203,8 +203,8 @@ func runCronStop(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	log.Header("Stopping Cron Jobs")
 
@@ -264,12 +264,12 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	containerName := getCronContainerName(name)
 
-	logsConfig := &docker.LogsConfig{
+	logsConfig := &podman.LogsConfig{
 		Container: containerName,
 		Follow:    cronFollow,
 		Tail:      cronTail,
@@ -312,8 +312,8 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	log.Header("Running Cron Job: %s", name)
 	log.Host(host, "Executing: %s", cronConfig.Command)
@@ -321,7 +321,7 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 	// Execute the command in a one-off container
 	runContainerName := fmt.Sprintf("%s-cron-%s-run", cfg.Service, name)
 
-	containerConfig := &docker.ContainerConfig{
+	containerConfig := &podman.ContainerConfig{
 		Name:    runContainerName,
 		Image:   cfg.Image,
 		Detach:  false,
@@ -371,8 +371,8 @@ func runCronList(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer sshClient.Close()
 
-	dockerClient := docker.NewClient(sshClient)
-	containerManager := docker.NewContainerManager(dockerClient)
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
 
 	log.Header("Cron Jobs")
 
@@ -415,14 +415,14 @@ func getCronHosts(name string) []string {
 	return cfg.GetCronHosts(name)
 }
 
-func buildCronContainerConfig(name string, cronConfig config.CronConfig) *docker.ContainerConfig {
+func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman.ContainerConfig {
 	containerName := getCronContainerName(name)
 
 	// Build the cron command using supercronic or a shell-based approach
 	// We use a shell wrapper to run the command on schedule
 	cronCommand := buildCronCommand(cronConfig)
 
-	containerConfig := &docker.ContainerConfig{
+	containerConfig := &podman.ContainerConfig{
 		Name:    containerName,
 		Image:   cfg.Image,
 		Detach:  true,

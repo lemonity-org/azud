@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/docker"
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
 const (
-	// CaddyImage is the official Caddy Docker image
+	// CaddyImage is the official Caddy container image
 	CaddyImage = "caddy:2-alpine"
 
 	// CaddyContainerName is the name of the Caddy container
@@ -26,31 +26,29 @@ const (
 	CaddyHTTPSPort = 443
 )
 
-// Manager handles proxy operations on servers
+// Manager provisions and configures Caddy reverse proxies on remote hosts.
 type Manager struct {
 	sshClient   *ssh.Client
 	caddyClient *CaddyClient
-	docker      *docker.ContainerManager
+	podman      *podman.ContainerManager
 	log         *output.Logger
 }
 
-// NewManager creates a new proxy manager
 func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
 	if log == nil {
 		log = output.DefaultLogger
 	}
 
-	dockerClient := docker.NewClient(sshClient)
+	podmanClient := podman.NewClient(sshClient)
 
 	return &Manager{
 		sshClient:   sshClient,
 		caddyClient: NewCaddyClient(sshClient),
-		docker:      docker.NewContainerManager(dockerClient),
+		podman:      podman.NewContainerManager(podmanClient),
 		log:         log,
 	}
 }
 
-// ProxyConfig holds configuration for deploying the proxy
 type ProxyConfig struct {
 	// Hosts to route to (e.g., myapp.example.com)
 	Hosts []string
@@ -85,7 +83,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	m.log.Host(host, "Starting proxy...")
 
 	// Check if already running
-	running, err := m.docker.IsRunning(host, CaddyContainerName)
+	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy status: %w", err)
 	}
@@ -96,14 +94,14 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 
 	// Check if container exists but is stopped
-	exists, err := m.docker.Exists(host, CaddyContainerName)
+	exists, err := m.podman.Exists(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy container: %w", err)
 	}
 
 	if exists {
 		// Start existing container
-		if err := m.docker.Start(host, CaddyContainerName); err != nil {
+		if err := m.podman.Start(host, CaddyContainerName); err != nil {
 			return fmt.Errorf("failed to start proxy: %w", err)
 		}
 		m.log.HostSuccess(host, "Proxy started")
@@ -123,7 +121,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 
 	// Create and start new container with custom admin API config
-	containerConfig := &docker.ContainerConfig{
+	containerConfig := &podman.ContainerConfig{
 		Name:    CaddyContainerName,
 		Image:   CaddyImage,
 		Detach:  true,
@@ -142,14 +140,14 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 			"azud.managed": "true",
 			"azud.type":    "proxy",
 		},
-		// Start Caddy with admin API listening on 0.0.0.0 so it's accessible via Docker port forwarding
+		// Start Caddy with admin API listening on 0.0.0.0 so it's accessible via container port forwarding
 		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--watch"},
 		Env: map[string]string{
 			"CADDY_ADMIN": "0.0.0.0:2019",
 		},
 	}
 
-	_, err = m.docker.Run(host, containerConfig)
+	_, err = m.podman.Run(host, containerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to start proxy container: %w", err)
 	}
@@ -166,7 +164,6 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	return nil
 }
 
-// loadInitialConfig loads the initial Caddy configuration
 func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 	caddyConfig := &CaddyConfig{
 		Admin: &AdminConfig{
@@ -239,7 +236,7 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 func (m *Manager) Stop(host string) error {
 	m.log.Host(host, "Stopping proxy...")
 
-	if err := m.docker.Stop(host, CaddyContainerName, 30); err != nil {
+	if err := m.podman.Stop(host, CaddyContainerName, 30); err != nil {
 		return fmt.Errorf("failed to stop proxy: %w", err)
 	}
 
@@ -251,7 +248,7 @@ func (m *Manager) Stop(host string) error {
 func (m *Manager) Reboot(host string) error {
 	m.log.Host(host, "Rebooting proxy...")
 
-	if err := m.docker.Restart(host, CaddyContainerName, 30); err != nil {
+	if err := m.podman.Restart(host, CaddyContainerName, 30); err != nil {
 		return fmt.Errorf("failed to restart proxy: %w", err)
 	}
 
@@ -263,7 +260,7 @@ func (m *Manager) Reboot(host string) error {
 func (m *Manager) Remove(host string) error {
 	m.log.Host(host, "Removing proxy...")
 
-	if err := m.docker.Remove(host, CaddyContainerName, true); err != nil {
+	if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
 		return fmt.Errorf("failed to remove proxy: %w", err)
 	}
 
@@ -275,7 +272,7 @@ func (m *Manager) Remove(host string) error {
 func (m *Manager) Status(host string) (*ProxyStatus, error) {
 	status := &ProxyStatus{Host: host}
 
-	running, err := m.docker.IsRunning(host, CaddyContainerName)
+	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +280,7 @@ func (m *Manager) Status(host string) (*ProxyStatus, error) {
 
 	if running {
 		// Get container stats
-		stats, err := m.docker.Stats(host, CaddyContainerName)
+		stats, err := m.podman.Stats(host, CaddyContainerName)
 		if err == nil {
 			status.Stats = stats
 		}
@@ -300,7 +297,6 @@ func (m *Manager) Status(host string) (*ProxyStatus, error) {
 	return status, nil
 }
 
-// ProxyStatus holds proxy status information
 type ProxyStatus struct {
 	Host       string
 	Running    bool
@@ -310,12 +306,12 @@ type ProxyStatus struct {
 
 // Logs retrieves proxy logs
 func (m *Manager) Logs(host string, follow bool, tail string) (*ssh.Result, error) {
-	logsConfig := &docker.LogsConfig{
+	logsConfig := &podman.LogsConfig{
 		Container: CaddyContainerName,
 		Follow:    follow,
 		Tail:      tail,
 	}
-	return m.docker.Logs(host, logsConfig)
+	return m.podman.Logs(host, logsConfig)
 }
 
 // RegisterService registers a service with the proxy
@@ -383,7 +379,6 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	return nil
 }
 
-// ServiceConfig holds configuration for a service
 type ServiceConfig struct {
 	// Service name
 	Name string
@@ -404,7 +399,6 @@ type ServiceConfig struct {
 	HTTPS bool
 }
 
-// buildServiceRoute creates a Caddy route for a service
 func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	upstreams := make([]*Upstream, len(service.Upstreams))
 	for i, addr := range service.Upstreams {
@@ -564,7 +558,6 @@ func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 	return nil
 }
 
-// routeMatchesHost checks if a route matches a given host
 func routeMatchesHost(route *Route, host string) bool {
 	for _, match := range route.Match {
 		for _, h := range match.Host {
@@ -690,7 +683,6 @@ func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight i
 	return nil
 }
 
-// UpstreamWeight represents an upstream with its weight
 type UpstreamWeight struct {
 	Dial   string
 	Weight int

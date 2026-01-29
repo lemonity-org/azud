@@ -309,6 +309,18 @@ func applyDefaults(cfg *Config) {
 		cfg.Builder.Context = "."
 	}
 
+	// Podman defaults
+	if cfg.Podman.NetworkBackend == "" {
+		cfg.Podman.NetworkBackend = "netavark"
+	}
+	if cfg.Podman.QuadletPath == "" {
+		if cfg.Podman.Rootless {
+			cfg.Podman.QuadletPath = "~/.config/containers/systemd/"
+		} else {
+			cfg.Podman.QuadletPath = "/etc/containers/systemd/"
+		}
+	}
+
 	// Paths defaults
 	if cfg.SecretsPath == "" {
 		cfg.SecretsPath = ".azud/secrets"
@@ -317,6 +329,3 @@ func applyDefaults(cfg *Config) {
 		cfg.HooksPath = ".azud/hooks"
 	}
 }
-
-// Add loadedSecrets field to Config (internal use)
-// This is added via a separate file to avoid circular imports
