@@ -130,14 +130,24 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 		}
 	}
 
-	// Deploy to each host
+	// Deploy to each host, tracking successes for potential rollback
 	var deployErrors []string
+	var succeededHosts []string
 	for _, host := range hosts {
 		if err := d.deployToHost(host, image, opts); err != nil {
 			d.log.HostError(host, "deployment failed: %v", err)
 			deployErrors = append(deployErrors, fmt.Sprintf("%s: %v", host, err))
+
+			// If rollback_on_failure is enabled, roll back all successful
+			// hosts immediately to keep the fleet on a single version.
+			if d.cfg.Deploy.RollbackOnFailure && len(succeededHosts) > 0 {
+				d.log.Warn("Rolling back %d already-deployed host(s) due to failure on %s...", len(succeededHosts), host)
+				d.rollbackHosts(succeededHosts, record.PreviousVersion)
+				succeededHosts = nil
+			}
 			continue
 		}
+		succeededHosts = append(succeededHosts, host)
 		d.log.HostSuccess(host, "deployed successfully")
 	}
 
@@ -238,7 +248,8 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 
 		// Stop and remove old container
 		d.log.Host(host, "Removing old container...")
-		if err := d.containers.Stop(host, oldContainerName, 30); err != nil {
+		stopTimeout := d.cfg.Deploy.GetStopTimeout()
+		if err := d.containers.Stop(host, oldContainerName, stopTimeout); err != nil {
 			d.log.Debug("Failed to stop old container: %v", err)
 		}
 		if err := d.containers.Remove(host, oldContainerName, true); err != nil {
@@ -343,8 +354,9 @@ func (d *Deployer) Redeploy(opts *DeployOptions) error {
 }
 
 func (d *Deployer) Stop(hosts []string) error {
+	stopTimeout := d.cfg.Deploy.GetStopTimeout()
 	return d.runOnHosts("stop", hosts, func(host string) error {
-		return d.containers.Stop(host, d.cfg.Service, 30)
+		return d.containers.Stop(host, d.cfg.Service, stopTimeout)
 	})
 }
 
@@ -355,9 +367,65 @@ func (d *Deployer) Start(hosts []string) error {
 }
 
 func (d *Deployer) Restart(hosts []string) error {
+	stopTimeout := d.cfg.Deploy.GetStopTimeout()
 	return d.runOnHosts("restart", hosts, func(host string) error {
-		return d.containers.Restart(host, d.cfg.Service, 30)
+		return d.containers.Restart(host, d.cfg.Service, stopTimeout)
 	})
+}
+
+// rollbackHosts reverts a deployment on hosts that succeeded, restoring the
+// previous version. This is a best-effort operation: errors are logged but
+// do not prevent rollback attempts on other hosts.
+func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
+	if previousVersion == "" {
+		d.log.Warn("No previous version recorded, cannot auto-rollback")
+		return
+	}
+
+	for _, host := range hosts {
+		d.log.Host(host, "Rolling back to %s...", previousVersion)
+
+		// The current container (just deployed) is named d.cfg.Service.
+		// Stop and remove it, then re-deploy the previous version.
+		serviceName := d.cfg.Service
+		stopTimeout := d.cfg.Deploy.GetStopTimeout()
+
+		// Remove the newly deployed container from the proxy
+		upstream := fmt.Sprintf("%s:%d", serviceName, d.cfg.Proxy.AppPort)
+		if err := d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, upstream); err != nil {
+			d.log.Debug("Rollback: failed to remove upstream on %s: %v", host, err)
+		}
+
+		// Stop and remove the new container
+		if err := d.containers.Stop(host, serviceName, stopTimeout); err != nil {
+			d.log.Debug("Rollback: failed to stop container on %s: %v", host, err)
+		}
+		if err := d.containers.Remove(host, serviceName, true); err != nil {
+			d.log.Debug("Rollback: failed to remove container on %s: %v", host, err)
+		}
+
+		// Re-deploy the previous version
+		rollbackOpts := &DeployOptions{
+			Version:     previousVersion,
+			SkipPull:    true, // Image should still be cached from last deployment
+			Hosts:       []string{host},
+			Destination: "rollback",
+		}
+
+		// Use deployToHost directly to avoid recursion into the full Deploy
+		// method (which would run hooks, record history, etc.)
+		prevImage := d.cfg.Image
+		if idx := strings.LastIndex(prevImage, ":"); idx > 0 && !strings.Contains(prevImage[idx:], "/") {
+			prevImage = prevImage[:idx]
+		}
+		prevImage = fmt.Sprintf("%s:%s", prevImage, previousVersion)
+
+		if err := d.deployToHost(host, prevImage, rollbackOpts); err != nil {
+			d.log.HostError(host, "rollback failed: %v", err)
+			continue
+		}
+		d.log.HostSuccess(host, "rolled back to %s", previousVersion)
+	}
 }
 
 // runOnHosts executes an operation on all hosts in parallel, collecting errors.

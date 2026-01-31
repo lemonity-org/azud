@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/adriancarayol/azud/internal/output"
@@ -749,15 +750,33 @@ func routeMatchesHost(route *Route, host string) bool {
 	return false
 }
 
-// BootAll starts the proxy on multiple hosts
+// BootAll starts the proxy on multiple hosts in parallel.
 func (m *Manager) BootAll(hosts []string, config *ProxyConfig) error {
 	m.log.Header("Starting proxy on %d host(s)", len(hosts))
 
-	var errors []error
+	type bootErr struct {
+		host string
+		err  error
+	}
+	errCh := make(chan bootErr, len(hosts))
+	var wg sync.WaitGroup
+
 	for _, host := range hosts {
-		if err := m.Boot(host, config); err != nil {
-			errors = append(errors, fmt.Errorf("%s: %w", host, err))
-		}
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+			if err := m.Boot(h, config); err != nil {
+				errCh <- bootErr{host: h, err: err}
+			}
+		}(host)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errors []error
+	for e := range errCh {
+		errors = append(errors, fmt.Errorf("%s: %w", e.host, e.err))
 	}
 
 	if len(errors) > 0 {

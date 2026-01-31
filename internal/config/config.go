@@ -348,14 +348,30 @@ type DeployConfig struct {
 	// Time to drain connections
 	DrainTimeout time.Duration `yaml:"drain_timeout"`
 
+	// Grace period for container stop (SIGTERM → SIGKILL). Default: 30s.
+	StopTimeout time.Duration `yaml:"stop_timeout"`
+
 	// Number of old containers to retain
 	RetainContainers int `yaml:"retain_containers"`
 
 	// Number of deployment history records to retain
 	RetainHistory int `yaml:"retain_history"`
 
+	// Roll back already-deployed hosts when deployment fails on any host.
+	// When true, a failure on any host triggers revert on all hosts that
+	// succeeded, keeping the fleet on a single version.
+	RollbackOnFailure bool `yaml:"rollback_on_failure"`
+
 	// Canary deployment configuration
 	Canary CanaryConfig `yaml:"canary"`
+}
+
+// GetStopTimeout returns the configured stop timeout, defaulting to 30s.
+func (d *DeployConfig) GetStopTimeout() int {
+	if d.StopTimeout > 0 {
+		return int(d.StopTimeout.Seconds())
+	}
+	return 30
 }
 
 // CanaryConfig holds canary deployment settings

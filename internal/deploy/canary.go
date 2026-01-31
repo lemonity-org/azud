@@ -274,7 +274,8 @@ func (c *CanaryDeployer) Promote() error {
 
 		// Stop and remove old stable container
 		c.log.Host(host, "Removing old stable container...")
-		if err := c.containers.Stop(host, c.state.StableContainer, 30); err != nil {
+		stopTimeout := c.cfg.Deploy.GetStopTimeout()
+		if err := c.containers.Stop(host, c.state.StableContainer, stopTimeout); err != nil {
 			c.log.Debug("Failed to stop stable container: %v", err)
 		}
 		if err := c.containers.Remove(host, c.state.StableContainer, true); err != nil {
@@ -353,7 +354,8 @@ func (c *CanaryDeployer) Rollback() error {
 
 		// Stop and remove canary container
 		c.log.Host(host, "Removing canary container...")
-		if err := c.containers.Stop(host, c.state.CanaryContainer, 30); err != nil {
+		stopTimeout := c.cfg.Deploy.GetStopTimeout()
+		if err := c.containers.Stop(host, c.state.CanaryContainer, stopTimeout); err != nil {
 			c.log.Debug("Failed to stop canary container: %v", err)
 		}
 		if err := c.containers.Remove(host, c.state.CanaryContainer, true); err != nil {
