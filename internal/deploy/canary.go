@@ -163,6 +163,14 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 	canaryContainerName := fmt.Sprintf("%s-canary", c.cfg.Service)
 
 	for _, host := range hosts {
+		phases := []output.Phase{
+			{Name: "Pull", Complete: !opts.SkipPull},
+			{Name: "Container", Complete: false},
+			{Name: "Health", Complete: false},
+			{Name: "Proxy", Complete: false},
+		}
+		c.log.HostPhase(host, phases)
+
 		c.log.Host(host, "Deploying canary container...")
 
 		// Build container config
@@ -174,6 +182,9 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 			c.state.Status = CanaryStatusNone
 			return fmt.Errorf("failed to start canary on %s: %w", host, err)
 		}
+
+		phases[1].Complete = true
+		c.log.HostPhase(host, phases)
 
 		// Wait for readiness check
 		readinessPath := c.cfg.Proxy.Healthcheck.GetReadinessPath()
@@ -192,14 +203,17 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 			}
 		}
 
+		phases[2].Complete = true
+		c.log.HostPhase(host, phases)
+
 		// Register canary with proxy at initial weight
-		canaryUpstream := fmt.Sprintf("%s:%d", canaryContainerName, c.cfg.Proxy.AppPort)
+		canaryUpstream := c.upstreamAddr(canaryContainerName)
 		stableWeight := 100 - initialWeight
 
 		c.log.Host(host, "Registering canary with proxy (weight=%d%%, stable=%d%%)", initialWeight, stableWeight)
 
 		// Update stable container weight first
-		stableUpstream := fmt.Sprintf("%s:%d", c.cfg.Service, c.cfg.Proxy.AppPort)
+		stableUpstream := c.upstreamAddr(c.cfg.Service)
 		if err := c.proxy.SetUpstreamWeight(host, c.cfg.Proxy.Host, stableUpstream, stableWeight); err != nil {
 			c.log.Debug("Failed to set stable weight (may not exist yet): %v", err)
 		}
@@ -208,6 +222,9 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 		if err := c.proxy.AddWeightedUpstream(host, c.cfg.Proxy.Host, canaryUpstream, initialWeight); err != nil {
 			return fmt.Errorf("failed to register canary with proxy on %s: %w", host, err)
 		}
+
+		phases[3].Complete = true
+		c.log.HostPhase(host, phases)
 
 		c.log.HostSuccess(host, "Canary deployed successfully")
 	}
@@ -227,6 +244,9 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 	}
 
 	c.log.Success("Canary deployment started: %d%% traffic to canary", initialWeight)
+	c.log.TrafficBar(initialWeight,
+		fmt.Sprintf("canary (%s)", opts.Version),
+		fmt.Sprintf("stable (%s)", stableVersion))
 
 	// Record deployment
 	record := NewDeploymentRecord(c.cfg.Service, image, opts.Version, opts.Destination, hosts)
@@ -250,8 +270,8 @@ func (c *CanaryDeployer) Promote() error {
 	c.state.Status = CanaryStatusPromoting
 	c.log.Header("Promoting canary to production")
 
-	canaryUpstream := fmt.Sprintf("%s:%d", c.state.CanaryContainer, c.cfg.Proxy.AppPort)
-	stableUpstream := fmt.Sprintf("%s:%d", c.state.StableContainer, c.cfg.Proxy.AppPort)
+	canaryUpstream := c.upstreamAddr(c.state.CanaryContainer)
+	stableUpstream := c.upstreamAddr(c.state.StableContainer)
 
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Promoting canary...")
@@ -293,7 +313,7 @@ func (c *CanaryDeployer) Promote() error {
 		// Atomically update proxy to point to the renamed container using
 		// a single RegisterService call instead of separate add/remove.
 		livenessPath := c.cfg.Proxy.Healthcheck.GetLivenessPath()
-		finalUpstream := fmt.Sprintf("%s:%d", c.state.StableContainer, c.cfg.Proxy.AppPort)
+		finalUpstream := c.upstreamAddr(c.state.StableContainer)
 		serviceConfig := &proxy.ServiceConfig{
 			Name:           c.cfg.Service,
 			Host:           c.cfg.Proxy.Host,
@@ -308,6 +328,10 @@ func (c *CanaryDeployer) Promote() error {
 
 		c.log.HostSuccess(host, "Canary promoted")
 	}
+
+	c.log.TrafficBar(100,
+		fmt.Sprintf("promoted (%s)", c.state.CanaryVersion),
+		"stable (removed)")
 
 	// Reset state
 	c.state = &CanaryState{
@@ -330,8 +354,8 @@ func (c *CanaryDeployer) Rollback() error {
 	c.state.Status = CanaryStatusRollingBack
 	c.log.Header("Rolling back canary deployment")
 
-	canaryUpstream := fmt.Sprintf("%s:%d", c.state.CanaryContainer, c.cfg.Proxy.AppPort)
-	stableUpstream := fmt.Sprintf("%s:%d", c.state.StableContainer, c.cfg.Proxy.AppPort)
+	canaryUpstream := c.upstreamAddr(c.state.CanaryContainer)
+	stableUpstream := c.upstreamAddr(c.state.StableContainer)
 
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Rolling back canary...")
@@ -381,6 +405,10 @@ func (c *CanaryDeployer) Rollback() error {
 	record.Duration = record.CompletedAt.Sub(record.StartedAt)
 	_ = c.history.Record(record)
 
+	c.log.TrafficBar(0,
+		"canary (removed)",
+		fmt.Sprintf("stable (%s)", c.state.StableVersion))
+
 	// Reset state
 	c.state = &CanaryState{
 		Status: CanaryStatusNone,
@@ -413,8 +441,8 @@ func (c *CanaryDeployer) SetWeight(weight int) error {
 
 	c.log.Info("Adjusting canary weight to %d%%", weight)
 
-	canaryUpstream := fmt.Sprintf("%s:%d", c.state.CanaryContainer, c.cfg.Proxy.AppPort)
-	stableUpstream := fmt.Sprintf("%s:%d", c.state.StableContainer, c.cfg.Proxy.AppPort)
+	canaryUpstream := c.upstreamAddr(c.state.CanaryContainer)
+	stableUpstream := c.upstreamAddr(c.state.StableContainer)
 	stableWeight := 100 - weight
 
 	for _, host := range c.state.Hosts {
@@ -430,7 +458,15 @@ func (c *CanaryDeployer) SetWeight(weight int) error {
 	c.state.LastUpdated = time.Now()
 
 	c.log.Success("Canary weight adjusted: %d%% canary, %d%% stable", weight, stableWeight)
+	c.log.TrafficBar(weight,
+		fmt.Sprintf("canary (%s)", c.state.CanaryVersion),
+		fmt.Sprintf("stable (%s)", c.state.StableVersion))
 	return nil
+}
+
+// upstreamAddr returns "name:port" for the configured application port.
+func (c *CanaryDeployer) upstreamAddr(name string) string {
+	return fmt.Sprintf("%s:%d", name, c.cfg.Proxy.AppPort)
 }
 
 func (c *CanaryDeployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
