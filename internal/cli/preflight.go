@@ -249,14 +249,15 @@ func validEnvName(name string) bool {
 	if name == "" {
 		return false
 	}
-	for i, r := range name {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
 		if i == 0 {
-			if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+			if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
 				return false
 			}
 			continue
 		}
-		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+		if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
