@@ -175,9 +175,10 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 			return fmt.Errorf("failed to start canary on %s: %w", host, err)
 		}
 
-		// Wait for health check
-		if !opts.SkipHealthCheck && c.cfg.Proxy.Healthcheck.Path != "" {
-			c.log.Host(host, "Waiting for canary health check...")
+		// Wait for readiness check
+		readinessPath := c.cfg.Proxy.Healthcheck.GetReadinessPath()
+		if !opts.SkipHealthCheck && readinessPath != "" {
+			c.log.Host(host, "Waiting for canary readiness check...")
 
 			if c.cfg.Deploy.ReadinessDelay > 0 {
 				time.Sleep(c.cfg.Deploy.ReadinessDelay)
@@ -260,39 +261,49 @@ func (c *CanaryDeployer) Promote() error {
 			return fmt.Errorf("failed to update canary weight on %s: %w", host, err)
 		}
 
-		// Remove stable upstream
+		// Remove stable upstream from proxy so no new requests are sent to it
 		if err := c.proxy.RemoveUpstream(host, c.cfg.Proxy.Host, stableUpstream); err != nil {
 			c.log.Debug("Failed to remove stable upstream: %v", err)
 		}
 
-		// Wait for drain
+		// Drain: poll Caddy for in-flight requests on the stable upstream
 		if c.cfg.Deploy.DrainTimeout > 0 {
 			c.log.Host(host, "Draining connections...")
-			time.Sleep(c.cfg.Deploy.DrainTimeout)
+			_ = c.proxy.DrainUpstream(host, stableUpstream, c.cfg.Deploy.DrainTimeout)
 		}
 
 		// Stop and remove old stable container
 		c.log.Host(host, "Removing old stable container...")
-		if err := c.containers.Stop(host, c.state.StableContainer, 30); err != nil {
+		stopTimeout := c.cfg.Deploy.GetStopTimeout()
+		if err := c.containers.Stop(host, c.state.StableContainer, stopTimeout); err != nil {
 			c.log.Debug("Failed to stop stable container: %v", err)
 		}
 		if err := c.containers.Remove(host, c.state.StableContainer, true); err != nil {
 			c.log.Debug("Failed to remove stable container: %v", err)
 		}
 
-		// Rename canary to stable
+		// Rename canary to stable name
 		c.log.Host(host, "Finalizing promotion...")
 		if err := c.containers.Rename(host, c.state.CanaryContainer, c.state.StableContainer); err != nil {
-			c.log.Warn("Failed to rename container: %v", err)
+			c.log.Warn("Failed to rename container (proxy still points to canary name): %v", err)
+			c.log.HostSuccess(host, "Canary promoted (kept canary container name)")
+			continue
 		}
 
-		// Update proxy with new container name
-		newUpstream := fmt.Sprintf("%s:%d", c.state.StableContainer, c.cfg.Proxy.AppPort)
-		if err := c.proxy.AddUpstream(host, c.cfg.Proxy.Host, newUpstream); err != nil {
-			c.log.Debug("Failed to update proxy upstream: %v", err)
+		// Atomically update proxy to point to the renamed container using
+		// a single RegisterService call instead of separate add/remove.
+		livenessPath := c.cfg.Proxy.Healthcheck.GetLivenessPath()
+		finalUpstream := fmt.Sprintf("%s:%d", c.state.StableContainer, c.cfg.Proxy.AppPort)
+		serviceConfig := &proxy.ServiceConfig{
+			Name:           c.cfg.Service,
+			Host:           c.cfg.Proxy.Host,
+			Upstreams:      []string{finalUpstream},
+			HealthPath:     livenessPath,
+			HealthInterval: c.cfg.Proxy.Healthcheck.Interval,
+			HTTPS:          c.cfg.Proxy.SSL,
 		}
-		if err := c.proxy.RemoveUpstream(host, c.cfg.Proxy.Host, canaryUpstream); err != nil {
-			c.log.Debug("Failed to remove canary upstream: %v", err)
+		if err := c.proxy.RegisterService(host, serviceConfig); err != nil {
+			c.log.Warn("Failed to update proxy to final name: %v", err)
 		}
 
 		c.log.HostSuccess(host, "Canary promoted")
@@ -325,19 +336,26 @@ func (c *CanaryDeployer) Rollback() error {
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Rolling back canary...")
 
-		// Remove canary from proxy
-		if err := c.proxy.RemoveUpstream(host, c.cfg.Proxy.Host, canaryUpstream); err != nil {
-			c.log.Debug("Failed to remove canary upstream: %v", err)
-		}
-
-		// Restore stable to 100%
+		// Restore stable to 100% first so it handles all new traffic
 		if err := c.proxy.SetUpstreamWeight(host, c.cfg.Proxy.Host, stableUpstream, 100); err != nil {
 			c.log.Debug("Failed to restore stable weight: %v", err)
 		}
 
+		// Remove canary from proxy (stops new traffic to canary)
+		if err := c.proxy.RemoveUpstream(host, c.cfg.Proxy.Host, canaryUpstream); err != nil {
+			c.log.Debug("Failed to remove canary upstream: %v", err)
+		}
+
+		// Drain in-flight requests to the canary before stopping it
+		if c.cfg.Deploy.DrainTimeout > 0 {
+			c.log.Host(host, "Draining canary connections...")
+			_ = c.proxy.DrainUpstream(host, canaryUpstream, c.cfg.Deploy.DrainTimeout)
+		}
+
 		// Stop and remove canary container
 		c.log.Host(host, "Removing canary container...")
-		if err := c.containers.Stop(host, c.state.CanaryContainer, 30); err != nil {
+		stopTimeout := c.cfg.Deploy.GetStopTimeout()
+		if err := c.containers.Stop(host, c.state.CanaryContainer, stopTimeout); err != nil {
 			c.log.Debug("Failed to stop canary container: %v", err)
 		}
 		if err := c.containers.Remove(host, c.state.CanaryContainer, true); err != nil {

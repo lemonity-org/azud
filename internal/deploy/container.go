@@ -13,6 +13,12 @@ import (
 // newAppContainerConfig creates a standard container configuration from the
 // application config. The extra labels parameter allows callers to add
 // deployment-specific labels (e.g., canary markers).
+//
+// The Podman HEALTHCHECK is configured with the liveness probe path
+// (healthcheck.liveness_path, falling back to healthcheck.path). This
+// probe runs continuously inside the container and determines if it is
+// still functioning. The readiness probe is checked separately during
+// deployment to gate proxy registration.
 func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels map[string]string) *podman.ContainerConfig {
 	labels := map[string]string{
 		"azud.managed": "true",
@@ -39,9 +45,11 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 	containerCfg.SecretEnv = cfg.Env.Secret
 	containerCfg.Volumes = cfg.Volumes
 
-	if cfg.Proxy.Healthcheck.Path != "" {
+	// Use liveness probe for Podman HEALTHCHECK (continuous container health)
+	livenessPath := cfg.Proxy.Healthcheck.GetLivenessPath()
+	if livenessPath != "" {
 		containerCfg.HealthCmd = fmt.Sprintf("curl -f http://localhost:%d%s || exit 1",
-			cfg.Proxy.AppPort, cfg.Proxy.Healthcheck.Path)
+			cfg.Proxy.AppPort, livenessPath)
 		containerCfg.HealthInterval = cfg.Proxy.Healthcheck.Interval
 		containerCfg.HealthTimeout = cfg.Proxy.Healthcheck.Timeout
 		containerCfg.HealthRetries = 3
@@ -51,8 +59,17 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 }
 
 // waitForContainerHealthy polls a container's health status and also
-// attempts a direct HTTP health check until the container becomes healthy,
-// times out, or is reported unhealthy.
+// attempts a direct HTTP readiness check until the container is ready to
+// accept traffic, times out, or is reported unhealthy.
+//
+// Two probes are involved:
+//   - Liveness probe (Podman HEALTHCHECK): checks if the container process
+//     is alive. A status of "unhealthy" from Podman is a hard failure.
+//   - Readiness probe (direct HTTP check): checks if the container can
+//     accept traffic. This gates proxy registration during deployment.
+//
+// The function succeeds when EITHER the Podman health status is "healthy"
+// OR the readiness probe responds successfully.
 func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, sshClient *ssh.Client, host, container string) error {
 	timeout := cfg.Deploy.DeployTimeout
 	if timeout == 0 {
@@ -62,7 +79,11 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 	deadline := time.Now().Add(timeout)
 	checkInterval := 2 * time.Second
 
+	// Use readiness path for deployment checks
+	readinessPath := cfg.Proxy.Healthcheck.GetReadinessPath()
+
 	for time.Now().Before(deadline) {
+		// Check Podman HEALTHCHECK status (liveness)
 		result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
 		if err == nil && result.ExitCode == 0 {
 			status := strings.Trim(result.Stdout, "'\n ")
@@ -70,14 +91,14 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 			case "healthy":
 				return nil
 			case "unhealthy":
-				return fmt.Errorf("container is unhealthy")
+				return fmt.Errorf("container liveness check failed (unhealthy)")
 			}
 		}
 
-		healthPath := cfg.Proxy.Healthcheck.Path
-		if healthPath != "" {
+		// Check readiness probe (can the container accept traffic?)
+		if readinessPath != "" {
 			checkCmd := fmt.Sprintf("podman exec %s curl -sf http://localhost:%d%s",
-				container, cfg.Proxy.AppPort, healthPath)
+				container, cfg.Proxy.AppPort, readinessPath)
 			result, err := sshClient.Execute(host, checkCmd)
 			if err == nil && result.ExitCode == 0 {
 				return nil
@@ -87,5 +108,5 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 		time.Sleep(checkInterval)
 	}
 
-	return fmt.Errorf("timeout waiting for container to become healthy")
+	return fmt.Errorf("timeout waiting for container to become ready")
 }

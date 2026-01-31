@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/adriancarayol/azud/internal/output"
@@ -314,17 +316,74 @@ func (m *Manager) Logs(host string, follow bool, tail string) (*ssh.Result, erro
 	return m.podman.Logs(host, logsConfig)
 }
 
-// RegisterService registers a service with the proxy
+// RegisterService registers a service with the proxy using route-specific
+// API operations. If a route for the service host already exists, only that
+// route is updated via a PATCH. Otherwise a new route is appended. This
+// avoids replacing the entire Caddy configuration and prevents race
+// conditions when multiple services are deployed concurrently.
 func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	m.log.Host(host, "Registering service %s...", service.Name)
 
 	// Build the route for this service
 	route := m.buildServiceRoute(service)
 
-	// Get current config
+	// Try route-specific update first
+	if err := m.upsertRoute(host, service.Host, route); err != nil {
+		// Fall back to full config replacement if route-specific update fails
+		// (e.g., the server doesn't exist yet and needs bootstrapping)
+		m.log.Debug("Route-specific update failed, falling back to full config: %v", err)
+		if fallbackErr := m.registerServiceFull(host, service, route); fallbackErr != nil {
+			return fallbackErr
+		}
+	}
+
+	m.log.HostSuccess(host, "Service %s registered", service.Name)
+	return nil
+}
+
+// upsertRoute updates an existing route for serviceHost or appends a new one
+// using Caddy's path-specific admin API.
+func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
+	// Get only the routes array, not the full config
+	routesPath := "/config/apps/http/servers/srv0/routes"
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get routes: %w", err)
+	}
+
+	var routes []*Route
+	if err := json.Unmarshal(data, &routes); err != nil {
+		return fmt.Errorf("failed to parse routes: %w", err)
+	}
+
+	// Check if a route for this host already exists
+	for i, r := range routes {
+		if routeMatchesHost(r, serviceHost) {
+			// Update just this specific route via its index
+			routePath := fmt.Sprintf("%s/%d", routesPath, i)
+			_, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route)
+			if err != nil {
+				return fmt.Errorf("failed to patch route at index %d: %w", i, err)
+			}
+			return nil
+		}
+	}
+
+	// Route doesn't exist — append it
+	_, err = m.caddyClient.apiRequest(host, "POST", routesPath+"/...", route)
+	if err != nil {
+		return fmt.Errorf("failed to append route: %w", err)
+	}
+
+	return nil
+}
+
+// registerServiceFull is the fallback path that replaces the full Caddy
+// configuration. Used when the server or routes path doesn't exist yet
+// (first deployment).
+func (m *Manager) registerServiceFull(host string, service *ServiceConfig, route *Route) error {
 	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
-		// If we can't get config, create a new one
 		config = &CaddyConfig{
 			Apps: &AppsConfig{
 				HTTP: &HTTPApp{
@@ -339,7 +398,6 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 		}
 	}
 
-	// Ensure server exists
 	if config.Apps == nil {
 		config.Apps = &AppsConfig{}
 	}
@@ -353,12 +411,10 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 		}
 	}
 
-	// Check if route for this host already exists
 	server := config.Apps.HTTP.Servers["srv0"]
 	found := false
 	for i, r := range server.Routes {
 		if routeMatchesHost(r, service.Host) {
-			// Update existing route
 			server.Routes[i] = route
 			found = true
 			break
@@ -366,16 +422,13 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	}
 
 	if !found {
-		// Add new route
 		server.Routes = append(server.Routes, route)
 	}
 
-	// Apply configuration
 	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply config: %w", err)
+		return fmt.Errorf("failed to apply full config: %w", err)
 	}
 
-	m.log.HostSuccess(host, "Service %s registered", service.Name)
 	return nil
 }
 
@@ -389,7 +442,7 @@ type ServiceConfig struct {
 	// Upstream addresses (host:port)
 	Upstreams []string
 
-	// Health check path
+	// Health check path for liveness (used by Caddy active health checks)
 	HealthPath string
 
 	// Health check interval
@@ -445,10 +498,32 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	return route
 }
 
-// DeregisterService removes a service from the proxy
+// DeregisterService removes a service from the proxy using route-specific
+// API operations. Falls back to full config replacement on error.
 func (m *Manager) DeregisterService(host, serviceHost string) error {
 	m.log.Host(host, "Deregistering service for %s...", serviceHost)
 
+	// Try route-specific deletion first
+	routesPath := "/config/apps/http/servers/srv0/routes"
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err == nil {
+		var routes []*Route
+		if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
+			for i, r := range routes {
+				if routeMatchesHost(r, serviceHost) {
+					routePath := fmt.Sprintf("%s/%d", routesPath, i)
+					if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
+						m.log.HostSuccess(host, "Service deregistered")
+						return nil
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Fall back to full config replacement
+	m.log.Debug("Route-specific deregister failed, falling back to full config")
 	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
@@ -463,7 +538,6 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 		return nil
 	}
 
-	// Filter out the route for this host
 	var filtered []*Route
 	for _, r := range server.Routes {
 		if !routeMatchesHost(r, serviceHost) {
@@ -480,46 +554,81 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 	return nil
 }
 
-// AddUpstream adds an upstream to an existing service
+// AddUpstream adds an upstream to an existing service using route-specific
+// API operations. Falls back to full config replacement on error.
 func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 	m.log.Host(host, "Adding upstream %s to %s...", upstream, serviceHost)
 
-	config, err := m.caddyClient.GetConfig(host)
-	if err != nil {
+	if err := m.modifyUpstreams(host, serviceHost, func(upstreams []*Upstream) []*Upstream {
+		return append(upstreams, &Upstream{Dial: upstream})
+	}); err != nil {
 		return err
-	}
-
-	if config.Apps == nil || config.Apps.HTTP == nil {
-		return fmt.Errorf("no HTTP config found")
-	}
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if server == nil {
-		return fmt.Errorf("server not found")
-	}
-
-	// Find the route and add upstream
-	for _, route := range server.Routes {
-		if routeMatchesHost(route, serviceHost) {
-			if len(route.Handle) > 0 {
-				route.Handle[0].Upstreams = append(route.Handle[0].Upstreams, &Upstream{Dial: upstream})
-			}
-			break
-		}
-	}
-
-	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply config: %w", err)
 	}
 
 	m.log.HostSuccess(host, "Upstream added")
 	return nil
 }
 
-// RemoveUpstream removes an upstream from a service
+// RemoveUpstream removes an upstream from a service using route-specific
+// API operations. Falls back to full config replacement on error.
 func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 	m.log.Host(host, "Removing upstream %s from %s...", upstream, serviceHost)
 
+	if err := m.modifyUpstreams(host, serviceHost, func(upstreams []*Upstream) []*Upstream {
+		var filtered []*Upstream
+		for _, u := range upstreams {
+			if u.Dial != upstream {
+				filtered = append(filtered, u)
+			}
+		}
+		return filtered
+	}); err != nil {
+		return err
+	}
+
+	m.log.HostSuccess(host, "Upstream removed")
+	return nil
+}
+
+// modifyUpstreams finds the route for serviceHost and applies a transformation
+// function to its upstreams list. Uses route-specific API with fallback to
+// full config replacement.
+func (m *Manager) modifyUpstreams(host, serviceHost string, transform func([]*Upstream) []*Upstream) error {
+	routesPath := "/config/apps/http/servers/srv0/routes"
+
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err != nil {
+		return m.modifyUpstreamsFull(host, serviceHost, transform)
+	}
+
+	var routes []*Route
+	if err := json.Unmarshal(data, &routes); err != nil {
+		return m.modifyUpstreamsFull(host, serviceHost, transform)
+	}
+
+	for i, route := range routes {
+		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 {
+			route.Handle[0].Upstreams = transform(route.Handle[0].Upstreams)
+
+			// PATCH just the handler's upstreams for this route
+			upstreamsPath := fmt.Sprintf("%s/%d/handle/0/upstreams", routesPath, i)
+			_, err := m.caddyClient.apiRequest(host, "PATCH", upstreamsPath, route.Handle[0].Upstreams)
+			if err != nil {
+				// Fall back to patching the whole route
+				routePath := fmt.Sprintf("%s/%d", routesPath, i)
+				if _, routeErr := m.caddyClient.apiRequest(host, "PATCH", routePath, route); routeErr != nil {
+					return m.modifyUpstreamsFull(host, serviceHost, transform)
+				}
+			}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no route found for host %s", serviceHost)
+}
+
+// modifyUpstreamsFull is the fallback that reads and replaces the full config.
+func (m *Manager) modifyUpstreamsFull(host, serviceHost string, transform func([]*Upstream) []*Upstream) error {
 	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
 		return err
@@ -534,28 +643,100 @@ func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 		return fmt.Errorf("server not found")
 	}
 
-	// Find the route and remove upstream
+	found := false
 	for _, route := range server.Routes {
-		if routeMatchesHost(route, serviceHost) {
-			if len(route.Handle) > 0 {
-				var filtered []*Upstream
-				for _, u := range route.Handle[0].Upstreams {
-					if u.Dial != upstream {
-						filtered = append(filtered, u)
-					}
-				}
-				route.Handle[0].Upstreams = filtered
-			}
+		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 {
+			route.Handle[0].Upstreams = transform(route.Handle[0].Upstreams)
+			found = true
 			break
 		}
+	}
+
+	if !found {
+		return fmt.Errorf("no route found for host %s", serviceHost)
 	}
 
 	if err := m.caddyClient.LoadConfig(host, config); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
 
-	m.log.HostSuccess(host, "Upstream removed")
 	return nil
+}
+
+// DrainUpstream waits for all in-flight requests to the given upstream to
+// complete by polling Caddy's /reverse_proxy/upstreams admin endpoint. The
+// upstream should already have been removed from the route so no new requests
+// are sent to it. The method returns when the active request count reaches
+// zero or the timeout expires.
+//
+// A minimum grace period of 5 seconds is always applied, even if the
+// upstream is no longer tracked by Caddy, to allow in-transit TCP
+// connections to complete naturally.
+func (m *Manager) DrainUpstream(host, upstream string, timeout time.Duration) error {
+	if timeout <= 0 {
+		return nil
+	}
+
+	m.log.Host(host, "Draining connections from %s (timeout=%s)...", upstream, timeout)
+
+	deadline := time.Now().Add(timeout)
+	pollInterval := 2 * time.Second
+
+	// Minimum grace period: even if Caddy reports 0 active requests
+	// (upstream already removed from its tracking), in-transit TCP
+	// data may still be flowing through kernel buffers.
+	minGrace := 5 * time.Second
+	if timeout < minGrace {
+		minGrace = timeout
+	}
+	graceDeadline := time.Now().Add(minGrace)
+	everFoundActive := false
+
+	for time.Now().Before(deadline) {
+		count, err := m.caddyClient.GetUpstreamRequestCount(host, upstream)
+		if err != nil {
+			// If we can't query Caddy (e.g., endpoint not available), fall
+			// back to waiting out the remaining timeout.
+			m.log.Debug("Cannot query upstream request count, waiting remaining timeout: %v", err)
+			remaining := time.Until(deadline)
+			if remaining > 0 {
+				time.Sleep(remaining)
+			}
+			return nil
+		}
+
+		if count > 0 {
+			everFoundActive = true
+			m.log.Debug("Upstream %s still has %d active request(s), waiting...", upstream, count)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// count == 0: upstream reports no active requests.
+		if everFoundActive {
+			// We previously saw active requests and now they've drained.
+			m.log.Host(host, "Upstream %s fully drained", upstream)
+			return nil
+		}
+
+		// Never saw active requests — Caddy may have already removed the
+		// upstream from its tracking. Apply the minimum grace period.
+		if time.Now().Before(graceDeadline) {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		m.log.Host(host, "Upstream %s drain grace period complete", upstream)
+		return nil
+	}
+
+	m.log.Warn("Drain timeout reached for upstream %s, proceeding", upstream)
+	return nil
+}
+
+// GetUpstreamRequestCount returns the active request count for an upstream.
+func (m *Manager) GetUpstreamRequestCount(host, upstream string) (int, error) {
+	return m.caddyClient.GetUpstreamRequestCount(host, upstream)
 }
 
 func routeMatchesHost(route *Route, host string) bool {
@@ -569,15 +750,33 @@ func routeMatchesHost(route *Route, host string) bool {
 	return false
 }
 
-// BootAll starts the proxy on multiple hosts
+// BootAll starts the proxy on multiple hosts in parallel.
 func (m *Manager) BootAll(hosts []string, config *ProxyConfig) error {
 	m.log.Header("Starting proxy on %d host(s)", len(hosts))
 
-	var errors []error
+	type bootErr struct {
+		host string
+		err  error
+	}
+	errCh := make(chan bootErr, len(hosts))
+	var wg sync.WaitGroup
+
 	for _, host := range hosts {
-		if err := m.Boot(host, config); err != nil {
-			errors = append(errors, fmt.Errorf("%s: %w", host, err))
-		}
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+			if err := m.Boot(h, config); err != nil {
+				errCh <- bootErr{host: h, err: err}
+			}
+		}(host)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errors []error
+	for e := range errCh {
+		errors = append(errors, fmt.Errorf("%s: %w", e.host, e.err))
 	}
 
 	if len(errors) > 0 {
@@ -588,58 +787,88 @@ func (m *Manager) BootAll(hosts []string, config *ProxyConfig) error {
 }
 
 // AddWeightedUpstream adds an upstream with a specific weight (for canary deployments)
+// using route-specific API operations.
 func (m *Manager) AddWeightedUpstream(host, serviceHost, upstream string, weight int) error {
 	m.log.Host(host, "Adding weighted upstream %s (weight=%d) to %s...", upstream, weight, serviceHost)
 
-	config, err := m.caddyClient.GetConfig(host)
-	if err != nil {
-		return err
-	}
-
-	if config.Apps == nil || config.Apps.HTTP == nil {
-		return fmt.Errorf("no HTTP config found")
-	}
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if server == nil {
-		return fmt.Errorf("server not found")
-	}
-
-	// Find the route and add weighted upstream
-	for _, route := range server.Routes {
-		if routeMatchesHost(route, serviceHost) {
-			if len(route.Handle) > 0 {
-				// Add upstream with weight
-				route.Handle[0].Upstreams = append(route.Handle[0].Upstreams, &Upstream{
-					Dial:   upstream,
-					Weight: weight,
-				})
-
-				// Ensure we're using weighted round robin for load balancing
-				if route.Handle[0].LoadBalancing == nil {
-					route.Handle[0].LoadBalancing = &LoadBalancing{}
-				}
-				if route.Handle[0].LoadBalancing.SelectionPolicy == nil {
-					route.Handle[0].LoadBalancing.SelectionPolicy = &SelectionPolicy{}
-				}
-				route.Handle[0].LoadBalancing.SelectionPolicy.Policy = "weighted_round_robin"
-			}
-			break
+	if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
+		handler.Upstreams = append(handler.Upstreams, &Upstream{
+			Dial:   upstream,
+			Weight: weight,
+		})
+		if handler.LoadBalancing == nil {
+			handler.LoadBalancing = &LoadBalancing{}
 		}
-	}
-
-	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply config: %w", err)
+		if handler.LoadBalancing.SelectionPolicy == nil {
+			handler.LoadBalancing.SelectionPolicy = &SelectionPolicy{}
+		}
+		handler.LoadBalancing.SelectionPolicy.Policy = "weighted_round_robin"
+	}); err != nil {
+		return err
 	}
 
 	m.log.HostSuccess(host, "Weighted upstream added")
 	return nil
 }
 
-// SetUpstreamWeight modifies the weight of an existing upstream
+// SetUpstreamWeight modifies the weight of an existing upstream using
+// route-specific API operations.
 func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight int) error {
 	m.log.Host(host, "Setting weight=%d for upstream %s on %s...", weight, upstream, serviceHost)
 
+	found := false
+	if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
+		for _, u := range handler.Upstreams {
+			if u.Dial == upstream {
+				u.Weight = weight
+				found = true
+				break
+			}
+		}
+	}); err != nil {
+		return err
+	}
+
+	if !found {
+		return fmt.Errorf("upstream %s not found for service %s", upstream, serviceHost)
+	}
+
+	m.log.HostSuccess(host, "Upstream weight updated")
+	return nil
+}
+
+// modifyRoute finds the route for serviceHost and applies a transformation
+// function to its first handler. Uses route-specific API with fallback.
+func (m *Manager) modifyRoute(host, serviceHost string, transform func(*Handler)) error {
+	routesPath := "/config/apps/http/servers/srv0/routes"
+
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err != nil {
+		return m.modifyRouteFull(host, serviceHost, transform)
+	}
+
+	var routes []*Route
+	if err := json.Unmarshal(data, &routes); err != nil {
+		return m.modifyRouteFull(host, serviceHost, transform)
+	}
+
+	for i, route := range routes {
+		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 {
+			transform(route.Handle[0])
+
+			routePath := fmt.Sprintf("%s/%d", routesPath, i)
+			if _, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route); err != nil {
+				return m.modifyRouteFull(host, serviceHost, transform)
+			}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no route found for host %s", serviceHost)
+}
+
+// modifyRouteFull is the fallback that reads and replaces the full config.
+func (m *Manager) modifyRouteFull(host, serviceHost string, transform func(*Handler)) error {
 	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
 		return err
@@ -654,32 +883,17 @@ func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight i
 		return fmt.Errorf("server not found")
 	}
 
-	// Find the route and update upstream weight
-	found := false
 	for _, route := range server.Routes {
-		if routeMatchesHost(route, serviceHost) {
-			if len(route.Handle) > 0 {
-				for _, u := range route.Handle[0].Upstreams {
-					if u.Dial == upstream {
-						u.Weight = weight
-						found = true
-						break
-					}
-				}
-			}
+		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 {
+			transform(route.Handle[0])
 			break
 		}
-	}
-
-	if !found {
-		return fmt.Errorf("upstream %s not found for service %s", upstream, serviceHost)
 	}
 
 	if err := m.caddyClient.LoadConfig(host, config); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
 
-	m.log.HostSuccess(host, "Upstream weight updated")
 	return nil
 }
 
@@ -689,7 +903,23 @@ type UpstreamWeight struct {
 }
 
 // GetUpstreamWeights returns all upstreams with their weights for a service
+// using route-specific API operations.
 func (m *Manager) GetUpstreamWeights(host, serviceHost string) ([]UpstreamWeight, error) {
+	// Try route-specific query first
+	routesPath := "/config/apps/http/servers/srv0/routes"
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err == nil {
+		var routes []*Route
+		if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
+			for _, route := range routes {
+				if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 && route.Handle[0].Upstreams != nil {
+					return extractWeights(route.Handle[0].Upstreams), nil
+				}
+			}
+		}
+	}
+
+	// Fall back to full config
 	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
 		return nil, err
@@ -704,25 +934,26 @@ func (m *Manager) GetUpstreamWeights(host, serviceHost string) ([]UpstreamWeight
 		return nil, fmt.Errorf("server not found")
 	}
 
-	// Find the route and get upstream weights
 	for _, route := range server.Routes {
-		if routeMatchesHost(route, serviceHost) {
-			if len(route.Handle) > 0 && route.Handle[0].Upstreams != nil {
-				weights := make([]UpstreamWeight, len(route.Handle[0].Upstreams))
-				for i, u := range route.Handle[0].Upstreams {
-					weight := u.Weight
-					if weight == 0 {
-						weight = 1 // Default weight
-					}
-					weights[i] = UpstreamWeight{
-						Dial:   u.Dial,
-						Weight: weight,
-					}
-				}
-				return weights, nil
-			}
+		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 && route.Handle[0].Upstreams != nil {
+			return extractWeights(route.Handle[0].Upstreams), nil
 		}
 	}
 
 	return nil, fmt.Errorf("service %s not found", serviceHost)
+}
+
+func extractWeights(upstreams []*Upstream) []UpstreamWeight {
+	weights := make([]UpstreamWeight, len(upstreams))
+	for i, u := range upstreams {
+		weight := u.Weight
+		if weight == 0 {
+			weight = 1
+		}
+		weights[i] = UpstreamWeight{
+			Dial:   u.Dial,
+			Weight: weight,
+		}
+	}
+	return weights
 }
