@@ -35,11 +35,37 @@ Azud solves these with:
 - **Rollback support** to any previous version
 - **CI/CD native** with GitHub Actions templates
 
+## Documentation
+
+- `docs/README.md` - Documentation index
+- `docs/GETTING_STARTED.md` - First deploy walkthrough
+- `docs/CONFIG_REFERENCE.md` - Configuration reference
+- `docs/HOW_IT_WORKS.md` - Architecture and deployment model
+- `docs/OPERATIONS.md` - Day-2 tasks (logs, scaling, canary, rollbacks)
+- `docs/PRODUCTION_CHECKLIST.md` - Production readiness checklist
+- `docs/TROUBLESHOOTING.md` - Common failures and fixes
+- `docs/CHEATSHEET.md` - Command quick reference
+- `docs/MIGRATION_KAMAL2.md` - Move from Kamal 2 to Azud
+- `docs/MIGRATION_DOKKU.md` - Move from Dokku to Azud
+- `docs/SECURITY.md` - Security and secrets guidance
+- `docs/CLI_REFERENCE.md` - Full CLI and config reference
+- `docs/ADVANCED_USAGE.md` - Recipes and advanced configs
+- `docs/CI_CD.md` - CI/CD examples
+- `docs/DESIGN_PHILOSOPHY.md` - Why Azud exists
+- `docs/FAQ.md` - Common questions
+
 ## Installation
 
 ```bash
 go install github.com/adriancarayol/azud@latest
 ```
+
+## Prerequisites
+
+- Linux servers (Ubuntu/Debian/CentOS/RHEL/etc.) with SSH access
+- Ports 80/443 open to the internet for HTTPS (or your load balancer forwards to them)
+- DNS pointing your domain(s) to the target servers or load balancer
+- Podman installed (Azud can bootstrap during `azud setup`)
 
 ## Quick Start
 
@@ -47,6 +73,7 @@ go install github.com/adriancarayol/azud@latest
    ```bash
    azud init
    ```
+   This creates `.azud/secrets` for local secrets. Keep it out of version control.
 
 2. **Configure** your deployment in `config/deploy.yml`:
    ```yaml
@@ -84,11 +111,11 @@ go install github.com/adriancarayol/azud@latest
       # helper_image: "curlimages/curl:8.5.0"
       # helper_pull: "missing"
 
-   env:
-     clear:
-       RAILS_ENV: production
-     secret:
-       - DATABASE_URL
+  env:
+    clear:
+      RAILS_ENV: production
+    secret:
+      - DATABASE_URL
    ```
 
 3. **Setup** your servers:

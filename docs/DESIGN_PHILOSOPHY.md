@@ -141,3 +141,10 @@ No pre-validation of nginx configurations before deployment - failures happen at
 6. **Battle-Tested Components** - Use proven tools (Caddy, Podman), don't reinvent
 7. **Clear Output** - Know what's happening without parsing logs
 8. **Stateless CLI** - Server state derived from config, not stored in CLI
+
+---
+
+## Related docs
+
+- `docs/HOW_IT_WORKS.md`
+- `docs/FAQ.md`

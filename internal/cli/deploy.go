@@ -24,7 +24,7 @@ This command performs a zero-downtime deployment:
 Example:
   azud deploy                    # Deploy latest version
   azud deploy --version v1.2.3   # Deploy specific version
-  azud deploy --skip-push        # Deploy without pushing (image already in registry)`,
+  azud deploy --skip-build       # Deploy without building (image already in registry)`,
 	RunE: runDeploy,
 }
 
