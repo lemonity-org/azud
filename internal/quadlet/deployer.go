@@ -13,9 +13,10 @@ type QuadletDeployer struct {
 	ssh  *ssh.Client
 	log  *output.Logger
 	path string // e.g., /etc/containers/systemd/
+	user bool
 }
 
-func NewQuadletDeployer(sshClient *ssh.Client, log *output.Logger, path string) *QuadletDeployer {
+func NewQuadletDeployer(sshClient *ssh.Client, log *output.Logger, path string, userMode bool) *QuadletDeployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}
@@ -26,6 +27,7 @@ func NewQuadletDeployer(sshClient *ssh.Client, log *output.Logger, path string) 
 		ssh:  sshClient,
 		log:  log,
 		path: path,
+		user: userMode,
 	}
 }
 
@@ -75,7 +77,7 @@ func (q *QuadletDeployer) Remove(host, filename string) error {
 }
 
 func (q *QuadletDeployer) Reload(host string) error {
-	result, err := q.ssh.Execute(host, "systemctl daemon-reload")
+	result, err := q.ssh.Execute(host, q.systemctlCmd("daemon-reload"))
 	if err != nil {
 		return err
 	}
@@ -86,7 +88,7 @@ func (q *QuadletDeployer) Reload(host string) error {
 }
 
 func (q *QuadletDeployer) Start(host, service string) error {
-	result, err := q.ssh.Execute(host, fmt.Sprintf("systemctl start %s", service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd("start "+service))
 	if err != nil {
 		return err
 	}
@@ -97,7 +99,7 @@ func (q *QuadletDeployer) Start(host, service string) error {
 }
 
 func (q *QuadletDeployer) Stop(host, service string) error {
-	result, err := q.ssh.Execute(host, fmt.Sprintf("systemctl stop %s", service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd("stop "+service))
 	if err != nil {
 		return err
 	}
@@ -108,7 +110,7 @@ func (q *QuadletDeployer) Stop(host, service string) error {
 }
 
 func (q *QuadletDeployer) Enable(host, service string) error {
-	result, err := q.ssh.Execute(host, fmt.Sprintf("systemctl enable %s", service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd("enable "+service))
 	if err != nil {
 		return err
 	}
@@ -119,7 +121,7 @@ func (q *QuadletDeployer) Enable(host, service string) error {
 }
 
 func (q *QuadletDeployer) Status(host, service string) (string, error) {
-	result, err := q.ssh.Execute(host, fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd(fmt.Sprintf("is-active %s 2>/dev/null || true", service)))
 	if err != nil {
 		return "", err
 	}
@@ -128,6 +130,9 @@ func (q *QuadletDeployer) Status(host, service string) (string, error) {
 
 func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*ssh.Result, error) {
 	cmd := fmt.Sprintf("journalctl -u %s --no-pager", service)
+	if q.user {
+		cmd = "journalctl --user-unit " + service + " --no-pager"
+	}
 	if follow {
 		cmd += " -f"
 	}
@@ -135,4 +140,11 @@ func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*s
 		cmd += fmt.Sprintf(" -n %d", lines)
 	}
 	return q.ssh.Execute(host, cmd)
+}
+
+func (q *QuadletDeployer) systemctlCmd(action string) string {
+	if q.user {
+		return "systemctl --user " + action
+	}
+	return "systemctl " + action
 }

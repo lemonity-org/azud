@@ -20,3 +20,25 @@ func GetSecretOrEnv(key string) string {
 	}
 	return ""
 }
+
+// AllSecrets returns a copy of all loaded secrets.
+func AllSecrets() map[string]string {
+	out := make(map[string]string, len(loadedSecretsStore))
+	for k, v := range loadedSecretsStore {
+		out[k] = v
+	}
+	return out
+}
+
+// DefaultRemoteSecretsPath is the default secrets file path on remote hosts.
+func DefaultRemoteSecretsPath() string {
+	return "$HOME/.azud/secrets"
+}
+
+// RemoteSecretsPath returns the configured remote secrets path or the default.
+func RemoteSecretsPath(cfg *Config) string {
+	if cfg != nil && cfg.SecretsRemotePath != "" {
+		return cfg.SecretsRemotePath
+	}
+	return DefaultRemoteSecretsPath()
+}

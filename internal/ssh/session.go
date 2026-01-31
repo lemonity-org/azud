@@ -83,6 +83,47 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 	return result, nil
 }
 
+// ExecuteWithStdin runs a command on the remote host with provided stdin.
+func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.lastUsed = time.Now()
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session: %w", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+	session.Stdin = stdin
+
+	start := time.Now()
+	err = session.Run(cmd)
+	duration := time.Since(start)
+
+	result := &Result{
+		Host:     c.host,
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		Duration: duration,
+	}
+
+	if err != nil {
+		if exitErr, ok := err.(*ssh.ExitError); ok {
+			result.ExitCode = exitErr.ExitStatus()
+		} else {
+			result.ExitCode = -1
+			result.Error = err
+		}
+	}
+
+	return result, nil
+}
+
 // ExecuteWithPty runs a command with a pseudo-terminal
 func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
 	c.mu.Lock()

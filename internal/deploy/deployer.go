@@ -15,16 +15,16 @@ import (
 
 // Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
-	cfg          *config.Config
-	sshClient    *ssh.Client
-	podman       *podman.Client
-	containers   *podman.ContainerManager
-	images       *podman.ImageManager
-	registry     *podman.RegistryManager
-	proxy        *proxy.Manager
-	hooks        *HookRunner
-	history      *HistoryStore
-	log          *output.Logger
+	cfg        *config.Config
+	sshClient  *ssh.Client
+	podman     *podman.Client
+	containers *podman.ContainerManager
+	images     *podman.ImageManager
+	registry   *podman.RegistryManager
+	proxy      *proxy.Manager
+	hooks      *HookRunner
+	history    *HistoryStore
+	log        *output.Logger
 }
 
 func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) *Deployer {
@@ -106,6 +106,13 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	record := NewDeploymentRecord(d.cfg.Service, image, version, opts.Destination, hosts)
 	record.Start()
 
+	// Ensure required secrets are present on all hosts.
+	if err := d.ensureRemoteSecrets(hosts); err != nil {
+		record.Fail(err)
+		_ = d.history.Record(record)
+		return err
+	}
+
 	// Try to get previous version for rollback reference
 	if lastDeploy, err := d.history.GetLastSuccessful(d.cfg.Service); err == nil {
 		record.PreviousVersion = lastDeploy.Version
@@ -173,6 +180,10 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	return nil
 }
 
+func (d *Deployer) ensureRemoteSecrets(hosts []string) error {
+	return ValidateRemoteSecrets(d.sshClient, hosts, config.RemoteSecretsPath(d.cfg), d.cfg.Env.Secret)
+}
+
 func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	d.log.Host(host, "Starting deployment...")
 
@@ -207,19 +218,24 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	// Register new container with proxy
 	d.log.Host(host, "Registering with proxy...")
 	newUpstream := fmt.Sprintf("%s:%d", newContainerName, d.cfg.Proxy.AppPort)
+	proxyHost := d.cfg.Proxy.PrimaryHost()
 
 	if oldExists {
 		// Add new upstream alongside the old one so both receive traffic
 		// during the transition. Using AddUpstream (not RegisterService)
 		// preserves the old upstream in the route, which is required for
 		// connection-aware draining to work.
-		if err := d.proxy.AddUpstream(host, d.cfg.Proxy.Host, newUpstream); err != nil {
-			// AddUpstream may fail if there's no existing route (e.g., proxy
-			// was rebooted). Fall back to a full RegisterService.
-			d.log.Debug("Failed to add upstream alongside old: %v", err)
-			if regErr := d.registerWithProxy(host, newUpstream); regErr != nil {
-				d.log.Warn("Failed to register with proxy: %v", regErr)
+		if proxyHost != "" {
+			if err := d.proxy.AddUpstream(host, proxyHost, newUpstream); err != nil {
+				// AddUpstream may fail if there's no existing route (e.g., proxy
+				// was rebooted). Fall back to a full RegisterService.
+				d.log.Debug("Failed to add upstream alongside old: %v", err)
+				if regErr := d.registerWithProxy(host, newUpstream); regErr != nil {
+					d.log.Warn("Failed to register with proxy: %v", regErr)
+				}
 			}
+		} else if regErr := d.registerWithProxy(host, newUpstream); regErr != nil {
+			d.log.Warn("Failed to register with proxy: %v", regErr)
 		}
 	} else {
 		// First deployment — no existing route to add to.
@@ -236,8 +252,10 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 		// The old upstream is still tracked by Caddy until its in-flight
 		// requests complete, allowing the drain step to poll accurately.
 		d.log.Host(host, "Removing old upstream from proxy...")
-		if err := d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, oldUpstream); err != nil {
-			d.log.Debug("Failed to remove old upstream: %v", err)
+		if proxyHost != "" {
+			if err := d.proxy.RemoveUpstream(host, proxyHost, oldUpstream); err != nil {
+				d.log.Debug("Failed to remove old upstream: %v", err)
+			}
 		}
 
 		// Drain: poll Caddy for in-flight requests on the old upstream,
@@ -257,9 +275,9 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 		}
 	}
 
-	// Finalize: rename the new container to the service name and update
-	// the proxy in a single atomic RegisterService call to minimize the
-	// window where the proxy points to a stale container name.
+	// Finalize: rename the new container to the service name and swap
+	// the proxy upstream using add-then-remove so at least one upstream
+	// is always present (no gap = no dropped requests).
 	d.log.Host(host, "Finalizing deployment...")
 	if err := d.containers.Rename(host, newContainerName, oldContainerName); err != nil {
 		// Rename failed — the container is still running under newContainerName
@@ -269,12 +287,23 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 		return nil
 	}
 
-	// Atomically replace the route to point to the renamed container.
-	// RegisterService replaces the entire route in a single API call,
-	// avoiding the two-step add/remove that created a race window.
+	// Swap the upstream from the temporary name to the final service name.
+	// Add the final upstream first, then remove the temporary one. This
+	// ensures there is always at least one healthy upstream in the route,
+	// eliminating the brief gap that a full route replacement would cause.
 	finalUpstream := fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
-	if err := d.registerWithProxy(host, finalUpstream); err != nil {
-		d.log.Warn("Failed to update proxy to final name: %v", err)
+	if proxyHost != "" {
+		if err := d.proxy.AddUpstream(host, proxyHost, finalUpstream); err != nil {
+			// Fallback: if add fails, do a full route replacement
+			d.log.Debug("Failed to add final upstream, falling back to full replace: %v", err)
+			if regErr := d.registerWithProxy(host, finalUpstream); regErr != nil {
+				d.log.Warn("Failed to update proxy to final name: %v", regErr)
+			}
+			return nil
+		}
+		if err := d.proxy.RemoveUpstream(host, proxyHost, newUpstream); err != nil {
+			d.log.Debug("Failed to remove temp upstream: %v", err)
+		}
 	}
 
 	return nil
@@ -291,15 +320,29 @@ func (d *Deployer) waitForHealthy(host, container string) error {
 func (d *Deployer) registerWithProxy(host, upstream string) error {
 	// Use liveness path for Caddy's active health checks (continuous monitoring).
 	// The readiness path is only used during deployment to gate proxy registration.
-	livenessPath := d.cfg.Proxy.Healthcheck.GetLivenessPath()
+	livenessPath := ""
+	if !d.cfg.Proxy.Healthcheck.DisableLiveness {
+		livenessPath = d.cfg.Proxy.Healthcheck.GetLivenessPath()
+	}
+	hosts := d.cfg.Proxy.AllHosts()
+	proxyHost := d.cfg.Proxy.PrimaryHost()
 
 	serviceConfig := &proxy.ServiceConfig{
-		Name:           d.cfg.Service,
-		Host:           d.cfg.Proxy.Host,
-		Upstreams:      []string{upstream},
-		HealthPath:     livenessPath,
-		HealthInterval: d.cfg.Proxy.Healthcheck.Interval,
-		HTTPS:          d.cfg.Proxy.SSL,
+		Name:            d.cfg.Service,
+		Host:            proxyHost,
+		Hosts:           hosts,
+		Upstreams:       []string{upstream},
+		HealthPath:      livenessPath,
+		HealthInterval:  d.cfg.Proxy.Healthcheck.Interval,
+		HealthTimeout:   d.cfg.Proxy.Healthcheck.Timeout,
+		ResponseTimeout:       d.cfg.Proxy.ResponseTimeout,
+		ResponseHeaderTimeout: d.cfg.Proxy.ResponseHeaderTimeout,
+		ForwardHeaders:  d.cfg.Proxy.ForwardHeaders,
+		BufferRequests:  d.cfg.Proxy.Buffering.Requests,
+		BufferResponses: d.cfg.Proxy.Buffering.Responses,
+		MaxRequestBody:  d.cfg.Proxy.Buffering.MaxRequestBody,
+		BufferMemory:    d.cfg.Proxy.Buffering.Memory,
+		HTTPS:           d.cfg.Proxy.SSL,
 	}
 
 	return d.proxy.RegisterService(host, serviceConfig)
@@ -384,6 +427,7 @@ func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
 
 	for _, host := range hosts {
 		d.log.Host(host, "Rolling back to %s...", previousVersion)
+		proxyHost := d.cfg.Proxy.PrimaryHost()
 
 		// The current container (just deployed) is named d.cfg.Service.
 		// Stop and remove it, then re-deploy the previous version.
@@ -392,8 +436,10 @@ func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
 
 		// Remove the newly deployed container from the proxy
 		upstream := fmt.Sprintf("%s:%d", serviceName, d.cfg.Proxy.AppPort)
-		if err := d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, upstream); err != nil {
-			d.log.Debug("Rollback: failed to remove upstream on %s: %v", host, err)
+		if proxyHost != "" {
+			if err := d.proxy.RemoveUpstream(host, proxyHost, upstream); err != nil {
+				d.log.Debug("Rollback: failed to remove upstream on %s: %v", host, err)
+			}
 		}
 
 		// Stop and remove the new container

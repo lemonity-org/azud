@@ -296,7 +296,12 @@ func runAppDetails(cmd *cobra.Command, args []string) error {
 	// Show image info
 	log.Println("")
 	log.Println("Image: %s", cfg.Image)
-	log.Println("Proxy: %s (port %d)", cfg.Proxy.Host, cfg.Proxy.AppPort)
+	proxyHosts := cfg.Proxy.AllHosts()
+	if len(proxyHosts) > 0 {
+		log.Println("Proxy: %s (port %d)", strings.Join(proxyHosts, ", "), cfg.Proxy.AppPort)
+	} else {
+		log.Println("Proxy: (not configured)")
+	}
 
 	return nil
 }
@@ -531,9 +536,10 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	}
 	log.Println("")
 
-	if cfg.Proxy.Host != "" {
+	proxyHosts := cfg.Proxy.AllHosts()
+	if len(proxyHosts) > 0 {
 		log.Println("Proxy:")
-		log.Println("  Host: %s", cfg.Proxy.Host)
+		log.Println("  Hosts: %s", strings.Join(proxyHosts, ", "))
 		log.Println("  SSL: %v", cfg.Proxy.SSL)
 		log.Println("  App Port: %d", cfg.Proxy.AppPort)
 		log.Println("")

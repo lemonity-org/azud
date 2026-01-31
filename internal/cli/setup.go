@@ -68,9 +68,17 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 1: Bootstrap servers
 	if !setupSkipBootstrap {
 		log.Header("Step 1: Bootstrap Servers")
-		bootstrapper := server.NewBootstrapper(sshClient, log)
+		bootstrapper := server.NewBootstrapper(sshClient, log, cfg.Podman.NetworkBackend)
 		if err := bootstrapper.BootstrapAll(hosts); err != nil {
 			return fmt.Errorf("bootstrap failed: %w", err)
+		}
+
+		if cfg.Podman.Rootless {
+			for _, host := range hosts {
+				if err := enableLinger(sshClient, host, cfg.SSH.User); err != nil {
+					log.HostError(host, "Failed to enable linger: %v", err)
+				}
+			}
 		}
 	} else {
 		log.Info("Skipping bootstrap (--skip-bootstrap)")
@@ -111,16 +119,18 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		proxyManager := proxy.NewManager(sshClient, log)
 
 		proxyConfig := &proxy.ProxyConfig{
-			AutoHTTPS: cfg.Proxy.SSL,
-			Email:     cfg.Proxy.ACMEEmail,
-			Staging:   cfg.Proxy.ACMEStaging,
-			HTTPPort:  cfg.Proxy.HTTPPort,
-			HTTPSPort: cfg.Proxy.HTTPSPort,
+			AutoHTTPS:          cfg.Proxy.SSL,
+			Email:              cfg.Proxy.ACMEEmail,
+			Staging:            cfg.Proxy.ACMEStaging,
+			SSLRedirect:        cfg.Proxy.SSLRedirect,
+			HTTPPort:           cfg.Proxy.HTTPPort,
+			HTTPSPort:          cfg.Proxy.HTTPSPort,
+			LoggingEnabled:        cfg.Proxy.Logging.Enabled,
+			RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
+			RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
 		}
-		if len(cfg.Proxy.Hosts) > 0 {
-			proxyConfig.Hosts = cfg.Proxy.Hosts
-		} else if cfg.Proxy.Host != "" {
-			proxyConfig.Hosts = []string{cfg.Proxy.Host}
+		if hosts := cfg.Proxy.AllHosts(); len(hosts) > 0 {
+			proxyConfig.Hosts = hosts
 		}
 
 		// Load custom SSL certificates if configured
@@ -177,10 +187,17 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	log.Header("Setup Complete!")
 	log.Success("Your application is now running at:")
-	if cfg.Proxy.SSL {
-		log.Println("  https://%s", cfg.Proxy.Host)
-	} else {
-		log.Println("  http://%s", cfg.Proxy.Host)
+	proxyHosts := cfg.Proxy.AllHosts()
+	if len(proxyHosts) == 0 {
+		log.Warn("No proxy host configured")
+		return nil
+	}
+	for _, host := range proxyHosts {
+		if cfg.Proxy.SSL {
+			log.Println("  https://%s", host)
+		} else {
+			log.Println("  http://%s", host)
+		}
 	}
 
 	return nil
@@ -198,8 +215,11 @@ func getRegistryPassword() string {
 		return val
 	}
 
-	// Try secrets file
-	// This would use the config's secrets loader
+	// Try secrets file (loaded by config loader)
+	if val, ok := config.GetSecret(secretKey); ok && val != "" {
+		return val
+	}
+
 	return ""
 }
 
@@ -214,6 +234,13 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		if host == "" {
 			log.Warn("No host configured for accessory %s, skipping", name)
 			continue
+		}
+
+		if len(accessory.Env.Secret) > 0 {
+			if err := ensureRemoteSecretsFile(sshClient, []string{host}, accessory.Env.Secret); err != nil {
+				log.HostError(host, "Missing secrets for accessory %s: %v", name, err)
+				continue
+			}
 		}
 
 		// Check if already running
@@ -250,6 +277,9 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 			containerConfig.Env[key] = value
 		}
 		containerConfig.SecretEnv = accessory.Env.Secret
+		if len(containerConfig.SecretEnv) > 0 {
+			containerConfig.EnvFile = config.RemoteSecretsPath(cfg)
+		}
 
 		// Add command if specified
 		// Split command into arguments to preserve proper entrypoint behavior

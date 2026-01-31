@@ -36,23 +36,29 @@ type ContainerConfig struct {
 	Command   []string
 	Env       map[string]string
 	SecretEnv []string // Secret env var names (resolved from secrets file)
-	Ports     []string // host:container or ip:host:container
-	Volumes   []string // host:container or host:container:options
-	Labels    map[string]string
-	Network   string
-	Networks  []string
-	Memory    string // e.g., "512m"
-	CPUs      string // e.g., "0.5"
-	Restart   string // no, always, unless-stopped, on-failure[:max-retries]
-	Detach    bool
-	Remove    bool
-	Pull      bool
+	EnvFile   string   // Path to env file on remote host
+	// EnvFileOptional controls whether a missing env file is tolerated.
+	// When true, run command falls back to no env file if it's missing.
+	EnvFileOptional bool
+	Ports           []string // host:container or ip:host:container
+	Volumes         []string // host:container or host:container:options
+	Labels          map[string]string
+	Network         string
+	NetworkAliases  []string
+	Networks        []string
+	Memory          string // e.g., "512m"
+	CPUs            string // e.g., "0.5"
+	Restart         string // no, always, unless-stopped, on-failure[:max-retries]
+	Detach          bool
+	Remove          bool
+	Pull            bool
 
 	// Healthcheck
-	HealthCmd      string
-	HealthInterval string
-	HealthTimeout  string
-	HealthRetries  int
+	HealthCmd         string
+	HealthInterval    string
+	HealthTimeout     string
+	HealthRetries     int
+	HealthStartPeriod string
 
 	Options []string // Additional run options
 }
@@ -76,11 +82,13 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
-	for _, key := range c.SecretEnv {
-		if value, ok := config.GetSecret(key); ok && value != "" {
-			args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
-		} else {
-			args = append(args, "-e", key)
+	if c.EnvFile == "" {
+		for _, key := range c.SecretEnv {
+			if value, ok := config.GetSecret(key); ok && value != "" {
+				args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+			} else {
+				args = append(args, "-e", key)
+			}
 		}
 	}
 
@@ -98,6 +106,10 @@ func (c *ContainerConfig) BuildRunCommand() string {
 
 	if c.Network != "" {
 		args = append(args, "--network", c.Network)
+	}
+
+	for _, alias := range c.NetworkAliases {
+		args = append(args, "--network-alias", alias)
 	}
 
 	if c.Memory != "" {
@@ -123,16 +135,40 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		if c.HealthRetries > 0 {
 			args = append(args, "--health-retries", fmt.Sprintf("%d", c.HealthRetries))
 		}
+		if c.HealthStartPeriod != "" {
+			args = append(args, "--health-start-period", c.HealthStartPeriod)
+		}
 	}
 
 	args = append(args, c.Options...)
-	args = append(args, c.Image)
+
+	preImageArgs := make([]string, len(args))
+	copy(preImageArgs, args)
 
 	if len(c.Command) > 0 {
+		args = append(args, c.Image)
 		args = append(args, c.Command...)
+	} else {
+		args = append(args, c.Image)
 	}
 
-	return "podman " + strings.Join(args, " ")
+	baseCmd := "podman " + strings.Join(args, " ")
+	if c.EnvFile == "" {
+		return baseCmd
+	}
+
+	withEnvArgs := append(preImageArgs, "--env-file", c.EnvFile, c.Image)
+	if len(c.Command) > 0 {
+		withEnvArgs = append(withEnvArgs, c.Command...)
+	}
+	withEnvCmd := "podman " + strings.Join(withEnvArgs, " ")
+
+	if !c.EnvFileOptional {
+		return withEnvCmd
+	}
+
+	// Prefer env-file if present; otherwise run without it.
+	return fmt.Sprintf("if [ -f %s ]; then %s; else %s; fi", c.EnvFile, withEnvCmd, baseCmd)
 }
 
 // ExecConfig holds configuration for executing a command in a container.

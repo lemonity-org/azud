@@ -178,14 +178,14 @@ func setEnvVars(vars map[string]string) func() {
 			originals[k] = orig
 			wasSet[k] = true
 		}
-		os.Setenv(k, v)
+		_ = os.Setenv(k, v)
 	}
 	return func() {
 		for k := range vars {
 			if wasSet[k] {
-				os.Setenv(k, originals[k])
+				_ = os.Setenv(k, originals[k])
 			} else {
-				os.Unsetenv(k)
+				_ = os.Unsetenv(k)
 			}
 		}
 	}
@@ -193,12 +193,12 @@ func setEnvVars(vars map[string]string) func() {
 
 func unsetEnvVar(key string) func() {
 	orig, wasSet := os.LookupEnv(key)
-	os.Unsetenv(key)
+	_ = os.Unsetenv(key)
 	return func() {
 		if wasSet {
-			os.Setenv(key, orig)
+			_ = os.Setenv(key, orig)
 		} else {
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 		}
 	}
 }

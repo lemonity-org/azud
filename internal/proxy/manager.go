@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,20 +14,16 @@ import (
 )
 
 const (
-	// CaddyImage is the official Caddy container image
-	CaddyImage = "caddy:2-alpine"
-
-	// CaddyContainerName is the name of the Caddy container
+	CaddyImage         = "docker.io/library/caddy:2-alpine"
 	CaddyContainerName = "azud-proxy"
+	CaddyAdminPort     = 2019
+	CaddyHTTPPort      = 80
+	CaddyHTTPSPort     = 443
 
-	// CaddyAdminPort is the admin API port
-	CaddyAdminPort = 2019
-
-	// CaddyHTTPPort is the HTTP port
-	CaddyHTTPPort = 80
-
-	// CaddyHTTPSPort is the HTTPS port
-	CaddyHTTPSPort = 443
+	// CaddyConfigDir and CaddyConfigFile control where the Caddy JSON
+	// configuration is persisted on the remote host so it survives restarts.
+	CaddyConfigDir  = "/var/lib/azud"
+	CaddyConfigFile = "/var/lib/azud/caddy-config.json"
 )
 
 // Manager provisions and configures Caddy reverse proxies on remote hosts.
@@ -51,6 +49,63 @@ func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
 	}
 }
 
+// persistConfig fetches the current Caddy config from the admin API and
+// writes it to CaddyConfigFile on the remote host. Best-effort: errors are
+// logged at Debug level and never returned.
+func (m *Manager) persistConfig(host string) {
+	data, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil)
+	if err != nil {
+		m.log.Debug("persistConfig: failed to GET config: %v", err)
+		return
+	}
+
+	if !json.Valid(data) {
+		m.log.Debug("persistConfig: invalid JSON from Caddy admin API")
+		return
+	}
+
+	// Write atomically via a temp file to avoid partial writes on failure.
+	tmpFile := CaddyConfigFile + ".tmp"
+	cmd := fmt.Sprintf("mkdir -p %s && cat > %s && mv %s %s",
+		CaddyConfigDir, tmpFile, tmpFile, CaddyConfigFile)
+	result, err := m.sshClient.ExecuteWithStdin(host, cmd, bytes.NewReader(data))
+	if err != nil {
+		m.log.Debug("persistConfig: failed to write config file: %v", err)
+		return
+	}
+	if result.ExitCode != 0 {
+		m.log.Debug("persistConfig: write command failed: %s", result.Stderr)
+		return
+	}
+	m.log.Debug("persistConfig: saved config to %s", CaddyConfigFile)
+}
+
+// restoreConfig reads a previously persisted Caddy config from CaddyConfigFile
+// on the remote host and loads it into Caddy via the admin API. Returns an
+// error so callers can decide whether to warn or fail.
+func (m *Manager) restoreConfig(host string) error {
+	cmd := fmt.Sprintf("test -f %s && cat %s", CaddyConfigFile, CaddyConfigFile)
+	result, err := m.sshClient.Execute(host, cmd)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("config file does not exist")
+	}
+
+	var config CaddyConfig
+	if err := json.Unmarshal([]byte(result.Stdout), &config); err != nil {
+		return fmt.Errorf("persisted config is invalid JSON: %w", err)
+	}
+
+	if err := m.caddyClient.LoadConfig(host, &config); err != nil {
+		return fmt.Errorf("failed to load persisted config: %w", err)
+	}
+
+	m.log.Debug("restoreConfig: restored config from %s", CaddyConfigFile)
+	return nil
+}
+
 type ProxyConfig struct {
 	// Hosts to route to (e.g., myapp.example.com)
 	Hosts []string
@@ -63,6 +118,9 @@ type ProxyConfig struct {
 
 	// Use Let's Encrypt staging CA (for testing, avoids rate limits)
 	Staging bool
+
+	// Redirect HTTP to HTTPS
+	SSLRedirect bool
 
 	// Admin API listen address (default: localhost:2019)
 	AdminListen string
@@ -78,51 +136,57 @@ type ProxyConfig struct {
 
 	// Custom SSL private key PEM content
 	SSLPrivateKey string
+
+	// Enable access logging (even without header redaction)
+	LoggingEnabled bool
+
+	// Request headers to redact from access logs
+	RedactRequestHeaders []string
+
+	// Response headers to redact from access logs
+	RedactResponseHeaders []string
 }
 
 // Boot starts the Caddy proxy on a host
 func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	m.log.Host(host, "Starting proxy...")
 
-	// Check if already running
 	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy status: %w", err)
 	}
-
 	if running {
 		m.log.Host(host, "Proxy already running")
 		return nil
 	}
 
-	// Check if container exists but is stopped
 	exists, err := m.podman.Exists(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy container: %w", err)
 	}
 
 	if exists {
-		// Start existing container
 		if err := m.podman.Start(host, CaddyContainerName); err != nil {
 			return fmt.Errorf("failed to start proxy: %w", err)
+		}
+		// Wait for Caddy to be ready, then restore persisted config
+		time.Sleep(2 * time.Second)
+		if err := m.restoreConfig(host); err != nil {
+			m.log.Warn("Failed to restore proxy config: %v", err)
 		}
 		m.log.HostSuccess(host, "Proxy started")
 		return nil
 	}
 
-	// Determine ports to use (use config if provided, otherwise defaults)
 	httpPort := CaddyHTTPPort
 	httpsPort := CaddyHTTPSPort
-	if config != nil {
-		if config.HTTPPort > 0 {
-			httpPort = config.HTTPPort
-		}
-		if config.HTTPSPort > 0 {
-			httpsPort = config.HTTPSPort
-		}
+	if config != nil && config.HTTPPort > 0 {
+		httpPort = config.HTTPPort
+	}
+	if config != nil && config.HTTPSPort > 0 {
+		httpsPort = config.HTTPSPort
 	}
 
-	// Create and start new container with custom admin API config
 	containerConfig := &podman.ContainerConfig{
 		Name:    CaddyContainerName,
 		Image:   CaddyImage,
@@ -142,7 +206,6 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 			"azud.managed": "true",
 			"azud.type":    "proxy",
 		},
-		// Start Caddy with admin API listening on 0.0.0.0 so it's accessible via container port forwarding
 		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--watch"},
 		Env: map[string]string{
 			"CADDY_ADMIN": "0.0.0.0:2019",
@@ -160,6 +223,8 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	// Load initial configuration
 	if err := m.loadInitialConfig(host, config); err != nil {
 		m.log.Warn("Failed to load initial config: %v", err)
+	} else {
+		m.persistConfig(host)
 	}
 
 	m.log.HostSuccess(host, "Proxy started")
@@ -182,12 +247,55 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 			},
 		},
 	}
+	server := caddyConfig.Apps.HTTP.Servers["srv0"]
 
-	// Check if custom SSL certificates are provided
+	if config != nil && config.AutoHTTPS && !config.SSLRedirect {
+		server.AutoHTTPS = &AutoHTTPSConfig{
+			DisableRedirects: true,
+		}
+	}
+
+	if config != nil && (config.LoggingEnabled || len(config.RedactRequestHeaders) > 0 || len(config.RedactResponseHeaders) > 0) {
+		loggerName := "access"
+		encoder := &Encoder{Format: "json"}
+
+		// Wrap the encoder with a filter if any headers need redacting.
+		if len(config.RedactRequestHeaders) > 0 || len(config.RedactResponseHeaders) > 0 {
+			fields := make(map[string]*Filter)
+			for _, header := range config.RedactRequestHeaders {
+				header = strings.TrimSpace(header)
+				if header != "" {
+					fields[fmt.Sprintf("request>headers>%s", header)] = &Filter{Filter: "delete"}
+				}
+			}
+			for _, header := range config.RedactResponseHeaders {
+				header = strings.TrimSpace(header)
+				if header != "" {
+					fields[fmt.Sprintf("resp_headers>%s", header)] = &Filter{Filter: "delete"}
+				}
+			}
+			encoder = &Encoder{
+				Format: "filter",
+				Wrap:   &Encoder{Format: "json"},
+				Fields: fields,
+			}
+		}
+
+		caddyConfig.Logging = &LoggingConfig{
+			Logs: map[string]*Log{
+				loggerName: {
+					Level:   "INFO",
+					Writer:  &Writer{Output: "stdout"},
+					Encoder: encoder,
+				},
+			},
+		}
+		server.Logs = &ServerLogs{DefaultLoggerName: loggerName}
+	}
+
 	if config != nil && config.SSLCertificate != "" && config.SSLPrivateKey != "" {
 		m.log.Host(host, "Configuring custom SSL certificates...")
 
-		// Load custom certificates via load_pem
 		caddyConfig.Apps.TLS = &TLSApp{
 			Certificates: &CertificatesConfig{
 				LoadPEM: []LoadedCertificate{
@@ -197,25 +305,20 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 					},
 				},
 			},
-			// Disable automatic certificate management for these hosts
 			Automation: &TLSAutomation{
 				Policies: []*TLSPolicy{
 					{
 						Subjects: config.Hosts,
-						// Empty issuers array disables automatic certificate management
-						Issuers: []*Issuer{},
+						Issuers:  []*Issuer{}, // empty disables ACME
 					},
 				},
 			},
 		}
 	} else if config != nil && config.AutoHTTPS && config.Email != "" {
-		// Add TLS automation if HTTPS is enabled (Let's Encrypt)
 		issuer := &Issuer{
 			Module: "acme",
 			Email:  config.Email,
 		}
-
-		// Use staging CA if configured (avoids rate limits during testing)
 		if config.Staging {
 			issuer.CA = "https://acme-staging-v02.api.letsencrypt.org/directory"
 		}
@@ -254,6 +357,12 @@ func (m *Manager) Reboot(host string) error {
 		return fmt.Errorf("failed to restart proxy: %w", err)
 	}
 
+	// Wait for Caddy to be ready, then restore persisted config
+	time.Sleep(2 * time.Second)
+	if err := m.restoreConfig(host); err != nil {
+		m.log.Warn("Failed to restore proxy config after reboot: %v", err)
+	}
+
 	m.log.HostSuccess(host, "Proxy rebooted")
 	return nil
 }
@@ -264,6 +373,12 @@ func (m *Manager) Remove(host string) error {
 
 	if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
 		return fmt.Errorf("failed to remove proxy: %w", err)
+	}
+
+	// Best-effort removal of persisted config file
+	rmCmd := fmt.Sprintf("rm -f %s", CaddyConfigFile)
+	if _, err := m.sshClient.Execute(host, rmCmd); err != nil {
+		m.log.Debug("Failed to remove persisted config file: %v", err)
 	}
 
 	m.log.HostSuccess(host, "Proxy removed")
@@ -323,6 +438,9 @@ func (m *Manager) Logs(host string, follow bool, tail string) (*ssh.Result, erro
 // conditions when multiple services are deployed concurrently.
 func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	m.log.Host(host, "Registering service %s...", service.Name)
+	if service.Host == "" && len(service.Hosts) > 0 {
+		service.Host = service.Hosts[0]
+	}
 
 	// Build the route for this service
 	route := m.buildServiceRoute(service)
@@ -337,6 +455,7 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 		}
 	}
 
+	m.persistConfig(host)
 	m.log.HostSuccess(host, "Service %s registered", service.Name)
 	return nil
 }
@@ -356,10 +475,8 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 		return fmt.Errorf("failed to parse routes: %w", err)
 	}
 
-	// Check if a route for this host already exists
 	for i, r := range routes {
 		if routeMatchesHost(r, serviceHost) {
-			// Update just this specific route via its index
 			routePath := fmt.Sprintf("%s/%d", routesPath, i)
 			_, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route)
 			if err != nil {
@@ -369,8 +486,11 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 		}
 	}
 
-	// Route doesn't exist — append it
-	_, err = m.caddyClient.apiRequest(host, "POST", routesPath+"/...", route)
+	// Route doesn't exist — append it by PATCHing the full routes array.
+	// Caddy's POST to routes/... fails with RouteList unmarshal errors,
+	// so we rebuild the array and replace it atomically.
+	routes = append(routes, route)
+	_, err = m.caddyClient.apiRequest(host, "PATCH", routesPath, routes)
 	if err != nil {
 		return fmt.Errorf("failed to append route: %w", err)
 	}
@@ -439,6 +559,9 @@ type ServiceConfig struct {
 	// Hostname for routing
 	Host string
 
+	// Additional hostnames for routing
+	Hosts []string
+
 	// Upstream addresses (host:port)
 	Upstreams []string
 
@@ -447,6 +570,30 @@ type ServiceConfig struct {
 
 	// Health check interval
 	HealthInterval string
+
+	// Health check timeout
+	HealthTimeout string
+
+	// Full response timeout (maps to Caddy read_timeout)
+	ResponseTimeout string
+
+	// Response header timeout (maps to Caddy response_header_timeout)
+	ResponseHeaderTimeout string
+
+	// Forward proxy headers to upstream
+	ForwardHeaders bool
+
+	// Buffer request bodies
+	BufferRequests bool
+
+	// Buffer responses
+	BufferResponses bool
+
+	// Maximum request body size (bytes)
+	MaxRequestBody int64
+
+	// Request body buffer size (bytes) when max size is not provided
+	BufferMemory int64
 
 	// Enable HTTPS
 	HTTPS bool
@@ -468,17 +615,20 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		},
 	}
 
-	// Add health checks if configured
 	if service.HealthPath != "" {
 		interval := service.HealthInterval
 		if interval == "" {
 			interval = "10s"
 		}
+		timeout := service.HealthTimeout
+		if timeout == "" {
+			timeout = "5s"
+		}
 		handler.HealthChecks = &HealthChecks{
 			Active: &ActiveHealthCheck{
 				Path:     service.HealthPath,
 				Interval: interval,
-				Timeout:  "5s",
+				Timeout:  timeout,
 			},
 			Passive: &PassiveHealthCheck{
 				FailDuration: "30s",
@@ -487,11 +637,66 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		}
 	}
 
+	if service.ResponseTimeout != "" || service.ResponseHeaderTimeout != "" {
+		handler.Transport = &Transport{
+			Protocol:              "http",
+			ReadTimeout:           service.ResponseTimeout,
+			ResponseHeaderTimeout: service.ResponseHeaderTimeout,
+		}
+	}
+
+	if service.ForwardHeaders {
+		handler.ProxyHeaders = &HeadersConfig{
+			Request: &HeaderOps{
+				Set: map[string][]string{
+					"X-Forwarded-For":   {"{http.request.remote.host}"},
+					"X-Forwarded-Proto": {"{http.request.scheme}"},
+					"X-Forwarded-Host":  {"{http.request.host}"},
+					"X-Forwarded-Port":  {"{http.request.port}"},
+					"X-Real-IP":         {"{http.request.remote.host}"},
+				},
+			},
+		}
+	}
+
+	handler.BufferRequests = service.BufferRequests
+	handler.BufferResponses = service.BufferResponses
+
+	var handlers []*Handler
+	if service.MaxRequestBody > 0 || service.BufferMemory > 0 {
+		maxSize := service.MaxRequestBody
+		if maxSize == 0 {
+			maxSize = service.BufferMemory
+		}
+		handlers = append(handlers, &Handler{
+			Handler: "request_body",
+			MaxSize: maxSize,
+		})
+	}
+	handlers = append(handlers, handler)
+
+	hostSet := make(map[string]bool)
+	var hostMatches []string
+	if service.Host != "" {
+		hostSet[service.Host] = true
+		hostMatches = append(hostMatches, service.Host)
+	}
+	for _, host := range service.Hosts {
+		if host == "" || hostSet[host] {
+			continue
+		}
+		hostSet[host] = true
+		hostMatches = append(hostMatches, host)
+	}
+	if len(hostMatches) == 0 {
+		hostMatches = []string{service.Host}
+	}
+
 	route := &Route{
 		Match: []*Match{
-			{Host: []string{service.Host}},
+			{Host: hostMatches},
 		},
-		Handle:   []*Handler{handler},
+		Handle:   handlers,
 		Terminal: true,
 	}
 
@@ -513,6 +718,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 				if routeMatchesHost(r, serviceHost) {
 					routePath := fmt.Sprintf("%s/%d", routesPath, i)
 					if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
+						m.persistConfig(host)
 						m.log.HostSuccess(host, "Service deregistered")
 						return nil
 					}
@@ -550,6 +756,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
 
+	m.persistConfig(host)
 	m.log.HostSuccess(host, "Service deregistered")
 	return nil
 }
@@ -565,6 +772,7 @@ func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 		return err
 	}
 
+	m.persistConfig(host)
 	m.log.HostSuccess(host, "Upstream added")
 	return nil
 }
@@ -586,6 +794,7 @@ func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 		return err
 	}
 
+	m.persistConfig(host)
 	m.log.HostSuccess(host, "Upstream removed")
 	return nil
 }
@@ -610,11 +819,9 @@ func (m *Manager) modifyUpstreams(host, serviceHost string, transform func([]*Up
 		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 {
 			route.Handle[0].Upstreams = transform(route.Handle[0].Upstreams)
 
-			// PATCH just the handler's upstreams for this route
 			upstreamsPath := fmt.Sprintf("%s/%d/handle/0/upstreams", routesPath, i)
 			_, err := m.caddyClient.apiRequest(host, "PATCH", upstreamsPath, route.Handle[0].Upstreams)
 			if err != nil {
-				// Fall back to patching the whole route
 				routePath := fmt.Sprintf("%s/%d", routesPath, i)
 				if _, routeErr := m.caddyClient.apiRequest(host, "PATCH", routePath, route); routeErr != nil {
 					return m.modifyUpstreamsFull(host, serviceHost, transform)
@@ -807,6 +1014,7 @@ func (m *Manager) AddWeightedUpstream(host, serviceHost, upstream string, weight
 		return err
 	}
 
+	m.persistConfig(host)
 	m.log.HostSuccess(host, "Weighted upstream added")
 	return nil
 }
@@ -833,6 +1041,7 @@ func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight i
 		return fmt.Errorf("upstream %s not found for service %s", upstream, serviceHost)
 	}
 
+	m.persistConfig(host)
 	m.log.HostSuccess(host, "Upstream weight updated")
 	return nil
 }
@@ -883,11 +1092,16 @@ func (m *Manager) modifyRouteFull(host, serviceHost string, transform func(*Hand
 		return fmt.Errorf("server not found")
 	}
 
+	found := false
 	for _, route := range server.Routes {
 		if routeMatchesHost(route, serviceHost) && len(route.Handle) > 0 {
 			transform(route.Handle[0])
+			found = true
 			break
 		}
+	}
+	if !found {
+		return fmt.Errorf("no route found for host %s", serviceHost)
 	}
 
 	if err := m.caddyClient.LoadConfig(host, config); err != nil {

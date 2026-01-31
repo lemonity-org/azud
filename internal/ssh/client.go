@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -325,8 +326,10 @@ func (c *Client) getHostKeyCallback() (ssh.HostKeyCallback, error) {
 
 	callback, err := knownhosts.New(knownHostsPath)
 	if err != nil {
-		// Fall back to accepting all host keys with a warning
-		return ssh.InsecureIgnoreHostKey(), nil
+		if c.config.InsecureIgnoreHostKey {
+			return ssh.InsecureIgnoreHostKey(), nil
+		}
+		return nil, fmt.Errorf("failed to load known_hosts: %w", err)
 	}
 
 	return callback, nil
@@ -340,6 +343,16 @@ func (c *Client) Execute(host, cmd string) (*Result, error) {
 	}
 
 	return conn.Execute(cmd)
+}
+
+// ExecuteWithStdin runs a command on the remote host with provided stdin.
+func (c *Client) ExecuteWithStdin(host, cmd string, stdin io.Reader) (*Result, error) {
+	conn, err := c.Connect(host)
+	if err != nil {
+		return nil, err
+	}
+
+	return conn.ExecuteWithStdin(cmd, stdin)
 }
 
 // ExecuteParallel runs a command on multiple hosts concurrently

@@ -93,6 +93,7 @@ ssh:
   port: %d
   keys:
     - %s
+  insecure_ignore_host_key: true
 `, host, user, port, keyPath)
 }
 

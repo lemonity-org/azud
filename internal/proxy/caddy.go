@@ -52,16 +52,17 @@ type HTTPApp struct {
 
 // HTTPServer represents an HTTP server configuration
 type HTTPServer struct {
-	Listen []string      `json:"listen,omitempty"`
-	Routes []*Route      `json:"routes,omitempty"`
-	Logs   *ServerLogs   `json:"logs,omitempty"`
+	Listen    []string         `json:"listen,omitempty"`
+	Routes    []*Route         `json:"routes,omitempty"`
+	Logs      *ServerLogs      `json:"logs,omitempty"`
+	AutoHTTPS *AutoHTTPSConfig `json:"automatic_https,omitempty"`
 }
 
 // Route defines a routing rule
 type Route struct {
-	Match   []*Match   `json:"match,omitempty"`
-	Handle  []*Handler `json:"handle,omitempty"`
-	Terminal bool      `json:"terminal,omitempty"`
+	Match    []*Match   `json:"match,omitempty"`
+	Handle   []*Handler `json:"handle,omitempty"`
+	Terminal bool       `json:"terminal,omitempty"`
 }
 
 // Match defines matching criteria for a route
@@ -76,16 +77,21 @@ type Handler struct {
 	Upstreams []*Upstream `json:"upstreams,omitempty"`
 
 	// For static_response handler
-	StatusCode      int                 `json:"status_code,omitempty"`
-	StaticHeaders   map[string][]string `json:"headers,omitempty"`
-	Body            string              `json:"body,omitempty"`
+	StatusCode    int                 `json:"status_code,omitempty"`
+	StaticHeaders map[string][]string `json:"headers,omitempty"`
+	Body          string              `json:"body,omitempty"`
 
 	// For reverse_proxy handler
-	LoadBalancing   *LoadBalancing   `json:"load_balancing,omitempty"`
-	HealthChecks    *HealthChecks    `json:"health_checks,omitempty"`
-	ProxyHeaders    *HeadersConfig   `json:"header_up,omitempty"`
-	Transport       *Transport       `json:"transport,omitempty"`
-	FlushInterval   string           `json:"flush_interval,omitempty"`
+	LoadBalancing   *LoadBalancing `json:"load_balancing,omitempty"`
+	HealthChecks    *HealthChecks  `json:"health_checks,omitempty"`
+	ProxyHeaders    *HeadersConfig `json:"header_up,omitempty"`
+	Transport       *Transport     `json:"transport,omitempty"`
+	FlushInterval   string         `json:"flush_interval,omitempty"`
+	BufferRequests  bool           `json:"buffer_requests,omitempty"`
+	BufferResponses bool           `json:"buffer_responses,omitempty"`
+
+	// For request_body handler
+	MaxSize int64 `json:"max_size,omitempty"`
 }
 
 // Upstream represents a backend server
@@ -114,10 +120,10 @@ type HealthChecks struct {
 
 // ActiveHealthCheck configures active health checking
 type ActiveHealthCheck struct {
-	Path     string `json:"path,omitempty"`
-	Port     int    `json:"port,omitempty"`
-	Interval string `json:"interval,omitempty"`
-	Timeout  string `json:"timeout,omitempty"`
+	Path     string              `json:"path,omitempty"`
+	Port     int                 `json:"port,omitempty"`
+	Interval string              `json:"interval,omitempty"`
+	Timeout  string              `json:"timeout,omitempty"`
 	Headers  map[string][]string `json:"headers,omitempty"`
 }
 
@@ -143,12 +149,20 @@ type HeaderOps struct {
 
 // Transport configures the HTTP transport
 type Transport struct {
-	Protocol string `json:"protocol,omitempty"`
+	Protocol              string `json:"protocol,omitempty"`
+	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty"`
+	ReadTimeout           string `json:"read_timeout,omitempty"`
+}
+
+// AutoHTTPSConfig configures automatic HTTPS behavior.
+type AutoHTTPSConfig struct {
+	Disable          bool `json:"disable,omitempty"`
+	DisableRedirects bool `json:"disable_redirects,omitempty"`
 }
 
 // TLSApp configures TLS/HTTPS
 type TLSApp struct {
-	Automation   *TLSAutomation     `json:"automation,omitempty"`
+	Automation   *TLSAutomation      `json:"automation,omitempty"`
 	Certificates *CertificatesConfig `json:"certificates,omitempty"`
 }
 
@@ -203,7 +217,14 @@ type Writer struct {
 
 // Encoder configures log format
 type Encoder struct {
-	Format string `json:"format,omitempty"` // console, json
+	Format string             `json:"format,omitempty"` // console, json, filter
+	Wrap   *Encoder           `json:"wrap,omitempty"`
+	Fields map[string]*Filter `json:"fields,omitempty"`
+}
+
+// Filter configures a log field filter.
+type Filter struct {
+	Filter string `json:"filter,omitempty"`
 }
 
 // ServerLogs configures per-server logging
@@ -223,8 +244,10 @@ func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([
 		}
 	}
 
-	// Execute curl command via SSH to reach Caddy's admin API
-	curlCmd := fmt.Sprintf("curl -s -X %s", method)
+	// Execute curl command via SSH to reach Caddy's admin API.
+	// Use -f (--fail) so curl returns a non-zero exit code on HTTP 4xx/5xx
+	// errors, preventing silent failures when Caddy rejects a config change.
+	curlCmd := fmt.Sprintf("curl -sf -X %s", method)
 	if len(bodyJSON) > 0 {
 		curlCmd += fmt.Sprintf(" -H 'Content-Type: application/json' -d '%s'", string(bodyJSON))
 	}
@@ -365,4 +388,3 @@ func (c *CaddyClient) Stop(host string) error {
 	_, err := c.apiRequest(host, "POST", "/stop", nil)
 	return err
 }
-

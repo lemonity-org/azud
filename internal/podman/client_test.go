@@ -147,7 +147,7 @@ func TestBuildRunCommand_WithCommand(t *testing.T) {
 func TestBuildRunCommand_WithHealthcheck(t *testing.T) {
 	cfg := &ContainerConfig{
 		Image:          "myapp:latest",
-		HealthCmd:      "curl -f http://localhost:3000/up",
+		HealthCmd:      "echo ok",
 		HealthInterval: "10s",
 		HealthTimeout:  "5s",
 		HealthRetries:  3,

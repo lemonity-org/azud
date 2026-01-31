@@ -80,8 +80,20 @@ func runServerBootstrap(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	bootstrapper := server.NewBootstrapper(sshClient, output.DefaultLogger)
-	return bootstrapper.BootstrapAll(hosts)
+	bootstrapper := server.NewBootstrapper(sshClient, output.DefaultLogger, cfg.Podman.NetworkBackend)
+	if err := bootstrapper.BootstrapAll(hosts); err != nil {
+		return err
+	}
+
+	if cfg.Podman.Rootless {
+		for _, host := range hosts {
+			if err := enableLinger(sshClient, host, cfg.SSH.User); err != nil {
+				output.DefaultLogger.HostError(host, "Failed to enable linger: %v", err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func runServerExec(cmd *cobra.Command, args []string) error {
@@ -141,8 +153,9 @@ func createSSHClient() *ssh.Client {
 		User:                  cfg.SSH.User,
 		Port:                  cfg.SSH.Port,
 		Keys:                  cfg.SSH.Keys,
+		KnownHostsFile:        cfg.SSH.KnownHostsFile,
 		ConnectTimeout:        cfg.SSH.ConnectTimeout,
-		InsecureIgnoreHostKey: true, // TODO: make configurable
+		InsecureIgnoreHostKey: cfg.SSH.InsecureIgnoreHostKey,
 	}
 
 	// Add proxy configuration if present
