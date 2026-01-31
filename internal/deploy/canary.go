@@ -544,6 +544,7 @@ func (c *CanaryDeployer) proxyRouteHost() string {
 	return c.cfg.Proxy.PrimaryHost()
 }
 
+
 func (c *CanaryDeployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
 	return newAppContainerConfig(c.cfg, image, name, map[string]string{
 		"azud.canary": "true",
