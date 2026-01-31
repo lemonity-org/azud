@@ -7,23 +7,24 @@ import (
 
 // ContainerUnit holds configuration for generating a .container quadlet file
 type ContainerUnit struct {
-	Description    string
-	After          []string
-	Requires       []string
-	Image          string
-	ContainerName  string
-	Environment    map[string]string
-	PublishPort    []string
-	Volume         []string
-	Network        []string
-	Label          map[string]string
-	HealthCmd      string
-	HealthInterval string
-	Exec           string
-	PodmanArgs     []string
-	Restart        string // systemd restart policy: always, on-failure
-	TimeoutStopSec int
-	WantedBy       string
+	Description     string
+	After           []string
+	Requires        []string
+	Image           string
+	ContainerName   string
+	Environment     map[string]string
+	EnvironmentFile []string
+	PublishPort     []string
+	Volume          []string
+	Network         []string
+	Label           map[string]string
+	HealthCmd       string
+	HealthInterval  string
+	Exec            string
+	PodmanArgs      []string
+	Restart         string // systemd restart policy: always, on-failure
+	TimeoutStopSec  int
+	WantedBy        string
 }
 
 // GenerateContainerFile generates a .container quadlet INI file from the unit configuration
@@ -53,6 +54,9 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	}
 	for key, value := range unit.Environment {
 		sb.WriteString(fmt.Sprintf("Environment=%s=%s\n", key, value))
+	}
+	for _, file := range unit.EnvironmentFile {
+		sb.WriteString(fmt.Sprintf("EnvironmentFile=%s\n", file))
 	}
 	for _, port := range unit.PublishPort {
 		sb.WriteString(fmt.Sprintf("PublishPort=%s\n", port))

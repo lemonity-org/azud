@@ -12,15 +12,17 @@ import (
 type Bootstrapper struct {
 	sshClient *ssh.Client
 	log       *output.Logger
+	backend   string
 }
 
-func NewBootstrapper(sshClient *ssh.Client, log *output.Logger) *Bootstrapper {
+func NewBootstrapper(sshClient *ssh.Client, log *output.Logger, networkBackend string) *Bootstrapper {
 	if log == nil {
 		log = output.DefaultLogger
 	}
 	return &Bootstrapper{
 		sshClient: sshClient,
 		log:       log,
+		backend:   strings.TrimSpace(networkBackend),
 	}
 }
 
@@ -210,14 +212,37 @@ apk add --update podman netavark aardvark-dns
 }
 
 func (b *Bootstrapper) configurePodman(host string) error {
-	containersConf := `[network]
-network_backend = "netavark"
-`
+	backend := strings.TrimSpace(b.backend)
+	if backend == "" {
+		backend = "netavark"
+	}
+	if backend != "netavark" && backend != "cni" {
+		return fmt.Errorf("unsupported network backend: %s", backend)
+	}
 
-	cmd := fmt.Sprintf(`mkdir -p /etc/containers && cat > /etc/containers/containers.conf << 'EOF'
+	containersConf := fmt.Sprintf(`[network]
+network_backend = %q
+`, backend)
+
+	configCmd := fmt.Sprintf(`mkdir -p /etc/containers && cat > /etc/containers/containers.conf << 'EOF'
 %sEOF`, containersConf)
 
-	result, err := b.sshClient.Execute(host, cmd)
+	// If running as non-root, write the user-scoped config instead of /etc.
+	uidResult, err := b.sshClient.Execute(host, "id -u")
+	if err != nil {
+		return err
+	}
+	if uidResult.ExitCode != 0 {
+		return fmt.Errorf("failed to detect remote uid: %s", uidResult.Stderr)
+	}
+
+	uid := strings.TrimSpace(uidResult.Stdout)
+	if uid != "0" {
+		configCmd = fmt.Sprintf(`CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers" && mkdir -p "$CONF_DIR" && cat > "$CONF_DIR/containers.conf" << 'EOF'
+%sEOF`, containersConf)
+	}
+
+	result, err := b.sshClient.Execute(host, configCmd)
 	if err != nil {
 		return err
 	}

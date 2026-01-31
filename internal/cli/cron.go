@@ -149,6 +149,10 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 		cronConfig := cfg.Cron[name]
 		hosts := getCronHosts(name)
 
+		if err := ensureRemoteSecretsFile(sshClient, hosts, cfg.Env.Secret); err != nil {
+			return err
+		}
+
 		for _, host := range hosts {
 			containerName := getCronContainerName(name)
 
@@ -264,6 +268,10 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
+	if err := ensureRemoteSecretsFile(sshClient, []string{host}, cfg.Env.Secret); err != nil {
+		return err
+	}
+
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 
@@ -345,6 +353,9 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 		containerConfig.Env[key] = value
 	}
 	containerConfig.SecretEnv = cfg.Env.Secret
+	if len(containerConfig.SecretEnv) > 0 {
+		containerConfig.EnvFile = config.RemoteSecretsPath(cfg)
+	}
 
 	// Add volumes
 	containerConfig.Volumes = cfg.Volumes
@@ -450,6 +461,9 @@ func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman
 
 	// Add secret environment variable names
 	containerConfig.SecretEnv = cfg.Env.Secret
+	if len(containerConfig.SecretEnv) > 0 {
+		containerConfig.EnvFile = config.RemoteSecretsPath(cfg)
+	}
 
 	// Add volumes from app config
 	containerConfig.Volumes = cfg.Volumes

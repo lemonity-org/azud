@@ -40,6 +40,9 @@ type Config struct {
 	// SSH configuration
 	SSH SSHConfig `yaml:"ssh"`
 
+	// Security policies
+	Security SecurityConfig `yaml:"security"`
+
 	// Hooks configuration
 	Hooks HooksConfig `yaml:"hooks"`
 
@@ -54,6 +57,18 @@ type Config struct {
 
 	// Path to secrets file
 	SecretsPath string `yaml:"secrets_path"`
+
+	// Secrets provider: file (default), env, or command
+	SecretsProvider string `yaml:"secrets_provider"`
+
+	// Command to output secrets in KEY=VALUE form (provider=command)
+	SecretsCommand string `yaml:"secrets_command"`
+
+	// Environment variable prefix to load secrets from (provider=env)
+	SecretsEnvPrefix string `yaml:"secrets_env_prefix"`
+
+	// Remote secrets file path (default: $HOME/.azud/secrets)
+	SecretsRemotePath string `yaml:"secrets_remote_path"`
 
 	// Path to hooks directory
 	HooksPath string `yaml:"hooks_path"`
@@ -126,6 +141,12 @@ type BuilderConfig struct {
 
 	// Build arguments
 	Args map[string]string `yaml:"args"`
+
+	// Build target (multi-stage Dockerfile)
+	Target string `yaml:"target"`
+
+	// SSH forwarding for builds
+	SSH []string `yaml:"ssh"`
 
 	// Dockerfile path
 	Dockerfile string `yaml:"dockerfile"`
@@ -216,14 +237,46 @@ type ProxyConfig struct {
 	// Request/response buffering
 	Buffering BufferingConfig `yaml:"buffering"`
 
-	// Response timeout
+	// Full response timeout (maps to Caddy read_timeout)
 	ResponseTimeout string `yaml:"response_timeout"`
+
+	// Response header timeout (time to wait for response headers only)
+	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
 
 	// Forward headers to backend
 	ForwardHeaders bool `yaml:"forward_headers"`
 
 	// Logging configuration
 	Logging LoggingConfig `yaml:"logging"`
+}
+
+// PrimaryHost returns the first configured proxy host.
+func (p ProxyConfig) PrimaryHost() string {
+	if p.Host != "" {
+		return p.Host
+	}
+	if len(p.Hosts) > 0 {
+		return p.Hosts[0]
+	}
+	return ""
+}
+
+// AllHosts returns all configured proxy hosts with Host first, de-duplicated.
+func (p ProxyConfig) AllHosts() []string {
+	hostSet := make(map[string]bool)
+	var hosts []string
+	if p.Host != "" {
+		hostSet[p.Host] = true
+		hosts = append(hosts, p.Host)
+	}
+	for _, host := range p.Hosts {
+		if host == "" || hostSet[host] {
+			continue
+		}
+		hostSet[host] = true
+		hosts = append(hosts, host)
+	}
+	return hosts
 }
 
 // HealthcheckConfig holds health check settings
@@ -239,11 +292,25 @@ type HealthcheckConfig struct {
 	// Used by Podman HEALTHCHECK and Caddy active health checks. Falls back to Path if empty.
 	LivenessPath string `yaml:"liveness_path"`
 
+	// Disable liveness checks (useful for distroless images).
+	DisableLiveness bool `yaml:"disable_liveness"`
+
+	// Custom liveness command for Podman HEALTHCHECK.
+	LivenessCmd string `yaml:"liveness_cmd"`
+
 	// Check interval
 	Interval string `yaml:"interval"`
 
 	// Check timeout
 	Timeout string `yaml:"timeout"`
+
+	// Helper image for readiness checks when the app container lacks HTTP clients.
+	// Defaults to "curlimages/curl:8.5.0" if empty.
+	HelperImage string `yaml:"helper_image"`
+
+	// Helper image pull policy: "missing", "always", or "never".
+	// Defaults to "missing" if empty.
+	HelperPull string `yaml:"helper_pull"`
 }
 
 // GetReadinessPath returns the readiness probe path, falling back to Path.
@@ -279,11 +346,40 @@ type BufferingConfig struct {
 
 // LoggingConfig holds logging settings
 type LoggingConfig struct {
-	// Request headers to log
-	RequestHeaders []string `yaml:"request_headers"`
+	// Enable access logging (even without header redaction)
+	Enabled bool `yaml:"enabled"`
 
-	// Response headers to log
-	ResponseHeaders []string `yaml:"response_headers"`
+	// Request headers to redact from access logs
+	RedactRequestHeaders []string `yaml:"redact_request_headers"`
+
+	// Response headers to redact from access logs
+	RedactResponseHeaders []string `yaml:"redact_response_headers"`
+}
+
+// UnmarshalYAML supports both old (request_headers/response_headers) and
+// new (redact_request_headers/redact_response_headers) YAML field names.
+func (l *LoggingConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var raw struct {
+		Enabled               bool     `yaml:"enabled"`
+		RedactRequestHeaders  []string `yaml:"redact_request_headers"`
+		RedactResponseHeaders []string `yaml:"redact_response_headers"`
+		RequestHeaders        []string `yaml:"request_headers"`
+		ResponseHeaders       []string `yaml:"response_headers"`
+	}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	l.Enabled = raw.Enabled
+	l.RedactRequestHeaders = raw.RedactRequestHeaders
+	l.RedactResponseHeaders = raw.RedactResponseHeaders
+	// Fall back to old field names if new ones are not set
+	if len(l.RedactRequestHeaders) == 0 && len(raw.RequestHeaders) > 0 {
+		l.RedactRequestHeaders = raw.RequestHeaders
+	}
+	if len(l.RedactResponseHeaders) == 0 && len(raw.ResponseHeaders) > 0 {
+		l.RedactResponseHeaders = raw.ResponseHeaders
+	}
+	return nil
 }
 
 // AccessoryConfig holds accessory (database, cache, etc.) settings
@@ -406,8 +502,32 @@ type SSHConfig struct {
 	// Proxy/jump host configuration
 	Proxy SSHProxyConfig `yaml:"proxy"`
 
+	// Known hosts file path (defaults to ~/.ssh/known_hosts)
+	KnownHostsFile string `yaml:"known_hosts_file"`
+
+	// Trusted host fingerprints by host (SHA256:...).
+	TrustedHostFingerprints map[string][]string `yaml:"trusted_host_fingerprints"`
+
 	// Connection timeout
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+
+	// Skip host key verification (not recommended for production)
+	InsecureIgnoreHostKey bool `yaml:"insecure_ignore_host_key"`
+}
+
+// SecurityConfig enforces security-related policy checks.
+type SecurityConfig struct {
+	// Require non-root SSH user (recommended)
+	RequireNonRootSSH bool `yaml:"require_non_root_ssh"`
+
+	// Require rootless Podman (recommended)
+	RequireRootlessPodman bool `yaml:"require_rootless_podman"`
+
+	// Require host key verification (disallow insecure_ignore_host_key)
+	RequireKnownHosts bool `yaml:"require_known_hosts"`
+
+	// Require trusted host fingerprints to be configured and verified
+	RequireTrustedFingerprints bool `yaml:"require_trusted_fingerprints"`
 }
 
 // SSHProxyConfig holds SSH proxy/bastion settings
@@ -589,4 +709,54 @@ func (c *Config) GetCronHosts(name string) []string {
 	}
 
 	return nil
+}
+
+// GetAllCronHosts returns all unique cron hosts.
+func (c *Config) GetAllCronHosts() []string {
+	hostSet := make(map[string]bool)
+	var hosts []string
+
+	for name := range c.Cron {
+		for _, host := range c.GetCronHosts(name) {
+			if host == "" || hostSet[host] {
+				continue
+			}
+			hostSet[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+
+	return hosts
+}
+
+// GetAllSSHHosts returns all unique hosts that Azud connects to via SSH.
+func (c *Config) GetAllSSHHosts() []string {
+	hostSet := make(map[string]bool)
+	var hosts []string
+
+	addHost := func(host string) {
+		if host == "" || hostSet[host] {
+			return
+		}
+		hostSet[host] = true
+		hosts = append(hosts, host)
+	}
+
+	for _, host := range c.GetAllHosts() {
+		addHost(host)
+	}
+	for _, host := range c.GetAccessoryHosts() {
+		addHost(host)
+	}
+	for _, host := range c.GetAllCronHosts() {
+		addHost(host)
+	}
+	if c.Builder.Remote.Host != "" {
+		addHost(c.Builder.Remote.Host)
+	}
+	if c.SSH.Proxy.Host != "" {
+		addHost(c.SSH.Proxy.Host)
+	}
+
+	return hosts
 }

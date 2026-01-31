@@ -178,6 +178,12 @@ proxy:
     path: /up
     interval: 1s
     timeout: 5s
+    # readiness_path: /ready
+    # liveness_path: /live
+    # disable_liveness: true
+    # liveness_cmd: "curl -fsS http://localhost:3000/up"
+    # helper_image: "curlimages/curl:8.5.0"
+    # helper_pull: "missing"
 
 # Environment variables
 env:
@@ -218,10 +224,28 @@ ssh:
   # keys:
   #   - ~/.ssh/id_rsa
   #   - ~/.ssh/id_ed25519
+  # known_hosts_file: ~/.ssh/known_hosts
+  # trusted_host_fingerprints:
+  #   "192.168.1.1":
+  #     - "SHA256:replace_with_fingerprint"
+  # insecure_ignore_host_key: false
   # Uncomment for bastion/jump host
   # proxy:
   #   host: bastion.example.com
   #   user: deploy
+
+# Secrets provider (optional)
+# secrets_provider: file # file | env | command
+# secrets_env_prefix: AZUD_SECRET_
+# secrets_command: "printenv | grep '^AZUD_SECRET_' | sed 's/^AZUD_SECRET_//'"
+# secrets_remote_path: $HOME/.azud/secrets
+
+# Security policies (recommended for production)
+# security:
+#   require_non_root_ssh: true
+#   require_rootless_podman: true
+#   require_known_hosts: true
+#   require_trusted_fingerprints: true
 
 # Builder configuration
 builder:

@@ -28,7 +28,7 @@ var envPushCmd = &cobra.Command{
 	Short: "Push secrets to servers",
 	Long: `Push secrets from local .azud/secrets file to remote servers.
 
-Secrets are stored in /root/.azud/secrets on the server and loaded
+Secrets are stored in $HOME/.azud/secrets on the server and loaded
 when containers are started.
 
 Example:
@@ -138,9 +138,8 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
-	// Load local secrets
-	secretsPath := getSecretsFilePath()
-	secrets, err := loadSecretsFile(secretsPath)
+	// Load secrets based on provider
+	secrets, err := loadSecretsForPush()
 	if err != nil {
 		return fmt.Errorf("failed to load secrets: %w", err)
 	}
@@ -179,42 +178,55 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Push to each host
+	hasErrors := false
+	remoteDir := remoteSecretsDir()
+	remoteSecrets := remoteSecretsPath()
+
 	for _, host := range hosts {
 		log.Host(host, "Pushing secrets...")
 
 		// Create secrets directory
-		mkdirCmd := "mkdir -p /root/.azud && chmod 700 /root/.azud"
+		mkdirCmd := fmt.Sprintf("mkdir -p \"%s\" && chmod 700 \"%s\"", remoteDir, remoteDir)
 		result, err := sshClient.Execute(host, mkdirCmd)
 		if err != nil {
 			log.HostError(host, "Failed to create secrets directory: %v", err)
+			hasErrors = true
 			continue
 		}
 		if result.ExitCode != 0 {
 			log.HostError(host, "Failed to create secrets directory: %s", result.Stderr)
+			hasErrors = true
 			continue
 		}
 
 		// Write secrets file using a heredoc
-		writeCmd := fmt.Sprintf("cat > /root/.azud/secrets << 'AZUD_SECRETS_EOF'\n%s\nAZUD_SECRETS_EOF", content.String())
+		writeCmd := fmt.Sprintf("cat > \"%s\" << 'AZUD_SECRETS_EOF'\n%s\nAZUD_SECRETS_EOF", remoteSecrets, content.String())
 		result, err = sshClient.Execute(host, writeCmd)
 		if err != nil {
 			log.HostError(host, "Failed to write secrets: %v", err)
+			hasErrors = true
 			continue
 		}
 		if result.ExitCode != 0 {
 			log.HostError(host, "Failed to write secrets: %s", result.Stderr)
+			hasErrors = true
 			continue
 		}
 
 		// Set permissions
-		chmodCmd := "chmod 600 /root/.azud/secrets"
+		chmodCmd := fmt.Sprintf("chmod 600 \"%s\"", remoteSecrets)
 		_, err = sshClient.Execute(host, chmodCmd)
 		if err != nil {
 			log.HostError(host, "Failed to set permissions: %v", err)
+			hasErrors = true
 			continue
 		}
 
 		log.HostSuccess(host, "Secrets pushed (%d variables)", len(secrets))
+	}
+
+	if hasErrors {
+		return fmt.Errorf("failed to push secrets to one or more hosts")
 	}
 
 	log.Success("Secrets synced to all hosts")
@@ -231,7 +243,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	log.Header("Pulling Secrets from %s", envHost)
 
 	// Read secrets from remote
-	readCmd := "cat /root/.azud/secrets 2>/dev/null || echo ''"
+	readCmd := fmt.Sprintf("cat \"%s\" 2>/dev/null || echo ''", remoteSecretsPath())
 	result, err := sshClient.Execute(envHost, readCmd)
 	if err != nil {
 		return fmt.Errorf("failed to read secrets from server: %w", err)
@@ -304,8 +316,13 @@ func runEnvList(cmd *cobra.Command, args []string) error {
 	if len(cfg.Env.Secret) > 0 {
 		log.Println("Secret variables:")
 
-		secretsPath := getSecretsFilePath()
-		secrets, _ := loadSecretsFile(secretsPath)
+		var secrets map[string]string
+		if isFileSecretsProvider() {
+			secretsPath := getSecretsFilePath()
+			secrets, _ = loadSecretsFile(secretsPath)
+		} else {
+			secrets = config.AllSecrets()
+		}
 
 		for _, k := range cfg.Env.Secret {
 			if envShowValues {
@@ -328,6 +345,10 @@ func runEnvList(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvEdit(cmd *cobra.Command, args []string) error {
+	if !isFileSecretsProvider() {
+		return fmt.Errorf("env edit requires secrets_provider=file")
+	}
+
 	secretsPath := getSecretsFilePath()
 
 	// Ensure file exists
@@ -362,13 +383,7 @@ func runEnvEdit(cmd *cobra.Command, args []string) error {
 func runEnvGet(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	secretsPath := getSecretsFilePath()
-	secrets, err := loadSecretsFile(secretsPath)
-	if err != nil {
-		return fmt.Errorf("failed to load secrets: %w", err)
-	}
-
-	if val, ok := secrets[key]; ok {
+	if val, ok := config.GetSecret(key); ok {
 		fmt.Println(val)
 		return nil
 	}
@@ -383,6 +398,10 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvSet(cmd *cobra.Command, args []string) error {
+	if !isFileSecretsProvider() {
+		return fmt.Errorf("env set requires secrets_provider=file")
+	}
+
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
@@ -436,6 +455,10 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvDelete(cmd *cobra.Command, args []string) error {
+	if !isFileSecretsProvider() {
+		return fmt.Errorf("env delete requires secrets_provider=file")
+	}
+
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
@@ -488,6 +511,33 @@ func getSecretsFilePath() string {
 	// Default path
 	configDir := getConfigDir()
 	return filepath.Join(filepath.Dir(configDir), ".azud", "secrets")
+}
+
+func isFileSecretsProvider() bool {
+	provider := strings.ToLower(strings.TrimSpace(cfg.SecretsProvider))
+	return provider == "" || provider == "file"
+}
+
+func loadSecretsForPush() (map[string]string, error) {
+	provider := strings.ToLower(strings.TrimSpace(cfg.SecretsProvider))
+	if provider == "" || provider == "file" {
+		secretsPath := getSecretsFilePath()
+		return loadSecretsFile(secretsPath)
+	}
+
+	secrets := config.AllSecrets()
+	if len(secrets) == 0 {
+		return nil, fmt.Errorf("no secrets available from provider %q", provider)
+	}
+	return secrets, nil
+}
+
+func remoteSecretsDir() string {
+	return filepath.Dir(config.RemoteSecretsPath(cfg))
+}
+
+func remoteSecretsPath() string {
+	return config.RemoteSecretsPath(cfg)
 }
 
 func loadSecretsFile(path string) (map[string]string, error) {
@@ -554,24 +604,15 @@ func parseSecretsContent(content string) map[string]string {
 // LoadSecretsForDeployment loads secrets and returns them as environment variables
 // This is used by the deployer to inject secrets into containers
 func LoadSecretsForDeployment() (map[string]string, error) {
-	secretsPath := getSecretsFilePath()
-	secrets, err := loadSecretsFile(secretsPath)
-	if err != nil {
-		return nil, err
-	}
-
 	// Filter to only include secrets that are declared in config
 	result := make(map[string]string)
 	if cfg != nil {
 		for _, key := range cfg.Env.Secret {
-			if val, ok := secrets[key]; ok {
+			if val, ok := config.GetSecret(key); ok {
 				result[key] = val
 			}
 		}
 	}
-
-	// Also load secrets into the global store for use by config
-	config.SetLoadedSecrets(secrets)
 
 	return result, nil
 }

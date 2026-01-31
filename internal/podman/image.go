@@ -84,6 +84,7 @@ type BuildConfig struct {
 	Args       map[string]string
 	Target     string
 	CacheFrom  []string
+	CacheTo    string
 	Platform   string
 	NoCache    bool
 	Pull       bool
@@ -118,6 +119,9 @@ func (c *BuildConfig) BuildCommand() string {
 
 	for _, cache := range c.CacheFrom {
 		args = append(args, "--cache-from", cache)
+	}
+	if c.CacheTo != "" {
+		args = append(args, "--cache-to", c.CacheTo)
 	}
 
 	if c.Platform != "" {
@@ -211,6 +215,9 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 		for _, cache := range c.CacheFrom {
 			args = append(args, "--cache-from", cache)
 		}
+		if c.CacheTo != "" {
+			args = append(args, "--cache-to", c.CacheTo)
+		}
 
 		if c.NoCache {
 			args = append(args, "--no-cache")
@@ -241,6 +248,17 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 
 	if c.Push {
 		commands = append(commands, fmt.Sprintf("podman manifest push %s %s", tag, tag))
+		seen := map[string]struct{}{tag: {}}
+		for _, t := range c.Tags {
+			if t == "" {
+				continue
+			}
+			if _, ok := seen[t]; ok {
+				continue
+			}
+			seen[t] = struct{}{}
+			commands = append(commands, fmt.Sprintf("podman manifest push %s %s", tag, t))
+		}
 	}
 
 	return commands

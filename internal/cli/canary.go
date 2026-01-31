@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -127,15 +128,9 @@ func init() {
 	rootCmd.AddCommand(canaryCmd)
 }
 
-// Global canary deployer instance (to maintain state across commands)
-var canaryDeployer *deploy.CanaryDeployer
-
-func getCanaryDeployer() *deploy.CanaryDeployer {
-	if canaryDeployer == nil {
-		sshClient := createSSHClient()
-		canaryDeployer = deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger)
-	}
-	return canaryDeployer
+func getCanaryStatePath() string {
+	baseDir := filepath.Dir(getConfigDir())
+	return filepath.Join(baseDir, ".azud", "canary", fmt.Sprintf("%s.json", cfg.Service))
 }
 
 func runCanaryDeploy(cmd *cobra.Command, args []string) error {
@@ -147,7 +142,9 @@ func runCanaryDeploy(cmd *cobra.Command, args []string) error {
 		log.Info("Add 'deploy.canary.enabled: true' to your config to enable")
 	}
 
-	deployer := getCanaryDeployer()
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, log, getCanaryStatePath())
 
 	opts := &deploy.CanaryDeployOptions{
 		Version:         canaryVersion,
@@ -163,14 +160,18 @@ func runCanaryDeploy(cmd *cobra.Command, args []string) error {
 func runCanaryPromote(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 
-	deployer := getCanaryDeployer()
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, getCanaryStatePath())
 	return deployer.Promote()
 }
 
 func runCanaryRollback(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 
-	deployer := getCanaryDeployer()
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, getCanaryStatePath())
 	return deployer.Rollback()
 }
 
@@ -178,7 +179,9 @@ func runCanaryStatus(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
-	deployer := getCanaryDeployer()
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, log, getCanaryStatePath())
 	state := deployer.Status()
 
 	log.Header("Canary Deployment Status")
@@ -219,6 +222,8 @@ func runCanaryWeight(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("weight must be between 0 and 100")
 	}
 
-	deployer := getCanaryDeployer()
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, getCanaryStatePath())
 	return deployer.SetWeight(weight)
 }

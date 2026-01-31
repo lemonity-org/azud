@@ -88,9 +88,9 @@ Example:
 }
 
 var (
-	proxyHost       string
-	proxyFollow     bool
-	proxyTail       string
+	proxyHost        string
+	proxyFollow      bool
+	proxyTail        string
 	proxyForceRemove bool
 )
 
@@ -144,17 +144,19 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 
 	// Build proxy config
 	proxyConfig := &proxy.ProxyConfig{
-		AutoHTTPS: cfg.Proxy.SSL,
-		Email:     cfg.Proxy.ACMEEmail,
-		Staging:   cfg.Proxy.ACMEStaging,
-		HTTPPort:  cfg.Proxy.HTTPPort,
-		HTTPSPort: cfg.Proxy.HTTPSPort,
+		AutoHTTPS:          cfg.Proxy.SSL,
+		Email:              cfg.Proxy.ACMEEmail,
+		Staging:            cfg.Proxy.ACMEStaging,
+		SSLRedirect:        cfg.Proxy.SSLRedirect,
+		HTTPPort:           cfg.Proxy.HTTPPort,
+		HTTPSPort:          cfg.Proxy.HTTPSPort,
+		LoggingEnabled:        cfg.Proxy.Logging.Enabled,
+		RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
+		RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
 	}
 
-	if len(cfg.Proxy.Hosts) > 0 {
-		proxyConfig.Hosts = cfg.Proxy.Hosts
-	} else if cfg.Proxy.Host != "" {
-		proxyConfig.Hosts = []string{cfg.Proxy.Host}
+	if hosts := cfg.Proxy.AllHosts(); len(hosts) > 0 {
+		proxyConfig.Hosts = hosts
 	}
 
 	// Load custom SSL certificates if configured

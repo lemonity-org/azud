@@ -58,12 +58,31 @@ go install github.com/adriancarayol/azud@latest
        hosts:
          - 192.168.1.1
 
-   proxy:
-     host: example.com
-     ssl: true
-     app_port: 3000
-     healthcheck:
-       path: /up
+  proxy:
+    hosts:
+      - example.com
+      - www.example.com
+    ssl: true
+    # ssl_redirect: true
+    app_port: 3000
+    # response_timeout: 30s
+    # forward_headers: true
+    # buffering:
+    #   requests: true
+    #   responses: true
+    #   max_request_body: 10485760
+    #   memory: 1048576
+    # logging:
+    #   request_headers: [Authorization, Cookie] # redacted from logs
+    #   response_headers: [Set-Cookie] # redacted from logs
+    healthcheck:
+      path: /up
+      # readiness_path: /ready
+      # liveness_path: /live
+      # disable_liveness: true
+      # liveness_cmd: "curl -fsS http://localhost:3000/up"
+      # helper_image: "curlimages/curl:8.5.0"
+      # helper_pull: "missing"
 
    env:
      clear:
@@ -82,6 +101,39 @@ go install github.com/adriancarayol/azud@latest
    azud deploy
    ```
 
+## Build Configuration
+
+You can customize builds with the `builder` section:
+
+```yaml
+builder:
+  # Local or remote build
+  remote:
+    host: 1.2.3.4
+    arch: amd64
+
+  # Build target/platform
+  target: production
+  arch: amd64
+  platforms: ["linux/amd64", "linux/arm64"]
+  multiarch: true
+
+  # Build secrets (Podman format)
+  secrets:
+    - "id=npmrc,src=.npmrc"
+    - "id=git_token,env=GIT_TOKEN"
+
+  # SSH forwarding for builds
+  ssh:
+    - "default"
+
+  # Build cache
+  cache:
+    type: registry
+    options:
+      ref: ghcr.io/user/my-app-cache
+```
+
 ## Commands
 
 ### Deployment
@@ -91,6 +143,7 @@ go install github.com/adriancarayol/azud@latest
 | `azud redeploy` | Redeploy without rebuilding |
 | `azud rollback [version]` | Rollback to a previous version |
 | `azud setup` | Bootstrap servers and deploy |
+| `azud preflight` | Validate hosts and configuration before deploying |
 
 ### Application
 | Command | Description |
@@ -113,6 +166,16 @@ go install github.com/adriancarayol/azud@latest
 | `azud proxy boot` | Start the reverse proxy |
 | `azud proxy stop` | Stop the proxy |
 | `azud proxy status` | Show proxy and routes |
+
+### SSH
+| Command | Description |
+|---------|-------------|
+| `azud ssh trust [hosts...]` | Add host keys to known_hosts |
+
+### systemd
+| Command | Description |
+|---------|-------------|
+| `azud systemd enable` | Install and enable quadlet units |
 
 ### Accessories
 | Command | Description |
@@ -164,9 +227,22 @@ servers:
     cmd: bin/jobs
 
 proxy:
-  host: example.com
+  hosts:
+    - example.com
+    - www.example.com
   ssl: true
+  # ssl_redirect: true
   app_port: 3000
+  # response_timeout: 30s
+  # forward_headers: true
+  # buffering:
+  #   requests: true
+  #   responses: true
+  #   max_request_body: 10485760
+  #   memory: 1048576
+  # logging:
+  #   request_headers: [Authorization, Cookie] # redacted from logs
+  #   response_headers: [Set-Cookie] # redacted from logs
   healthcheck:
     path: /up
     interval: 3s
@@ -207,7 +283,21 @@ ssh:
   user: root
   keys:
     - ~/.ssh/id_rsa
+  trusted_host_fingerprints:
+    "192.168.1.1":
+      - "SHA256:replace_with_fingerprint"
+
+security:
+  require_non_root_ssh: true
+  require_rootless_podman: true
+  require_known_hosts: true
+  require_trusted_fingerprints: true
+
+secrets_provider: file
+secrets_remote_path: $HOME/.azud/secrets
 ```
+
+Use `proxy.hosts` for multiple hostnames; `proxy.host` is still supported for single-host setups.
 
 ## Architecture
 

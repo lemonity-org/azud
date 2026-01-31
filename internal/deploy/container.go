@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -34,8 +35,12 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 		Detach:  true,
 		Restart: "unless-stopped",
 		Network: "azud",
-		Labels:  labels,
-		Env:     make(map[string]string),
+		// Register the service name as a network alias so DNS resolves
+		// regardless of the actual container name. This is needed because
+		// podman rename does not update aardvark-dns entries.
+		NetworkAliases: []string{cfg.Service},
+		Labels:         labels,
+		Env:            make(map[string]string),
 	}
 
 	for key, value := range cfg.Env.Clear {
@@ -43,16 +48,25 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 	}
 
 	containerCfg.SecretEnv = cfg.Env.Secret
+	if len(containerCfg.SecretEnv) > 0 {
+		containerCfg.EnvFile = config.RemoteSecretsPath(cfg)
+	}
 	containerCfg.Volumes = cfg.Volumes
 
 	// Use liveness probe for Podman HEALTHCHECK (continuous container health)
-	livenessPath := cfg.Proxy.Healthcheck.GetLivenessPath()
-	if livenessPath != "" {
-		containerCfg.HealthCmd = fmt.Sprintf("curl -f http://localhost:%d%s || exit 1",
-			cfg.Proxy.AppPort, livenessPath)
+	livenessCmd := LivenessCommand(cfg)
+	if livenessCmd != "" {
+		containerCfg.HealthCmd = livenessCmd
 		containerCfg.HealthInterval = cfg.Proxy.Healthcheck.Interval
 		containerCfg.HealthTimeout = cfg.Proxy.Healthcheck.Timeout
 		containerCfg.HealthRetries = 3
+		// Give the app time to start before health check failures count.
+		// Uses the deploy timeout as the start period so the container
+		// stays in "starting" state during the entire deployment window
+		// and the readiness probe gates registration instead.
+		if cfg.Deploy.DeployTimeout > 0 {
+			containerCfg.HealthStartPeriod = cfg.Deploy.DeployTimeout.String()
+		}
 	}
 
 	return containerCfg
@@ -81,26 +95,34 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 
 	// Use readiness path for deployment checks
 	readinessPath := cfg.Proxy.Healthcheck.GetReadinessPath()
+	readinessCandidates := BuildHTTPCheckExecCandidates(container, cfg.Proxy.AppPort, readinessPath)
+	readinessHelper := BuildHTTPCheckHelperCommand(container, cfg.Proxy.AppPort, readinessPath, cfg.Proxy.Healthcheck.HelperImage, cfg.Proxy.Healthcheck.HelperPull)
+	livenessEnabled := LivenessCommand(cfg) != ""
 
 	for time.Now().Before(deadline) {
 		// Check Podman HEALTHCHECK status (liveness)
-		result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
-		if err == nil && result.ExitCode == 0 {
-			status := strings.Trim(result.Stdout, "'\n ")
-			switch status {
-			case "healthy":
-				return nil
-			case "unhealthy":
-				return fmt.Errorf("container liveness check failed (unhealthy)")
+		if livenessEnabled {
+			result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
+			if err == nil && result.ExitCode == 0 {
+				status := strings.Trim(result.Stdout, "'\n ")
+				switch status {
+				case "healthy":
+					return nil
+				case "unhealthy":
+					unsupported := healthcheckUnsupported(podmanClient, host, container)
+					if !unsupported {
+						return fmt.Errorf("container liveness check failed (unhealthy)")
+					}
+					if readinessPath == "" {
+						return fmt.Errorf("container liveness check failed and readiness path is not configured")
+					}
+				}
 			}
 		}
 
 		// Check readiness probe (can the container accept traffic?)
 		if readinessPath != "" {
-			checkCmd := fmt.Sprintf("podman exec %s curl -sf http://localhost:%d%s",
-				container, cfg.Proxy.AppPort, readinessPath)
-			result, err := sshClient.Execute(host, checkCmd)
-			if err == nil && result.ExitCode == 0 {
+			if ok := readinessProbe(sshClient, host, readinessCandidates, readinessHelper); ok {
 				return nil
 			}
 		}
@@ -109,4 +131,92 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 	}
 
 	return fmt.Errorf("timeout waiting for container to become ready")
+}
+
+// WaitForContainerReady exposes readiness checks for callers outside deploy.
+func WaitForContainerReady(cfg *config.Config, podmanClient *podman.Client, sshClient *ssh.Client, host, container string) error {
+	return waitForContainerHealthy(cfg, podmanClient, sshClient, host, container)
+}
+
+func readinessProbe(sshClient *ssh.Client, host string, candidates []string, helperCmd string) bool {
+	unsupported := true
+
+	for _, cmd := range candidates {
+		result, err := sshClient.Execute(host, cmd)
+		if err == nil && result.ExitCode == 0 {
+			return true
+		}
+
+		if err != nil || !commandNotFound(result) {
+			unsupported = false
+		}
+	}
+
+	if (len(candidates) == 0 || unsupported) && helperCmd != "" {
+		result, err := sshClient.Execute(host, helperCmd)
+		if err == nil && result.ExitCode == 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func healthcheckUnsupported(podmanClient *podman.Client, host, container string) bool {
+	result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{json .State.Health}}'")
+	if err != nil || result.ExitCode != 0 {
+		return false
+	}
+
+	raw := strings.Trim(strings.TrimSpace(result.Stdout), "'")
+	if raw == "" || raw == "null" {
+		return false
+	}
+
+	var state struct {
+		Log []struct {
+			ExitCode int    `json:"ExitCode"`
+			Output   string `json:"Output"`
+		} `json:"Log"`
+	}
+
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return false
+	}
+	if len(state.Log) == 0 {
+		return false
+	}
+
+	last := state.Log[len(state.Log)-1]
+	if last.ExitCode == 126 || last.ExitCode == 127 {
+		return true
+	}
+
+	return outputIndicatesCommandNotFound(last.Output)
+}
+
+func outputIndicatesCommandNotFound(output string) bool {
+	msg := strings.ToLower(output)
+	if strings.Contains(msg, "not found") {
+		return true
+	}
+	if strings.Contains(msg, "executable file not found") {
+		return true
+	}
+	if strings.Contains(msg, "no such file or directory") {
+		return true
+	}
+	return false
+}
+
+func commandNotFound(result *ssh.Result) bool {
+	if result == nil {
+		return false
+	}
+
+	if result.ExitCode != 126 && result.ExitCode != 127 {
+		return false
+	}
+
+	return outputIndicatesCommandNotFound(result.Stdout + result.Stderr)
 }

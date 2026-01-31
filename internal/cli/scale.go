@@ -9,9 +9,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/adriancarayol/azud/internal/config"
+	"github.com/adriancarayol/azud/internal/deploy"
 	"github.com/adriancarayol/azud/internal/output"
 	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
+	"github.com/adriancarayol/azud/internal/ssh"
 )
 
 var scaleCmd = &cobra.Command{
@@ -97,6 +100,11 @@ func runScale(cmd *cobra.Command, args []string) error {
 		for _, host := range hosts {
 			log.Host(host, "Scaling role %s", role)
 
+			if err := ensureRemoteSecretsFile(sshClient, []string{host}, cfg.Env.Secret); err != nil {
+				log.HostError(host, "Missing secrets: %v", err)
+				continue
+			}
+
 			// Get current instance count
 			currentCount, err := countRunningInstances(containerManager, host, role)
 			if err != nil {
@@ -118,7 +126,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 
 			if targetCount > currentCount {
 				// Scale up
-				if err := scaleUp(containerManager, imageManager, proxyManager, host, role, currentCount, targetCount, log); err != nil {
+				if err := scaleUp(containerManager, imageManager, proxyManager, podmanClient, sshClient, host, role, currentCount, targetCount, log); err != nil {
 					log.HostError(host, "Scale up failed: %v", err)
 					continue
 				}
@@ -219,13 +227,14 @@ func countRunningInstances(cm *podman.ContainerManager, host, role string) (int,
 	return count, nil
 }
 
-func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
+func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Manager, podmanClient *podman.Client, sshClient *ssh.Client, host, role string, from, to int, log *output.Logger) error {
 	// Pull image first
 	if err := im.Pull(host, cfg.Image); err != nil {
 		return fmt.Errorf("failed to pull image: %w", err)
 	}
 
 	roleConfig := cfg.Servers[role]
+	proxyHost := cfg.Proxy.PrimaryHost()
 
 	var wg sync.WaitGroup
 	errors := make(chan error, to-from)
@@ -262,6 +271,9 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 				containerConfig.Env[key] = value
 			}
 			containerConfig.SecretEnv = cfg.Env.Secret
+			if len(containerConfig.SecretEnv) > 0 {
+				containerConfig.EnvFile = config.RemoteSecretsPath(cfg)
+			}
 
 			// Add role-specific options (convert map to podman run flags)
 			for opt, val := range roleConfig.Options {
@@ -284,9 +296,9 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 			containerConfig.Volumes = cfg.Volumes
 
 			// Add health check
-			if cfg.Proxy.Healthcheck.Path != "" {
-				containerConfig.HealthCmd = fmt.Sprintf("curl -f http://localhost:%d%s || exit 1",
-					cfg.Proxy.AppPort, cfg.Proxy.Healthcheck.Path)
+			livenessCmd := deploy.LivenessCommand(cfg)
+			if livenessCmd != "" {
+				containerConfig.HealthCmd = livenessCmd
 				containerConfig.HealthInterval = cfg.Proxy.Healthcheck.Interval
 				containerConfig.HealthTimeout = cfg.Proxy.Healthcheck.Timeout
 				containerConfig.HealthRetries = 3
@@ -304,17 +316,17 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 				time.Sleep(cfg.Deploy.ReadinessDelay)
 			}
 
-			if cfg.Proxy.Healthcheck.Path != "" {
-				if err := cm.WaitHealthy(host, containerName, cfg.Deploy.DeployTimeout); err != nil {
+			if cfg.Proxy.Healthcheck.GetReadinessPath() != "" {
+				if err := deploy.WaitForContainerReady(cfg, podmanClient, sshClient, host, containerName); err != nil {
 					log.Warn("Health check failed for %s: %v", containerName, err)
 					// Continue anyway, proxy will detect unhealthy upstream
 				}
 			}
 
 			// Register with proxy
-			if cfg.Proxy.Host != "" {
+			if proxyHost != "" {
 				upstream := fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
-				if err := pm.AddUpstream(host, cfg.Proxy.Host, upstream); err != nil {
+				if err := pm.AddUpstream(host, proxyHost, upstream); err != nil {
 					log.Warn("Failed to register %s with proxy: %v", containerName, err)
 				}
 			}
@@ -339,6 +351,7 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 }
 
 func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
+	proxyHost := cfg.Proxy.PrimaryHost()
 	var wg sync.WaitGroup
 	errors := make(chan error, from-to)
 
@@ -351,9 +364,9 @@ func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string
 			log.Host(host, "Stopping instance %s", containerName)
 
 			// Remove from proxy first
-			if cfg.Proxy.Host != "" {
+			if proxyHost != "" {
 				upstream := fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
-				if err := pm.RemoveUpstream(host, cfg.Proxy.Host, upstream); err != nil {
+				if err := pm.RemoveUpstream(host, proxyHost, upstream); err != nil {
 					log.Debug("Failed to remove %s from proxy: %v", containerName, err)
 				}
 			}
