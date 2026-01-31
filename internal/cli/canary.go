@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -187,28 +188,20 @@ func runCanaryStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Display status table
-	rows := [][]string{
-		{"Status", string(state.Status)},
-		{"Stable Version", state.StableVersion},
-		{"Canary Version", state.CanaryVersion},
-		{"Current Weight", fmt.Sprintf("%d%%", state.CurrentWeight)},
-		{"Started", state.StartedAt.Format("2006-01-02 15:04:05")},
-		{"Last Updated", state.LastUpdated.Format("2006-01-02 15:04:05")},
-		{"Hosts", fmt.Sprintf("%d", len(state.Hosts))},
-	}
+	log.StatusBadge("Status:", string(state.Status))
+	log.Info("Version:         %s %s %s",
+		output.Lavender.Bold(state.StableVersion),
+		output.Pink.Sprint("→"),
+		output.Mint.Bold(state.CanaryVersion))
+	log.TrafficBar(state.CurrentWeight,
+		fmt.Sprintf("canary (%s)", state.CanaryVersion),
+		fmt.Sprintf("stable (%s)", state.StableVersion))
 
-	for _, row := range rows {
-		log.Info("%-16s %s", row[0]+":", row[1])
-	}
-
-	// Show hosts
-	if len(state.Hosts) > 0 {
-		log.Info("")
-		log.Info("Hosts:")
-		for _, host := range state.Hosts {
-			log.Info("  - %s", host)
-		}
+	duration := time.Since(state.StartedAt).Truncate(time.Second)
+	log.Info("Duration:        %s (started %s)", duration, state.StartedAt.Format("15:04:05"))
+	log.Info("Hosts:           %d", len(state.Hosts))
+	for _, host := range state.Hosts {
+		log.Host(host, "")
 	}
 
 	return nil

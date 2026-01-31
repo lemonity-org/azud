@@ -38,23 +38,15 @@ func (l *Logger) SetVerbose(v bool) {
 	l.verbose = v
 }
 
-// Colors
-var (
-	cyan    = color.New(color.FgCyan).SprintFunc()
-	green   = color.New(color.FgGreen).SprintFunc()
-	yellow  = color.New(color.FgYellow).SprintFunc()
-	red     = color.New(color.FgRed).SprintFunc()
-	bold    = color.New(color.Bold).SprintFunc()
-	faint   = color.New(color.Faint).SprintFunc()
-	magenta = color.New(color.FgMagenta).SprintFunc()
-)
+// Text weight attribute from fatih/color.
+var faint = color.New(color.Faint).SprintFunc()
 
 // Info prints an info message
 func (l *Logger) Info(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", cyan("INFO"), msg)
+	_, _ = fmt.Fprintf(l.out, "  %s %s\n", Lavender.Sprint(SymInfo), msg)
 }
 
 // Success prints a success message
@@ -62,7 +54,7 @@ func (l *Logger) Success(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", green("OK"), msg)
+	_, _ = fmt.Fprintf(l.out, "  %s %s\n", Mint.Sprint(SymSuccess), msg)
 }
 
 // Warn prints a warning message
@@ -70,7 +62,7 @@ func (l *Logger) Warn(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", yellow("WARN"), msg)
+	_, _ = fmt.Fprintf(l.out, "  %s %s\n", Peach.Sprint(SymWarn), Peach.Sprint(msg))
 }
 
 // Error prints an error message
@@ -78,7 +70,7 @@ func (l *Logger) Error(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.err, "%s %s\n", red("ERROR"), msg)
+	_, _ = fmt.Fprintf(l.err, "  %s %s\n", Rose.Bold(SymError), Rose.Sprint(msg))
 }
 
 // Fatal prints an error message and exits
@@ -95,7 +87,7 @@ func (l *Logger) Debug(format string, args ...interface{}) {
 		return
 	}
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", faint("DEBUG"), faint(msg))
+	_, _ = fmt.Fprintf(l.out, "  %s %s\n", faint(SymDebug), faint(msg))
 }
 
 // Host prints a message prefixed with the host
@@ -103,7 +95,7 @@ func (l *Logger) Host(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", magenta(fmt.Sprintf("[%s]", host)), msg)
+	_, _ = fmt.Fprintf(l.out, "  %s %s %s\n", Mauve.Sprint(SymHost), Mauve.Bold(host), msg)
 }
 
 // HostSuccess prints a success message for a host
@@ -111,7 +103,7 @@ func (l *Logger) HostSuccess(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s %s\n", magenta(fmt.Sprintf("[%s]", host)), green("OK"), msg)
+	_, _ = fmt.Fprintf(l.out, "  %s %s %s %s\n", Mauve.Sprint(SymHost), Mauve.Bold(host), Mint.Sprint(SymSuccess), msg)
 }
 
 // HostError prints an error message for a host
@@ -119,7 +111,7 @@ func (l *Logger) HostError(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.err, "%s %s %s\n", magenta(fmt.Sprintf("[%s]", host)), red("ERROR"), msg)
+	_, _ = fmt.Fprintf(l.err, "  %s %s %s %s\n", Mauve.Sprint(SymHost), Mauve.Bold(host), Rose.Bold(SymError), Rose.Sprint(msg))
 }
 
 // Step prints a step message
@@ -127,14 +119,15 @@ func (l *Logger) Step(step int, total int, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", cyan(fmt.Sprintf("[%d/%d]", step, total)), msg)
+	counter := Pink.Sprint(fmt.Sprintf("[%d/%d]", step, total))
+	_, _ = fmt.Fprintf(l.out, "  %s %s %s\n", Lavender.Sprint(SymInfo), counter, msg)
 }
 
 // Command prints a command being executed
 func (l *Logger) Command(cmd string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, _ = fmt.Fprintf(l.out, "%s %s\n", faint("$"), faint(cmd))
+	_, _ = fmt.Fprintf(l.out, "  %s %s\n", faint(SymCommand), faint(cmd))
 }
 
 // Output prints command output
@@ -146,7 +139,7 @@ func (l *Logger) Output(output string) {
 	}
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for _, line := range lines {
-		_, _ = fmt.Fprintf(l.out, "  %s\n", line)
+		_, _ = fmt.Fprintf(l.out, "    %s\n", faint(line))
 	}
 }
 
@@ -155,8 +148,8 @@ func (l *Logger) Header(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(l.out, "\n%s\n", bold(msg))
-	_, _ = fmt.Fprintf(l.out, "%s\n", strings.Repeat("-", len(msg)))
+	_, _ = fmt.Fprintf(l.out, "\n  %s %s\n", Pink.Sprint(SymHeader), Pink.Bold(msg))
+	_, _ = fmt.Fprintf(l.out, "    %s\n", faint(strings.Repeat("─", len(msg))))
 }
 
 // Print prints a plain message
@@ -171,6 +164,90 @@ func (l *Logger) Println(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, _ = fmt.Fprintf(l.out, format+"\n", args...)
+}
+
+// Phase represents a single step in a deployment pipeline.
+type Phase struct {
+	Name     string
+	Complete bool
+}
+
+// TrafficBar renders a 40-char horizontal bar showing the canary/stable traffic split.
+func (l *Logger) TrafficBar(canaryPct int, canaryLabel, stableLabel string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	canaryPct = clamp(canaryPct, 0, 100)
+	stablePct := 100 - canaryPct
+
+	if Profile() == ProfileNone {
+		_, _ = fmt.Fprintf(l.out, "    [%d%% %s / %d%% %s]\n", canaryPct, canaryLabel, stablePct, stableLabel)
+		return
+	}
+
+	const barWidth = 40
+	canaryChars := barWidth * canaryPct / 100
+	stableChars := barWidth - canaryChars
+
+	canaryBar := Mint.Sprint(strings.Repeat(SymFilled, canaryChars))
+	stableBar := Lavender.Sprint(strings.Repeat(SymFilled, stableChars))
+
+	canaryInfo := fmt.Sprintf(" %d%% %s", canaryPct, canaryLabel)
+	stableInfo := fmt.Sprintf(" %d%% %s", stablePct, stableLabel)
+
+	_, _ = fmt.Fprintf(l.out, "    %s%s%s%s\n", canaryBar, Mint.Sprint(canaryInfo), stableBar, Lavender.Sprint(stableInfo))
+}
+
+// HostPhase renders a host name followed by a phase pipeline showing completed and pending steps.
+func (l *Logger) HostPhase(host string, phases []Phase) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var parts []string
+	for _, p := range phases {
+		if p.Complete {
+			parts = append(parts, Mint.Sprint(SymSuccess)+" "+p.Name)
+		} else {
+			parts = append(parts, faint(SymPending)+" "+faint(p.Name))
+		}
+	}
+
+	_, _ = fmt.Fprintf(l.out, "  %s %s  %s\n", Mauve.Sprint(SymHost), Mauve.Bold(host), strings.Join(parts, "  "))
+}
+
+// StatusBadge renders a key-value line with the status value colorized by state.
+// Known statuses map to specific colors: "running" (Mint), "deploying" (Peach),
+// "promoting" (SkyBlue), "rolling_back" (Rose). Any other value uses Lavender.
+func (l *Logger) StatusBadge(label, status string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var colored string
+	switch status {
+	case "running":
+		colored = Mint.Bold(status)
+	case "deploying":
+		colored = Peach.Bold(status)
+	case "promoting":
+		colored = SkyBlue.Bold(status)
+	case "rolling_back":
+		colored = Rose.Bold(status)
+	default:
+		colored = Lavender.Sprint(status)
+	}
+
+	_, _ = fmt.Fprintf(l.out, "  %s %-16s %s\n", Lavender.Sprint(SymInfo), label, colored)
+}
+
+// clamp restricts v to the range [lo, hi].
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // Timer tracks and logs operation duration
@@ -245,21 +322,30 @@ func (l *Logger) Table(headers []string, rows [][]string) {
 		}
 	}
 
-	// Print header
+	// Print header with indent and lavender bold
 	for i, h := range headers {
-		_, _ = fmt.Fprintf(l.out, "%-*s  ", widths[i], bold(h))
+		if i == 0 {
+			_, _ = fmt.Fprintf(l.out, "    ")
+		}
+		_, _ = fmt.Fprintf(l.out, "%-*s  ", widths[i], Lavender.Bold(h))
 	}
 	_, _ = fmt.Fprintln(l.out)
 
-	// Print separator
+	// Print separator with box-drawing characters
 	for i := range headers {
-		_, _ = fmt.Fprintf(l.out, "%s  ", strings.Repeat("-", widths[i]))
+		if i == 0 {
+			_, _ = fmt.Fprintf(l.out, "    ")
+		}
+		_, _ = fmt.Fprintf(l.out, "%s  ", faint(strings.Repeat("─", widths[i])))
 	}
 	_, _ = fmt.Fprintln(l.out)
 
 	// Print rows
 	for _, row := range rows {
 		for i, cell := range row {
+			if i == 0 {
+				_, _ = fmt.Fprintf(l.out, "    ")
+			}
 			if i < len(widths) {
 				_, _ = fmt.Fprintf(l.out, "%-*s  ", widths[i], cell)
 			}
@@ -303,4 +389,19 @@ func SetVerbose(v bool) {
 // Println prints a line using the default logger
 func Println(format string, args ...interface{}) {
 	DefaultLogger.Println(format, args...)
+}
+
+// TrafficBar renders a traffic bar using the default logger
+func TrafficBar(canaryPct int, canaryLabel, stableLabel string) {
+	DefaultLogger.TrafficBar(canaryPct, canaryLabel, stableLabel)
+}
+
+// HostPhase renders a host phase pipeline using the default logger
+func HostPhase(host string, phases []Phase) {
+	DefaultLogger.HostPhase(host, phases)
+}
+
+// StatusBadge renders a status badge using the default logger
+func StatusBadge(label, status string) {
+	DefaultLogger.StatusBadge(label, status)
 }
