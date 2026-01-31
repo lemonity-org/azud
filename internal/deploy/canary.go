@@ -335,14 +335,20 @@ func (c *CanaryDeployer) Rollback() error {
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Rolling back canary...")
 
-		// Remove canary from proxy
+		// Restore stable to 100% first so it handles all new traffic
+		if err := c.proxy.SetUpstreamWeight(host, c.cfg.Proxy.Host, stableUpstream, 100); err != nil {
+			c.log.Debug("Failed to restore stable weight: %v", err)
+		}
+
+		// Remove canary from proxy (stops new traffic to canary)
 		if err := c.proxy.RemoveUpstream(host, c.cfg.Proxy.Host, canaryUpstream); err != nil {
 			c.log.Debug("Failed to remove canary upstream: %v", err)
 		}
 
-		// Restore stable to 100%
-		if err := c.proxy.SetUpstreamWeight(host, c.cfg.Proxy.Host, stableUpstream, 100); err != nil {
-			c.log.Debug("Failed to restore stable weight: %v", err)
+		// Drain in-flight requests to the canary before stopping it
+		if c.cfg.Deploy.DrainTimeout > 0 {
+			c.log.Host(host, "Draining canary connections...")
+			_ = c.proxy.DrainUpstream(host, canaryUpstream, c.cfg.Deploy.DrainTimeout)
 		}
 
 		// Stop and remove canary container

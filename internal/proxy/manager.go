@@ -667,6 +667,10 @@ func (m *Manager) modifyUpstreamsFull(host, serviceHost string, transform func([
 // upstream should already have been removed from the route so no new requests
 // are sent to it. The method returns when the active request count reaches
 // zero or the timeout expires.
+//
+// A minimum grace period of 5 seconds is always applied, even if the
+// upstream is no longer tracked by Caddy, to allow in-transit TCP
+// connections to complete naturally.
 func (m *Manager) DrainUpstream(host, upstream string, timeout time.Duration) error {
 	if timeout <= 0 {
 		return nil
@@ -676,6 +680,16 @@ func (m *Manager) DrainUpstream(host, upstream string, timeout time.Duration) er
 
 	deadline := time.Now().Add(timeout)
 	pollInterval := 2 * time.Second
+
+	// Minimum grace period: even if Caddy reports 0 active requests
+	// (upstream already removed from its tracking), in-transit TCP
+	// data may still be flowing through kernel buffers.
+	minGrace := 5 * time.Second
+	if timeout < minGrace {
+		minGrace = timeout
+	}
+	graceDeadline := time.Now().Add(minGrace)
+	everFoundActive := false
 
 	for time.Now().Before(deadline) {
 		count, err := m.caddyClient.GetUpstreamRequestCount(host, upstream)
@@ -690,13 +704,29 @@ func (m *Manager) DrainUpstream(host, upstream string, timeout time.Duration) er
 			return nil
 		}
 
-		if count == 0 {
+		if count > 0 {
+			everFoundActive = true
+			m.log.Debug("Upstream %s still has %d active request(s), waiting...", upstream, count)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// count == 0: upstream reports no active requests.
+		if everFoundActive {
+			// We previously saw active requests and now they've drained.
 			m.log.Host(host, "Upstream %s fully drained", upstream)
 			return nil
 		}
 
-		m.log.Debug("Upstream %s still has %d active request(s), waiting...", upstream, count)
-		time.Sleep(pollInterval)
+		// Never saw active requests — Caddy may have already removed the
+		// upstream from its tracking. Apply the minimum grace period.
+		if time.Now().Before(graceDeadline) {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		m.log.Host(host, "Upstream %s drain grace period complete", upstream)
+		return nil
 	}
 
 	m.log.Warn("Drain timeout reached for upstream %s, proceeding", upstream)

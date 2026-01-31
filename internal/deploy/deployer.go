@@ -198,15 +198,33 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	d.log.Host(host, "Registering with proxy...")
 	newUpstream := fmt.Sprintf("%s:%d", newContainerName, d.cfg.Proxy.AppPort)
 
-	if err := d.registerWithProxy(host, newUpstream); err != nil {
-		d.log.Warn("Failed to register with proxy: %v", err)
+	if oldExists {
+		// Add new upstream alongside the old one so both receive traffic
+		// during the transition. Using AddUpstream (not RegisterService)
+		// preserves the old upstream in the route, which is required for
+		// connection-aware draining to work.
+		if err := d.proxy.AddUpstream(host, d.cfg.Proxy.Host, newUpstream); err != nil {
+			// AddUpstream may fail if there's no existing route (e.g., proxy
+			// was rebooted). Fall back to a full RegisterService.
+			d.log.Debug("Failed to add upstream alongside old: %v", err)
+			if regErr := d.registerWithProxy(host, newUpstream); regErr != nil {
+				d.log.Warn("Failed to register with proxy: %v", regErr)
+			}
+		}
+	} else {
+		// First deployment — no existing route to add to.
+		if err := d.registerWithProxy(host, newUpstream); err != nil {
+			d.log.Warn("Failed to register with proxy: %v", err)
+		}
 	}
 
 	// If old container exists, drain and remove it
 	if oldExists {
 		oldUpstream := fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
 
-		// Remove old container from proxy so no new requests are routed to it
+		// Remove old container from proxy so no new requests are routed to it.
+		// The old upstream is still tracked by Caddy until its in-flight
+		// requests complete, allowing the drain step to poll accurately.
 		d.log.Host(host, "Removing old upstream from proxy...")
 		if err := d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, oldUpstream); err != nil {
 			d.log.Debug("Failed to remove old upstream: %v", err)
