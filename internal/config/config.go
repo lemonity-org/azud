@@ -228,14 +228,38 @@ type ProxyConfig struct {
 
 // HealthcheckConfig holds health check settings
 type HealthcheckConfig struct {
-	// Health check path
+	// Health check path (used as fallback for both readiness and liveness if they are not set)
 	Path string `yaml:"path"`
+
+	// Readiness probe path: determines when the container can accept traffic.
+	// Used during deployment to gate proxy registration. Falls back to Path if empty.
+	ReadinessPath string `yaml:"readiness_path"`
+
+	// Liveness probe path: determines if the container is still functioning.
+	// Used by Podman HEALTHCHECK and Caddy active health checks. Falls back to Path if empty.
+	LivenessPath string `yaml:"liveness_path"`
 
 	// Check interval
 	Interval string `yaml:"interval"`
 
 	// Check timeout
 	Timeout string `yaml:"timeout"`
+}
+
+// GetReadinessPath returns the readiness probe path, falling back to Path.
+func (h *HealthcheckConfig) GetReadinessPath() string {
+	if h.ReadinessPath != "" {
+		return h.ReadinessPath
+	}
+	return h.Path
+}
+
+// GetLivenessPath returns the liveness probe path, falling back to Path.
+func (h *HealthcheckConfig) GetLivenessPath() string {
+	if h.LivenessPath != "" {
+		return h.LivenessPath
+	}
+	return h.Path
 }
 
 // BufferingConfig holds buffering settings

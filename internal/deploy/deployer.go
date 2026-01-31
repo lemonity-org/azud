@@ -177,9 +177,10 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 		return fmt.Errorf("failed to start container: %w", err)
 	}
 
-	// Wait for container to be healthy
-	if !opts.SkipHealthCheck && d.cfg.Proxy.Healthcheck.Path != "" {
-		d.log.Host(host, "Waiting for health check...")
+	// Wait for container to pass readiness check
+	readinessPath := d.cfg.Proxy.Healthcheck.GetReadinessPath()
+	if !opts.SkipHealthCheck && readinessPath != "" {
+		d.log.Host(host, "Waiting for readiness check...")
 
 		// Wait for readiness delay
 		if d.cfg.Deploy.ReadinessDelay > 0 {
@@ -189,7 +190,7 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 		if err := d.waitForHealthy(host, newContainerName); err != nil {
 			// Cleanup failed container
 			_ = d.containers.Remove(host, newContainerName, true)
-			return fmt.Errorf("health check failed: %w", err)
+			return fmt.Errorf("readiness check failed: %w", err)
 		}
 	}
 
@@ -203,17 +204,18 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 
 	// If old container exists, drain and remove it
 	if oldExists {
-		d.log.Host(host, "Draining old container...")
-
-		// Remove old container from proxy
 		oldUpstream := fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+
+		// Remove old container from proxy so no new requests are routed to it
+		d.log.Host(host, "Removing old upstream from proxy...")
 		if err := d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, oldUpstream); err != nil {
 			d.log.Debug("Failed to remove old upstream: %v", err)
 		}
 
-		// Wait for drain
+		// Drain: poll Caddy for in-flight requests on the old upstream,
+		// falling back to a sleep if the API is unavailable.
 		if d.cfg.Deploy.DrainTimeout > 0 {
-			time.Sleep(d.cfg.Deploy.DrainTimeout)
+			_ = d.proxy.DrainUpstream(host, oldUpstream, d.cfg.Deploy.DrainTimeout)
 		}
 
 		// Stop and remove old container
@@ -226,15 +228,24 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 		}
 	}
 
-	// Rename new container to service name
+	// Finalize: rename the new container to the service name and update
+	// the proxy in a single atomic RegisterService call to minimize the
+	// window where the proxy points to a stale container name.
 	d.log.Host(host, "Finalizing deployment...")
 	if err := d.containers.Rename(host, newContainerName, oldContainerName); err != nil {
-		d.log.Warn("Failed to rename container: %v", err)
+		// Rename failed — the container is still running under newContainerName
+		// and the proxy is already pointing to it. This is an acceptable state;
+		// the next deployment will need to handle this container name.
+		d.log.Warn("Failed to rename container (proxy still points to %s): %v", newContainerName, err)
+		return nil
 	}
 
-	// Update proxy with final container name
-	if err := d.updateProxyUpstream(host, newUpstream, fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)); err != nil {
-		d.log.Debug("Failed to update proxy upstream: %v", err)
+	// Atomically replace the route to point to the renamed container.
+	// RegisterService replaces the entire route in a single API call,
+	// avoiding the two-step add/remove that created a race window.
+	finalUpstream := fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+	if err := d.registerWithProxy(host, finalUpstream); err != nil {
+		d.log.Warn("Failed to update proxy to final name: %v", err)
 	}
 
 	return nil
@@ -249,23 +260,20 @@ func (d *Deployer) waitForHealthy(host, container string) error {
 }
 
 func (d *Deployer) registerWithProxy(host, upstream string) error {
+	// Use liveness path for Caddy's active health checks (continuous monitoring).
+	// The readiness path is only used during deployment to gate proxy registration.
+	livenessPath := d.cfg.Proxy.Healthcheck.GetLivenessPath()
+
 	serviceConfig := &proxy.ServiceConfig{
 		Name:           d.cfg.Service,
 		Host:           d.cfg.Proxy.Host,
 		Upstreams:      []string{upstream},
-		HealthPath:     d.cfg.Proxy.Healthcheck.Path,
+		HealthPath:     livenessPath,
 		HealthInterval: d.cfg.Proxy.Healthcheck.Interval,
 		HTTPS:          d.cfg.Proxy.SSL,
 	}
 
 	return d.proxy.RegisterService(host, serviceConfig)
-}
-
-func (d *Deployer) updateProxyUpstream(host, oldUpstream, newUpstream string) error {
-	if err := d.proxy.AddUpstream(host, d.cfg.Proxy.Host, newUpstream); err != nil {
-		return err
-	}
-	return d.proxy.RemoveUpstream(host, d.cfg.Proxy.Host, oldUpstream)
 }
 
 func (d *Deployer) pullImageOnHosts(hosts []string, image string) error {

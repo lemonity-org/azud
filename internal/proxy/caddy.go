@@ -317,6 +317,49 @@ func (c *CaddyClient) RemoveUpstream(host, serverName string, routeIndex int, di
 	return err
 }
 
+// UpstreamStatus represents the status of a reverse proxy upstream as
+// reported by Caddy's /reverse_proxy/upstreams admin endpoint.
+type UpstreamStatus struct {
+	Address     string `json:"address"`
+	Healthy     bool   `json:"healthy"`
+	NumRequests int    `json:"num_requests"`
+}
+
+// GetUpstreamStatuses queries Caddy's admin API for all upstream statuses.
+// Returns the active request counts and health status per upstream.
+func (c *CaddyClient) GetUpstreamStatuses(host string) ([]UpstreamStatus, error) {
+	data, err := c.apiRequest(host, "GET", "/reverse_proxy/upstreams", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query upstream statuses: %w", err)
+	}
+
+	var statuses []UpstreamStatus
+	if err := json.Unmarshal(data, &statuses); err != nil {
+		return nil, fmt.Errorf("failed to parse upstream statuses: %w", err)
+	}
+
+	return statuses, nil
+}
+
+// GetUpstreamRequestCount returns the number of active requests for a
+// specific upstream address (e.g., "my-app:3000"). Returns 0 if the
+// upstream is not found (already removed).
+func (c *CaddyClient) GetUpstreamRequestCount(host, upstreamAddr string) (int, error) {
+	statuses, err := c.GetUpstreamStatuses(host)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, s := range statuses {
+		if s.Address == upstreamAddr {
+			return s.NumRequests, nil
+		}
+	}
+
+	// Upstream not found means it's already been removed — 0 active requests.
+	return 0, nil
+}
+
 // Stop stops the Caddy server
 func (c *CaddyClient) Stop(host string) error {
 	_, err := c.apiRequest(host, "POST", "/stop", nil)
