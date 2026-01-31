@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+// PodmanAuthLockFile is the remote flock path used to serialize concurrent
+// podman login operations that write to the shared auth.json file.
+const PodmanAuthLockFile = "/var/lib/azud/podman-auth.lock"
+
 // RegistryConfig holds registry authentication configuration.
 type RegistryConfig struct {
 	Server   string // e.g., docker.io, ghcr.io, gcr.io
@@ -30,8 +34,8 @@ func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 		server = "docker.io"
 	}
 
-	cmd := fmt.Sprintf("echo %q | podman login --username %q --password-stdin %s",
-		config.Password, config.Username, server)
+	cmd := fmt.Sprintf("mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'echo %q | podman login --username %q --password-stdin %s'",
+		PodmanAuthLockFile, config.Password, config.Username, server)
 
 	result, err := m.client.ssh.Execute(host, cmd)
 	if err != nil {
@@ -51,8 +55,8 @@ func (m *RegistryManager) LoginAll(hosts []string, config *RegistryConfig) map[s
 		server = "docker.io"
 	}
 
-	cmd := fmt.Sprintf("echo %q | podman login --username %q --password-stdin %s",
-		config.Password, config.Username, server)
+	cmd := fmt.Sprintf("mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'echo %q | podman login --username %q --password-stdin %s'",
+		PodmanAuthLockFile, config.Password, config.Username, server)
 
 	results := m.client.ssh.ExecuteParallel(hosts, cmd)
 	errors := make(map[string]error)
@@ -222,8 +226,8 @@ func BuildImageRef(registry, repository, tag string) string {
 // ECRLogin handles AWS ECR login via the AWS CLI.
 func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 	cmd := fmt.Sprintf(
-		"aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com",
-		region, accountID, region,
+		"mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com'",
+		PodmanAuthLockFile, region, accountID, region,
 	)
 
 	result, err := m.client.ssh.Execute(host, cmd)
@@ -241,8 +245,8 @@ func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 // GCRLogin handles Google Container Registry login via a JSON key file.
 func (m *RegistryManager) GCRLogin(host, keyFile string) error {
 	cmd := fmt.Sprintf(
-		"cat %s | podman login -u _json_key --password-stdin https://gcr.io",
-		keyFile,
+		"mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'cat %s | podman login -u _json_key --password-stdin https://gcr.io'",
+		PodmanAuthLockFile, keyFile,
 	)
 
 	result, err := m.client.ssh.Execute(host, cmd)

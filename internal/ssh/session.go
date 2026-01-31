@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -295,6 +296,81 @@ func (c *Connection) Download(remotePath, localPath string) error {
 	}
 
 	return nil
+}
+
+// WithRemoteLock acquires an exclusive flock on the remote host for the
+// duration of fn. It opens a dedicated SSH session that runs:
+//
+//	mkdir -p <dir> && flock -x -w <secs> <lockFile> sh -c 'echo LOCKED; cat'
+//
+// The session waits for "LOCKED\n" on stdout to confirm acquisition, then
+// calls fn (which may use c.Execute() etc. through separate sessions). When
+// fn returns, closing stdin causes cat to exit, which releases the flock.
+func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn func() error) error {
+	// Create a dedicated session — bypass c.mu so the lock session can
+	// coexist with command sessions opened by fn().
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create lock session: %w", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	stdinPipe, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get lock session stdin: %w", err)
+	}
+
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get lock session stdout: %w", err)
+	}
+
+	dir := filepath.Dir(lockFile)
+	secs := int(timeout.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'",
+		dir, secs, lockFile)
+
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("failed to start lock command: %w", err)
+	}
+
+	// Wait for "LOCKED" confirmation with a timeout.
+	locked := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		if scanner.Scan() && scanner.Text() == "LOCKED" {
+			locked <- nil
+		} else if err := scanner.Err(); err != nil {
+			locked <- fmt.Errorf("lock stdout error: %w", err)
+		} else {
+			locked <- fmt.Errorf("lock command exited without confirming acquisition")
+		}
+	}()
+
+	select {
+	case err := <-locked:
+		if err != nil {
+			_ = stdinPipe.Close()
+			_ = session.Wait()
+			return fmt.Errorf("failed to acquire remote lock %s: %w", lockFile, err)
+		}
+	case <-time.After(timeout + 5*time.Second):
+		_ = stdinPipe.Close()
+		_ = session.Wait()
+		return fmt.Errorf("timed out acquiring remote lock %s", lockFile)
+	}
+
+	// Lock acquired — run the callback.
+	fnErr := fn()
+
+	// Release the lock by closing stdin (cat exits → flock releases).
+	_ = stdinPipe.Close()
+	_ = session.Wait()
+
+	return fnErr
 }
 
 // Close closes the SSH connection

@@ -60,6 +60,18 @@ Yes.
 ### What if I have multiple apps on one server?
 Azud is designed to host multiple apps on the same server/cluster. The Caddy proxy is shared (or can be configured per-service if needed, though a shared ingress is typical). Each app just needs a unique name and distinct domains/paths.
 
+**Important:** If multiple services share a host, set a unique `secrets_remote_path` per service so they don't overwrite each other's secrets file (the default is `$HOME/.azud/secrets` for all services):
+
+```yaml
+# config/deploy.yml (service A)
+secrets_remote_path: $HOME/.azud/my-api/secrets
+
+# config/deploy.yml (service B)
+secrets_remote_path: $HOME/.azud/my-web/secrets
+```
+
+Then run `azud env push` from each project to sync secrets to the correct path.
+
 ---
 
 ## Troubleshooting

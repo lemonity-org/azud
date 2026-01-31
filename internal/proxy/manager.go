@@ -24,6 +24,12 @@ const (
 	// configuration is persisted on the remote host so it survives restarts.
 	CaddyConfigDir  = "/var/lib/azud"
 	CaddyConfigFile = "/var/lib/azud/caddy-config.json"
+
+	// CaddyLockFile is the remote flock path used to serialize concurrent
+	// Caddy admin API mutations (GET→transform→PATCH sequences) and config
+	// persistence.
+	CaddyLockFile    = "/var/lib/azud/caddy.lock"
+	CaddyLockTimeout = 120 * time.Second
 )
 
 // Manager provisions and configures Caddy reverse proxies on remote hosts.
@@ -47,6 +53,12 @@ func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
 		podman:      podman.NewContainerManager(podmanClient),
 		log:         log,
 	}
+}
+
+// withCaddyLock acquires the remote Caddy lock on the given host, runs fn,
+// then releases. This serializes mutating Caddy admin API operations.
+func (m *Manager) withCaddyLock(host string, fn func() error) error {
+	return m.sshClient.WithRemoteLock(host, CaddyLockFile, CaddyLockTimeout, fn)
 }
 
 // persistConfig fetches the current Caddy config from the admin API and
@@ -171,7 +183,9 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		}
 		// Wait for Caddy to be ready, then restore persisted config
 		time.Sleep(2 * time.Second)
-		if err := m.restoreConfig(host); err != nil {
+		if err := m.withCaddyLock(host, func() error {
+			return m.restoreConfig(host)
+		}); err != nil {
 			m.log.Warn("Failed to restore proxy config: %v", err)
 		}
 		m.log.HostSuccess(host, "Proxy started")
@@ -220,11 +234,15 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	// Wait for Caddy to be ready
 	time.Sleep(2 * time.Second)
 
-	// Load initial configuration
-	if err := m.loadInitialConfig(host, config); err != nil {
-		m.log.Warn("Failed to load initial config: %v", err)
-	} else {
+	// Load initial configuration under the Caddy lock
+	if err := m.withCaddyLock(host, func() error {
+		if err := m.loadInitialConfig(host, config); err != nil {
+			return err
+		}
 		m.persistConfig(host)
+		return nil
+	}); err != nil {
+		m.log.Warn("Failed to load initial config: %v", err)
 	}
 
 	m.log.HostSuccess(host, "Proxy started")
@@ -359,7 +377,9 @@ func (m *Manager) Reboot(host string) error {
 
 	// Wait for Caddy to be ready, then restore persisted config
 	time.Sleep(2 * time.Second)
-	if err := m.restoreConfig(host); err != nil {
+	if err := m.withCaddyLock(host, func() error {
+		return m.restoreConfig(host)
+	}); err != nil {
 		m.log.Warn("Failed to restore proxy config after reboot: %v", err)
 	}
 
@@ -445,17 +465,23 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	// Build the route for this service
 	route := m.buildServiceRoute(service)
 
-	// Try route-specific update first
-	if err := m.upsertRoute(host, service.Host, route); err != nil {
-		// Fall back to full config replacement if route-specific update fails
-		// (e.g., the server doesn't exist yet and needs bootstrapping)
-		m.log.Debug("Route-specific update failed, falling back to full config: %v", err)
-		if fallbackErr := m.registerServiceFull(host, service, route); fallbackErr != nil {
-			return fallbackErr
+	if err := m.withCaddyLock(host, func() error {
+		// Try route-specific update first
+		if err := m.upsertRoute(host, service.Host, route); err != nil {
+			// Fall back to full config replacement if route-specific update fails
+			// (e.g., the server doesn't exist yet and needs bootstrapping)
+			m.log.Debug("Route-specific update failed, falling back to full config: %v", err)
+			if fallbackErr := m.registerServiceFull(host, service, route); fallbackErr != nil {
+				return fallbackErr
+			}
 		}
+
+		m.persistConfig(host)
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	m.persistConfig(host)
 	m.log.HostSuccess(host, "Service %s registered", service.Name)
 	return nil
 }
@@ -708,55 +734,60 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 func (m *Manager) DeregisterService(host, serviceHost string) error {
 	m.log.Host(host, "Deregistering service for %s...", serviceHost)
 
-	// Try route-specific deletion first
-	routesPath := "/config/apps/http/servers/srv0/routes"
-	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
-	if err == nil {
-		var routes []*Route
-		if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
-			for i, r := range routes {
-				if routeMatchesHost(r, serviceHost) {
-					routePath := fmt.Sprintf("%s/%d", routesPath, i)
-					if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
-						m.persistConfig(host)
-						m.log.HostSuccess(host, "Service deregistered")
-						return nil
+	if err := m.withCaddyLock(host, func() error {
+		// Try route-specific deletion first
+		routesPath := "/config/apps/http/servers/srv0/routes"
+		data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+		if err == nil {
+			var routes []*Route
+			if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
+				for i, r := range routes {
+					if routeMatchesHost(r, serviceHost) {
+						routePath := fmt.Sprintf("%s/%d", routesPath, i)
+						if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
+							m.persistConfig(host)
+							return nil
+						}
+						break
 					}
-					break
 				}
 			}
 		}
-	}
 
-	// Fall back to full config replacement
-	m.log.Debug("Route-specific deregister failed, falling back to full config")
-	config, err := m.caddyClient.GetConfig(host)
-	if err != nil {
-		return fmt.Errorf("failed to get config: %w", err)
-	}
-
-	if config.Apps == nil || config.Apps.HTTP == nil {
-		return nil
-	}
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if server == nil {
-		return nil
-	}
-
-	var filtered []*Route
-	for _, r := range server.Routes {
-		if !routeMatchesHost(r, serviceHost) {
-			filtered = append(filtered, r)
+		// Fall back to full config replacement
+		m.log.Debug("Route-specific deregister failed, falling back to full config")
+		config, err := m.caddyClient.GetConfig(host)
+		if err != nil {
+			return fmt.Errorf("failed to get config: %w", err)
 		}
-	}
-	server.Routes = filtered
 
-	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply config: %w", err)
+		if config.Apps == nil || config.Apps.HTTP == nil {
+			return nil
+		}
+
+		server := config.Apps.HTTP.Servers["srv0"]
+		if server == nil {
+			return nil
+		}
+
+		var filtered []*Route
+		for _, r := range server.Routes {
+			if !routeMatchesHost(r, serviceHost) {
+				filtered = append(filtered, r)
+			}
+		}
+		server.Routes = filtered
+
+		if err := m.caddyClient.LoadConfig(host, config); err != nil {
+			return fmt.Errorf("failed to apply config: %w", err)
+		}
+
+		m.persistConfig(host)
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	m.persistConfig(host)
 	m.log.HostSuccess(host, "Service deregistered")
 	return nil
 }
@@ -766,13 +797,19 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 	m.log.Host(host, "Adding upstream %s to %s...", upstream, serviceHost)
 
-	if err := m.modifyUpstreams(host, serviceHost, func(upstreams []*Upstream) []*Upstream {
-		return append(upstreams, &Upstream{Dial: upstream})
+	if err := m.withCaddyLock(host, func() error {
+		if err := m.modifyUpstreams(host, serviceHost, func(upstreams []*Upstream) []*Upstream {
+			return append(upstreams, &Upstream{Dial: upstream})
+		}); err != nil {
+			return err
+		}
+
+		m.persistConfig(host)
+		return nil
 	}); err != nil {
 		return err
 	}
 
-	m.persistConfig(host)
 	m.log.HostSuccess(host, "Upstream added")
 	return nil
 }
@@ -782,19 +819,25 @@ func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 	m.log.Host(host, "Removing upstream %s from %s...", upstream, serviceHost)
 
-	if err := m.modifyUpstreams(host, serviceHost, func(upstreams []*Upstream) []*Upstream {
-		var filtered []*Upstream
-		for _, u := range upstreams {
-			if u.Dial != upstream {
-				filtered = append(filtered, u)
+	if err := m.withCaddyLock(host, func() error {
+		if err := m.modifyUpstreams(host, serviceHost, func(upstreams []*Upstream) []*Upstream {
+			var filtered []*Upstream
+			for _, u := range upstreams {
+				if u.Dial != upstream {
+					filtered = append(filtered, u)
+				}
 			}
+			return filtered
+		}); err != nil {
+			return err
 		}
-		return filtered
+
+		m.persistConfig(host)
+		return nil
 	}); err != nil {
 		return err
 	}
 
-	m.persistConfig(host)
 	m.log.HostSuccess(host, "Upstream removed")
 	return nil
 }
@@ -998,23 +1041,29 @@ func (m *Manager) BootAll(hosts []string, config *ProxyConfig) error {
 func (m *Manager) AddWeightedUpstream(host, serviceHost, upstream string, weight int) error {
 	m.log.Host(host, "Adding weighted upstream %s (weight=%d) to %s...", upstream, weight, serviceHost)
 
-	if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
-		handler.Upstreams = append(handler.Upstreams, &Upstream{
-			Dial:   upstream,
-			Weight: weight,
-		})
-		if handler.LoadBalancing == nil {
-			handler.LoadBalancing = &LoadBalancing{}
+	if err := m.withCaddyLock(host, func() error {
+		if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
+			handler.Upstreams = append(handler.Upstreams, &Upstream{
+				Dial:   upstream,
+				Weight: weight,
+			})
+			if handler.LoadBalancing == nil {
+				handler.LoadBalancing = &LoadBalancing{}
+			}
+			if handler.LoadBalancing.SelectionPolicy == nil {
+				handler.LoadBalancing.SelectionPolicy = &SelectionPolicy{}
+			}
+			handler.LoadBalancing.SelectionPolicy.Policy = "weighted_round_robin"
+		}); err != nil {
+			return err
 		}
-		if handler.LoadBalancing.SelectionPolicy == nil {
-			handler.LoadBalancing.SelectionPolicy = &SelectionPolicy{}
-		}
-		handler.LoadBalancing.SelectionPolicy.Policy = "weighted_round_robin"
+
+		m.persistConfig(host)
+		return nil
 	}); err != nil {
 		return err
 	}
 
-	m.persistConfig(host)
 	m.log.HostSuccess(host, "Weighted upstream added")
 	return nil
 }
@@ -1025,14 +1074,21 @@ func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight i
 	m.log.Host(host, "Setting weight=%d for upstream %s on %s...", weight, upstream, serviceHost)
 
 	found := false
-	if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
-		for _, u := range handler.Upstreams {
-			if u.Dial == upstream {
-				u.Weight = weight
-				found = true
-				break
+	if err := m.withCaddyLock(host, func() error {
+		if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
+			for _, u := range handler.Upstreams {
+				if u.Dial == upstream {
+					u.Weight = weight
+					found = true
+					break
+				}
 			}
+		}); err != nil {
+			return err
 		}
+
+		m.persistConfig(host)
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -1041,7 +1097,6 @@ func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight i
 		return fmt.Errorf("upstream %s not found for service %s", upstream, serviceHost)
 	}
 
-	m.persistConfig(host)
 	m.log.HostSuccess(host, "Upstream weight updated")
 	return nil
 }

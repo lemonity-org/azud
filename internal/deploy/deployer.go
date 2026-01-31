@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -127,6 +128,15 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 
 	d.log.Info("Deploying to %d host(s)", len(hosts))
 
+	// Login to registry if configured
+	if !opts.SkipPull && d.cfg.Registry.Server != "" {
+		if err := d.loginToRegistry(hosts); err != nil {
+			record.Fail(err)
+			_ = d.history.Record(record)
+			return fmt.Errorf("failed to login to registry: %w", err)
+		}
+	}
+
 	// Pull image on all hosts
 	if !opts.SkipPull {
 		d.log.Info("Pulling image on all hosts...")
@@ -182,6 +192,47 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 
 func (d *Deployer) ensureRemoteSecrets(hosts []string) error {
 	return ValidateRemoteSecrets(d.sshClient, hosts, config.RemoteSecretsPath(d.cfg), d.cfg.Env.Secret)
+}
+
+func (d *Deployer) loginToRegistry(hosts []string) error {
+	username := d.cfg.Registry.Username
+	if username == "" {
+		return nil
+	}
+
+	password := ""
+	if len(d.cfg.Registry.Password) > 0 {
+		secretKey := d.cfg.Registry.Password[0]
+		password = os.Getenv(secretKey)
+		if password == "" {
+			if p, ok := config.GetSecret(secretKey); ok {
+				password = p
+			}
+		}
+	}
+
+	if password == "" {
+		return fmt.Errorf("registry password not found (secret: %v)", d.cfg.Registry.Password)
+	}
+
+	d.log.Info("Logging into registry %s...", d.cfg.Registry.Server)
+
+	regConfig := &podman.RegistryConfig{
+		Server:   d.cfg.Registry.Server,
+		Username: username,
+		Password: password,
+	}
+
+	errors := d.registry.LoginAll(hosts, regConfig)
+	if len(errors) > 0 {
+		var errMsgs []string
+		for host, err := range errors {
+			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", host, err))
+		}
+		return fmt.Errorf("registry login failed on hosts: %s", strings.Join(errMsgs, "; "))
+	}
+
+	return nil
 }
 
 func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {

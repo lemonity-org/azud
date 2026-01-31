@@ -403,6 +403,17 @@ func (c *Client) Download(host, remotePath, localPath string) error {
 	return conn.Download(remotePath, localPath)
 }
 
+// WithRemoteLock acquires an exclusive flock on the given remote host for the
+// duration of fn. See Connection.WithRemoteLock for details.
+func (c *Client) WithRemoteLock(host, lockFile string, timeout time.Duration, fn func() error) error {
+	conn, err := c.Connect(host)
+	if err != nil {
+		return err
+	}
+
+	return conn.WithRemoteLock(lockFile, timeout, fn)
+}
+
 // Close closes all connections in the pool
 func (c *Client) Close() error {
 	c.mu.Lock()

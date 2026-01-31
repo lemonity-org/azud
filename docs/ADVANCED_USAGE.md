@@ -151,6 +151,34 @@ servers:
       memory: 1g
 ```
 
+### Multiple Services on the Same Server
+
+When deploying multiple services to the same host, each service must have its own
+`secrets_remote_path` to avoid overwriting the other's secrets. By default all
+services share `$HOME/.azud/secrets`.
+
+```yaml
+# my-api/config/deploy.yml
+service: my-api
+secrets_remote_path: $HOME/.azud/my-api/secrets
+
+servers:
+  web:
+    hosts:
+      - 203.0.113.10
+
+# my-web/config/deploy.yml
+service: my-web
+secrets_remote_path: $HOME/.azud/my-web/secrets
+
+servers:
+  web:
+    hosts:
+      - 203.0.113.10
+```
+
+After setting distinct paths, run `azud env push` from each project directory.
+
 ### Custom Caddy Configuration
 
 To customize Caddy beyond the defaults, you can inject custom configuration snippets (future feature) or manage the `Caddyfile` manually if you opt out of the managed proxy.

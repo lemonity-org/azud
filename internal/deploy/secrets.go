@@ -40,6 +40,7 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 
 	unreadable := make([]string, 0)
 	missingByHost := make(map[string][]string)
+	emptyByHost := make(map[string][]string)
 
 	for _, result := range readResults {
 		if !result.Success() {
@@ -48,15 +49,22 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		}
 
 		secrets := parseSecretsContent(result.Stdout)
-		var missing []string
+		var missing, empty []string
 		for _, key := range required {
-			if value, ok := secrets[key]; !ok || strings.TrimSpace(value) == "" {
+			value, ok := secrets[key]
+			if !ok {
 				missing = append(missing, key)
+			} else if strings.TrimSpace(value) == "" {
+				empty = append(empty, key)
 			}
 		}
 		if len(missing) > 0 {
 			sort.Strings(missing)
 			missingByHost[result.Host] = missing
+		}
+		if len(empty) > 0 {
+			sort.Strings(empty)
+			emptyByHost[result.Host] = empty
 		}
 	}
 
@@ -65,16 +73,70 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return fmt.Errorf("unable to read secrets file on host(s): %s", strings.Join(unreadable, ", "))
 	}
 
-	if len(missingByHost) > 0 {
-		var hostsWithMissing []string
-		for host, keys := range missingByHost {
-			hostsWithMissing = append(hostsWithMissing, fmt.Sprintf("%s (%s)", host, strings.Join(keys, ", ")))
-		}
-		sort.Strings(hostsWithMissing)
-		return fmt.Errorf("missing required secrets on host(s): %s (update local secrets and run 'azud env push')", strings.Join(hostsWithMissing, ", "))
+	if len(missingByHost) > 0 || len(emptyByHost) > 0 {
+		return formatSecretErrors(missingByHost, emptyByHost)
 	}
 
 	return nil
+}
+
+func formatSecretErrors(missingByHost, emptyByHost map[string][]string) error {
+	allHosts := make(map[string]struct{})
+	for host := range missingByHost {
+		allHosts[host] = struct{}{}
+	}
+	for host := range emptyByHost {
+		allHosts[host] = struct{}{}
+	}
+
+	sortedHosts := make([]string, 0, len(allHosts))
+	for host := range allHosts {
+		sortedHosts = append(sortedHosts, host)
+	}
+	sort.Strings(sortedHosts)
+
+	onlyMissing := len(emptyByHost) == 0
+	onlyEmpty := len(missingByHost) == 0
+
+	var entries []string
+	for _, host := range sortedHosts {
+		missing := missingByHost[host]
+		empty := emptyByHost[host]
+
+		hasMissing := len(missing) > 0
+		hasEmpty := len(empty) > 0
+
+		var detail string
+		switch {
+		case hasMissing && hasEmpty:
+			detail = fmt.Sprintf("missing: %s; empty: %s", strings.Join(missing, ", "), strings.Join(empty, ", "))
+		case hasMissing:
+			if onlyMissing {
+				detail = strings.Join(missing, ", ")
+			} else {
+				detail = "missing: " + strings.Join(missing, ", ")
+			}
+		case hasEmpty:
+			if onlyEmpty {
+				detail = strings.Join(empty, ", ")
+			} else {
+				detail = "empty: " + strings.Join(empty, ", ")
+			}
+		}
+		entries = append(entries, fmt.Sprintf("%s (%s)", host, detail))
+	}
+
+	joined := strings.Join(entries, "; ")
+	suffix := " (update local secrets and run 'azud env push')"
+
+	switch {
+	case onlyMissing:
+		return fmt.Errorf("missing required secrets on host(s): %s%s", joined, suffix)
+	case onlyEmpty:
+		return fmt.Errorf("empty required secrets on host(s): %s%s", joined, suffix)
+	default:
+		return fmt.Errorf("secret issues on host(s): %s%s", joined, suffix)
+	}
 }
 
 func validateSecretsPermissions(sshClient *ssh.Client, hosts []string, secretsPath string) error {
