@@ -11,6 +11,50 @@ import (
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
+// shellMetacharacters is the set of characters that indicate a command
+// string contains shell operators and must be wrapped in sh -c.
+const shellMetacharacters = "&|;><$`\"'\\"
+
+// parseCommandArgs splits a command string into arguments suitable for
+// ContainerConfig.Command. Simple commands are split on whitespace.
+// Commands containing shell operators are wrapped in sh -c with proper
+// single-quote escaping so they survive the remote SSH shell.
+func parseCommandArgs(cmd string) []string {
+	if strings.ContainsAny(cmd, shellMetacharacters) {
+		escaped := strings.ReplaceAll(cmd, "'", "'\\''")
+		return []string{"sh", "-c", "'" + escaped + "'"}
+	}
+	return strings.Fields(cmd)
+}
+
+// newPreDeployContainerConfig creates a minimal one-off container configuration
+// for running a pre-deploy command (e.g., database migrations) from the new
+// image. The container is created with --rm and runs in the foreground.
+func newPreDeployContainerConfig(cfg *config.Config, image, name string) *podman.ContainerConfig {
+	containerCfg := &podman.ContainerConfig{
+		Name:    name,
+		Image:   image,
+		Remove:  true,
+		Network: "azud",
+		Labels: map[string]string{
+			"azud.managed": "true",
+			"azud.service": cfg.Service,
+		},
+		Env: make(map[string]string),
+	}
+
+	for key, value := range cfg.Env.Clear {
+		containerCfg.Env[key] = value
+	}
+
+	containerCfg.SecretEnv = cfg.Env.Secret
+	if len(containerCfg.SecretEnv) > 0 {
+		containerCfg.EnvFile = config.RemoteSecretsPath(cfg)
+	}
+
+	return containerCfg
+}
+
 // newAppContainerConfig creates a standard container configuration from the
 // application config. The extra labels parameter allows callers to add
 // deployment-specific labels (e.g., canary markers).

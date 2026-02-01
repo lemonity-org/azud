@@ -458,6 +458,11 @@ type DeployConfig struct {
 	// succeeded, keeping the fleet on a single version.
 	RollbackOnFailure bool `yaml:"rollback_on_failure"`
 
+	// Command to run from the new image before starting containers.
+	// Runs as a one-off container with --rm on the first host.
+	// Aborts deploy on non-zero exit.
+	PreDeployCommand string `yaml:"pre_deploy_command"`
+
 	// Canary deployment configuration
 	Canary CanaryConfig `yaml:"canary"`
 }

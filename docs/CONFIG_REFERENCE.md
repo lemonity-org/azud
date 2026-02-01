@@ -96,6 +96,7 @@ builder:
 
 ```yaml
 deploy:
+  pre_deploy_command: "./migrate up"
   readiness_delay: 10s
   deploy_timeout: 10m
   drain_timeout: 30s
@@ -106,6 +107,11 @@ deploy:
     enabled: true
     initial_weight: 10
 ```
+
+`pre_deploy_command` runs in a one-off `--rm` container from the **new image**
+after the image is pulled but before app containers are started. It shares the
+same network, environment variables, and secrets as the app. Runs on the first
+host only. If the command exits non-zero, the deploy aborts.
 
 ## Accessories
 

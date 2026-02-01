@@ -147,6 +147,15 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 		}
 	}
 
+	// Run pre-deploy command from new image (e.g., database migrations)
+	if d.cfg.Deploy.PreDeployCommand != "" {
+		if err := d.runPreDeployCommand(hosts[0], image); err != nil {
+			record.Fail(err)
+			_ = d.history.Record(record)
+			return fmt.Errorf("pre-deploy command failed: %w", err)
+		}
+	}
+
 	// Deploy to each host, tracking successes for potential rollback
 	var deployErrors []string
 	var succeededHosts []string
@@ -362,6 +371,26 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 
 func (d *Deployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
 	return newAppContainerConfig(d.cfg, image, name, nil)
+}
+
+// runPreDeployCommand runs the configured pre_deploy_command in a one-off
+// container from the new image. The container shares the same network and
+// environment as the app, runs with --rm, and blocks until complete.
+func (d *Deployer) runPreDeployCommand(host, image string) error {
+	cmd := d.cfg.Deploy.PreDeployCommand
+	d.log.Info("Running pre-deploy command: %s", cmd)
+
+	name := fmt.Sprintf("%s-pre-deploy-%d", d.cfg.Service, time.Now().Unix())
+	containerCfg := newPreDeployContainerConfig(d.cfg, image, name)
+	containerCfg.Command = parseCommandArgs(cmd)
+
+	_, err := d.containers.Run(host, containerCfg)
+	if err != nil {
+		return fmt.Errorf("command exited with error: %w", err)
+	}
+
+	d.log.Success("Pre-deploy command completed successfully")
+	return nil
 }
 
 func (d *Deployer) waitForHealthy(host, container string) error {
