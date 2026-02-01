@@ -62,6 +62,14 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	log.Header("Building %s", imageTag)
 
+	// Run pre-build hook
+	hooks := newHookRunner()
+	hookCtx := newHookContext()
+	hookCtx.Image = imageTag
+	if err := hooks.Run("pre-build", hookCtx); err != nil {
+		return fmt.Errorf("pre-build hook failed: %w", err)
+	}
+
 	multiarch := isMultiarchBuild()
 
 	// Check if we should use remote builder
@@ -73,6 +81,11 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	// Build locally
 	if err := buildLocal(imageTag, latestTag, multiarch); err != nil {
 		return err
+	}
+
+	// Run post-build hook
+	if err := hooks.Run("post-build", hookCtx); err != nil {
+		log.Warn("post-build hook failed: %v", err)
 	}
 
 	// Push to registry

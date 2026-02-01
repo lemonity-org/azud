@@ -543,17 +543,8 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	}
 
 	// Merge hooks
-	if dest.Hooks.PreConnect != "" {
-		merged.Hooks.PreConnect = dest.Hooks.PreConnect
-	}
-	if dest.Hooks.PreBuild != "" {
-		merged.Hooks.PreBuild = dest.Hooks.PreBuild
-	}
-	if dest.Hooks.PreDeploy != "" {
-		merged.Hooks.PreDeploy = dest.Hooks.PreDeploy
-	}
-	if dest.Hooks.PostDeploy != "" {
-		merged.Hooks.PostDeploy = dest.Hooks.PostDeploy
+	if dest.Hooks.Timeout != 0 {
+		merged.Hooks.Timeout = dest.Hooks.Timeout
 	}
 
 	// Merge cron
@@ -772,5 +763,8 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.HooksPath == "" {
 		cfg.HooksPath = ".azud/hooks"
+	}
+	if cfg.Hooks.Timeout == 0 {
+		cfg.Hooks.Timeout = 5 * time.Minute
 	}
 }

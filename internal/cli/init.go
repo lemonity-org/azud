@@ -81,10 +81,16 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Create sample hook scripts
 	hooks := map[string]string{
-		"pre-connect": getPreConnectHook(),
-		"pre-build":   getPreBuildHook(),
-		"pre-deploy":  getPreDeployHook(),
-		"post-deploy": getPostDeployHook(),
+		"pre-connect":       getPreConnectHook(),
+		"pre-build":         getPreBuildHook(),
+		"post-build":        getPostBuildHook(),
+		"pre-deploy":        getPreDeployHook(),
+		"pre-app-boot":      getPreAppBootHook(),
+		"post-app-boot":     getPostAppBootHook(),
+		"post-deploy":       getPostDeployHook(),
+		"pre-proxy-reboot":  getPreProxyRebootHook(),
+		"post-proxy-reboot": getPostProxyRebootHook(),
+		"post-rollback":     getPostRollbackHook(),
 	}
 
 	for name, content := range hooks {
@@ -270,12 +276,10 @@ deploy:
   # Old containers to keep
   retain_containers: 5
 
-# Hook scripts (optional)
+# Hooks configuration (optional)
+# Hooks are discovered by filename in the hooks_path directory (.azud/hooks/).
 # hooks:
-#   pre_connect: .azud/hooks/pre-connect
-#   pre_build: .azud/hooks/pre-build
-#   pre_deploy: .azud/hooks/pre-deploy
-#   post_deploy: .azud/hooks/post-deploy
+#   timeout: 5m
 
 # Volume mounts
 # volumes:
@@ -329,9 +333,17 @@ RAILS_MASTER_KEY=
 
 func getPreConnectHook() string {
 	return `#!/bin/sh
-# Pre-connect hook
-# Runs before connecting to servers
+# Pre-connect hook — runs before connecting to servers
 # Exit with non-zero to abort deployment
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference
+#   AZUD_HOSTS        Target hosts (comma-separated)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
 echo "Running pre-connect hook..."
 `
@@ -339,31 +351,157 @@ echo "Running pre-connect hook..."
 
 func getPreBuildHook() string {
 	return `#!/bin/sh
-# Pre-build hook
-# Runs before building the container image
-# Exit with non-zero to abort deployment
+# Pre-build hook — runs before building the container image
+# Exit with non-zero to abort build
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference (with tag)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
 echo "Running pre-build hook..."
 `
 }
 
+func getPostBuildHook() string {
+	return `#!/bin/sh
+# Post-build hook — runs after successful build, before push
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference (with tag)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+
+echo "Running post-build hook..."
+`
+}
+
 func getPreDeployHook() string {
 	return `#!/bin/sh
-# Pre-deploy hook
-# Runs before deploying to servers
+# Pre-deploy hook — runs before deploying to servers
 # Exit with non-zero to abort deployment
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference
+#   AZUD_VERSION      Image version/tag
+#   AZUD_HOSTS        Target hosts (comma-separated)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
 echo "Running pre-deploy hook..."
 `
 }
 
+func getPreAppBootHook() string {
+	return `#!/bin/sh
+# Pre-app-boot hook — runs before starting a new container on each host
+# Exit with non-zero to abort deployment on this host
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference
+#   AZUD_HOSTS        Current host being deployed to
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+
+echo "Running pre-app-boot hook..."
+`
+}
+
+func getPostAppBootHook() string {
+	return `#!/bin/sh
+# Post-app-boot hook — runs after container passes health check on each host
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference
+#   AZUD_HOSTS        Current host being deployed to
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+
+echo "Running post-app-boot hook..."
+`
+}
+
 func getPostDeployHook() string {
 	return `#!/bin/sh
-# Post-deploy hook
-# Runs after successful deployment
+# Post-deploy hook — runs after successful deployment
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference
+#   AZUD_VERSION      Image version/tag
+#   AZUD_HOSTS        Target hosts (comma-separated)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+#   AZUD_RUNTIME      Deployment duration in seconds
 
 echo "Running post-deploy hook..."
 echo "Deployment complete!"
+`
+}
+
+func getPreProxyRebootHook() string {
+	return `#!/bin/sh
+# Pre-proxy-reboot hook — runs before booting/rebooting the proxy
+# Exit with non-zero to abort proxy reboot
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_HOSTS        Target hosts (comma-separated)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+
+echo "Running pre-proxy-reboot hook..."
+`
+}
+
+func getPostProxyRebootHook() string {
+	return `#!/bin/sh
+# Post-proxy-reboot hook — runs after proxy boot/reboot completes
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_HOSTS        Target hosts (comma-separated)
+#   AZUD_DESTINATION  Deployment destination
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+
+echo "Running post-proxy-reboot hook..."
+`
+}
+
+func getPostRollbackHook() string {
+	return `#!/bin/sh
+# Post-rollback hook — runs after rollback completes
+#
+# Environment:
+#   AZUD_SERVICE      Service name
+#   AZUD_VERSION      Version rolled back to
+#   AZUD_HOSTS        Hosts that were rolled back (comma-separated)
+#   AZUD_PERFORMER    User running the command
+#   AZUD_HOOK         This hook's name
+#   AZUD_RECORDED_AT  Timestamp (RFC3339)
+
+echo "Running post-rollback hook..."
 `
 }
 

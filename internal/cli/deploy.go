@@ -95,6 +95,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Run pre-connect hook
+	if err := newHookRunner().Run("pre-connect", newHookContext()); err != nil {
+		return fmt.Errorf("pre-connect hook failed: %w", err)
+	}
+
 	// Create deployer
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -103,8 +108,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Build deploy options
 	opts := &deploy.DeployOptions{
-		Version:  deployVersion,
-		SkipPull: deploySkipPull,
+		Version:     deployVersion,
+		SkipPull:    deploySkipPull,
+		Destination: GetDestination(),
 	}
 
 	if deployHost != "" {
@@ -125,13 +131,19 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 
 	log.Header("Azud Redeploy")
 
+	// Run pre-connect hook
+	if err := newHookRunner().Run("pre-connect", newHookContext()); err != nil {
+		return fmt.Errorf("pre-connect hook failed: %w", err)
+	}
+
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	opts := &deploy.DeployOptions{
-		SkipPull: true, // Don't pull, use existing image
+		SkipPull:    true, // Don't pull, use existing image
+		Destination: GetDestination(),
 	}
 
 	if deployHost != "" {
@@ -151,6 +163,13 @@ func runRollback(cmd *cobra.Command, args []string) error {
 
 	version := args[0]
 	log.Header("Rolling back to %s", version)
+
+	// Run pre-connect hook
+	hookCtx := newHookContext()
+	hookCtx.Version = version
+	if err := newHookRunner().Run("pre-connect", hookCtx); err != nil {
+		return fmt.Errorf("pre-connect hook failed: %w", err)
+	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()

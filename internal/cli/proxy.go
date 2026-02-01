@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -136,6 +137,14 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no hosts configured")
 	}
 
+	// Run pre-proxy-reboot hook
+	hooks := newHookRunner()
+	hookCtx := newHookContext()
+	hookCtx.Hosts = strings.Join(hosts, ",")
+	if err := hooks.Run("pre-proxy-reboot", hookCtx); err != nil {
+		return fmt.Errorf("pre-proxy-reboot hook failed: %w", err)
+	}
+
 	// Create proxy manager
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -180,6 +189,11 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Run post-proxy-reboot hook
+	if err := hooks.Run("post-proxy-reboot", hookCtx); err != nil {
+		log.Warn("post-proxy-reboot hook failed: %v", err)
+	}
+
 	log.Success("Proxy boot complete")
 	return nil
 }
@@ -218,6 +232,14 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no hosts configured")
 	}
 
+	// Run pre-proxy-reboot hook
+	hooks := newHookRunner()
+	hookCtx := newHookContext()
+	hookCtx.Hosts = strings.Join(hosts, ",")
+	if err := hooks.Run("pre-proxy-reboot", hookCtx); err != nil {
+		return fmt.Errorf("pre-proxy-reboot hook failed: %w", err)
+	}
+
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
@@ -228,6 +250,11 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 			log.HostError(host, "failed to reboot proxy: %v", err)
 			continue
 		}
+	}
+
+	// Run post-proxy-reboot hook
+	if err := hooks.Run("post-proxy-reboot", hookCtx); err != nil {
+		log.Warn("post-proxy-reboot hook failed: %v", err)
 	}
 
 	log.Success("Proxy rebooted")

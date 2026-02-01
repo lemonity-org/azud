@@ -43,9 +43,21 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 		images:     podman.NewImageManager(podmanClient),
 		registry:   podman.NewRegistryManager(podmanClient),
 		proxy:      proxy.NewManager(sshClient, log),
-		hooks:      NewHookRunner(cfg.HooksPath, log),
+		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
+	}
+}
+
+func (d *Deployer) hookContext(opts *DeployOptions, image, version string) *HookContext {
+	return &HookContext{
+		Service:     d.cfg.Service,
+		Image:       image,
+		Version:     version,
+		Hosts:       strings.Join(d.getTargetHosts(opts), ","),
+		Destination: opts.Destination,
+		Performer:   CurrentUser(),
+		RecordedAt:  time.Now().Format(time.RFC3339),
 	}
 }
 
@@ -72,6 +84,7 @@ type DeployOptions struct {
 // Deploy pulls the image, starts new containers, health-checks them,
 // registers them with the proxy, and drains old containers.
 func (d *Deployer) Deploy(opts *DeployOptions) error {
+	deployStart := time.Now()
 	timer := d.log.NewTimer("Deployment")
 	defer timer.Stop()
 
@@ -120,7 +133,8 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	}
 
 	// Run pre-deploy hook
-	if err := d.hooks.Run("pre-deploy"); err != nil {
+	hookCtx := d.hookContext(opts, image, version)
+	if err := d.hooks.Run("pre-deploy", hookCtx); err != nil {
 		record.Fail(err)
 		_ = d.history.Record(record)
 		return fmt.Errorf("pre-deploy hook failed: %w", err)
@@ -185,7 +199,8 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	}
 
 	// Run post-deploy hook
-	if err := d.hooks.Run("post-deploy"); err != nil {
+	hookCtx.Runtime = fmt.Sprintf("%.0f", time.Since(deployStart).Seconds())
+	if err := d.hooks.Run("post-deploy", hookCtx); err != nil {
 		d.log.Warn("post-deploy hook failed: %v", err)
 	}
 
@@ -252,6 +267,13 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	oldExists, _ := d.containers.Exists(host, oldContainerName)
 	containerConfig := d.buildContainerConfig(image, newContainerName)
 
+	// Run pre-app-boot hook
+	bootCtx := d.hookContext(opts, image, "")
+	bootCtx.Hosts = host
+	if err := d.hooks.Run("pre-app-boot", bootCtx); err != nil {
+		return fmt.Errorf("pre-app-boot hook failed: %w", err)
+	}
+
 	d.log.Host(host, "Starting new container...")
 	_, err := d.containers.Run(host, containerConfig)
 	if err != nil {
@@ -273,6 +295,11 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 			_ = d.containers.Remove(host, newContainerName, true)
 			return fmt.Errorf("readiness check failed: %w", err)
 		}
+	}
+
+	// Run post-app-boot hook
+	if err := d.hooks.Run("post-app-boot", bootCtx); err != nil {
+		d.log.Warn("post-app-boot hook failed: %v", err)
 	}
 
 	// Register new container with proxy
@@ -551,6 +578,18 @@ func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
 			continue
 		}
 		d.log.HostSuccess(host, "rolled back to %s", previousVersion)
+	}
+
+	// Run post-rollback hook
+	rollbackCtx := &HookContext{
+		Service:     d.cfg.Service,
+		Version:     previousVersion,
+		Hosts:       strings.Join(hosts, ","),
+		Performer:   CurrentUser(),
+		RecordedAt:  time.Now().Format(time.RFC3339),
+	}
+	if err := d.hooks.Run("post-rollback", rollbackCtx); err != nil {
+		d.log.Warn("post-rollback hook failed: %v", err)
 	}
 }
 

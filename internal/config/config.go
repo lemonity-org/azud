@@ -544,19 +544,11 @@ type SSHProxyConfig struct {
 	User string `yaml:"user"`
 }
 
-// HooksConfig holds hook script paths
+// HooksConfig holds hook configuration.
+// Hooks are discovered by filename in the hooks_path directory.
 type HooksConfig struct {
-	// Run before connecting to servers
-	PreConnect string `yaml:"pre_connect"`
-
-	// Run before building image
-	PreBuild string `yaml:"pre_build"`
-
-	// Run before deploying
-	PreDeploy string `yaml:"pre_deploy"`
-
-	// Run after deploying
-	PostDeploy string `yaml:"post_deploy"`
+	// Maximum time a hook is allowed to run before being killed.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // CronConfig holds cron job settings

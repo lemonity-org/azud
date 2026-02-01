@@ -180,12 +180,56 @@ volumes:
 
 ## Hooks
 
+Hooks are executable scripts discovered by filename in the `hooks_path`
+directory (default `.azud/hooks/`). There is no per-hook path configuration;
+just place a file named after the hook in the directory and make it executable.
+
 ```yaml
 hooks:
-  pre_connect: .azud/hooks/pre-connect
-  pre_build: .azud/hooks/pre-build
-  pre_deploy: .azud/hooks/pre-deploy
-  post_deploy: .azud/hooks/post-deploy
+  timeout: 5m   # Maximum time a hook may run (default: 5m)
+```
+
+### Standard hooks
+
+| Hook | Fires | Abort on failure |
+|---|---|---|
+| `pre-connect` | Before SSH connections are opened | Yes |
+| `pre-build` | Before building the container image | Yes |
+| `post-build` | After a successful local build, before push | No (warn) |
+| `pre-deploy` | Before deploying to servers | Yes |
+| `pre-app-boot` | Before starting a new container on each host | Yes |
+| `post-app-boot` | After health check passes on each host | No (warn) |
+| `post-deploy` | After all hosts are deployed | No (warn) |
+| `pre-proxy-reboot` | Before booting/rebooting the proxy | Yes |
+| `post-proxy-reboot` | After proxy boot/reboot completes | No (warn) |
+| `post-rollback` | After automatic rollback completes | No (warn) |
+
+Custom hooks (any non-standard filename in the hooks directory) can be run
+manually with `azud hooks run <name>`.
+
+### Environment variables
+
+Every hook receives `AZUD_*` environment variables with deployment context.
+Empty fields are omitted.
+
+| Variable | Description |
+|---|---|
+| `AZUD_SERVICE` | Service name |
+| `AZUD_IMAGE` | Full image reference |
+| `AZUD_VERSION` | Image version/tag |
+| `AZUD_HOSTS` | Target hosts (comma-separated) |
+| `AZUD_DESTINATION` | Deployment destination |
+| `AZUD_PERFORMER` | User running the command |
+| `AZUD_ROLE` | Server role (when applicable) |
+| `AZUD_HOOK` | Name of the executing hook |
+| `AZUD_RECORDED_AT` | Timestamp (RFC 3339) |
+| `AZUD_RUNTIME` | Deployment duration in seconds (post-deploy only) |
+
+### CLI commands
+
+```
+azud hooks list          Show all hooks with status (ready/missing/not executable)
+azud hooks run <name>    Run a hook with test AZUD_* context
 ```
 
 ## Related docs
