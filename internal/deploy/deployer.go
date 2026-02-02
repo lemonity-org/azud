@@ -13,6 +13,7 @@ import (
 	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
 	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/adriancarayol/azud/internal/state"
 )
 
 // Deployer orchestrates zero-downtime application deployments across hosts.
@@ -42,8 +43,8 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 		podman:     podmanClient,
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
-		registry:   podman.NewRegistryManager(podmanClient),
-		proxy:      proxy.NewManager(sshClient, log),
+		registry:   podman.NewRegistryManagerWithUser(podmanClient, cfg.SSH.User),
+		proxy:      proxy.NewManagerWithUser(sshClient, log, cfg.SSH.User),
 		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
@@ -263,6 +264,25 @@ func (d *Deployer) loginToRegistry(hosts []string) error {
 }
 
 func (d *Deployer) deployToHost(ctx context.Context, host, image, version string, opts *DeployOptions) error {
+	// Acquire deployment lock to prevent concurrent deployments to the same host/service
+	lockFile := state.LockFile(d.cfg.SSH.User, d.cfg.Service+".deploy")
+	lockTimeout := d.cfg.Deploy.DeployTimeout * 2
+	if lockTimeout < 5*time.Minute {
+		lockTimeout = 5 * time.Minute
+	}
+
+	var deployErr error
+	lockErr := d.sshClient.WithRemoteLock(host, lockFile, lockTimeout, func() error {
+		deployErr = d.deployToHostLocked(ctx, host, image, version, opts)
+		return nil
+	})
+	if lockErr != nil {
+		return fmt.Errorf("failed to acquire deployment lock: %w", lockErr)
+	}
+	return deployErr
+}
+
+func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version string, opts *DeployOptions) error {
 	d.log.Host(host, "Starting deployment...")
 
 	newContainerName := d.generateContainerName("new")

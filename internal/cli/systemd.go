@@ -209,7 +209,7 @@ func buildProxyQuadletUnit() *quadlet.ContainerUnit {
 		Requires:       []string{"network-online.target"},
 		Image:          proxy.CaddyImage,
 		ContainerName:  proxy.CaddyContainerName,
-		Environment:    map[string]string{"CADDY_ADMIN": "0.0.0.0:2019"},
+		Environment:    map[string]string{"CADDY_ADMIN": "127.0.0.1:2019"},
 		PublishPort:    []string{fmt.Sprintf("%d:80", httpPort), fmt.Sprintf("%d:443", httpsPort), fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort)},
 		Volume:         []string{"caddy_data:/data", "caddy_config:/config"},
 		Network:        []string{"azud"},

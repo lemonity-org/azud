@@ -34,6 +34,10 @@ func (e ValidationErrors) Error() string {
 	return strings.Join(msgs, "; ")
 }
 
+// serviceNameRegex validates service names for use in container names, DNS, and shell contexts.
+// Must start with a letter, contain only alphanumeric, underscore, hyphen, and dot.
+var serviceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
+
 // Validate checks the configuration for errors
 func Validate(cfg *Config) error {
 	var errs ValidationErrors
@@ -43,6 +47,11 @@ func Validate(cfg *Config) error {
 		errs = append(errs, ValidationError{
 			Field:   "service",
 			Message: "service name is required",
+		})
+	} else if !serviceNameRegex.MatchString(cfg.Service) {
+		errs = append(errs, ValidationError{
+			Field:   "service",
+			Message: "service name must start with a letter and contain only alphanumeric characters, underscores, hyphens, and dots (max 63 chars)",
 		})
 	}
 

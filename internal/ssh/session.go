@@ -10,15 +10,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adriancarayol/azud/internal/shell"
 	"golang.org/x/crypto/ssh"
 )
 
 // Connection represents an SSH connection to a single host
 type Connection struct {
-	host     string
-	client   *ssh.Client
-	lastUsed time.Time
-	mu       sync.Mutex
+	host           string
+	client         *ssh.Client
+	lastUsed       time.Time
+	commandTimeout time.Duration
+	mu             sync.Mutex
 }
 
 // Result holds the result of a command execution
@@ -62,7 +64,7 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 	session.Stderr = &stderr
 
 	start := time.Now()
-	err = session.Run(cmd)
+	err = c.runWithTimeout(session, cmd)
 	duration := time.Since(start)
 
 	result := &Result{
@@ -103,7 +105,7 @@ func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, err
 	session.Stdin = stdin
 
 	start := time.Now()
-	err = session.Run(cmd)
+	err = c.runWithTimeout(session, cmd)
 	duration := time.Since(start)
 
 	result := &Result{
@@ -172,7 +174,32 @@ func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	session.Stdout = stdout
 	session.Stderr = stderr
 
-	return session.Run(cmd)
+	return c.runWithTimeout(session, cmd)
+}
+
+// runWithTimeout executes a command on the session with an optional timeout.
+// If commandTimeout is zero, it falls back to session.Run (no timeout).
+func (c *Connection) runWithTimeout(session *ssh.Session, cmd string) error {
+	if c.commandTimeout <= 0 {
+		return session.Run(cmd)
+	}
+
+	if err := session.Start(cmd); err != nil {
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(c.commandTimeout):
+		_ = session.Close()
+		return fmt.Errorf("command timed out after %s", c.commandTimeout)
+	}
 }
 
 // Upload copies a local file to the remote host using SCP
@@ -210,8 +237,9 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 		w, _ := session.StdinPipe()
 		defer func() { _ = w.Close() }()
 
-		// Send file info
-		_, _ = fmt.Fprintf(w, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), remoteFile)
+		// Send file info - remoteFile is sanitized to prevent protocol injection
+		safeRemoteFile := sanitizeSCPFilename(remoteFile)
+		_, _ = fmt.Fprintf(w, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), safeRemoteFile)
 
 		// Send file content
 		_, _ = io.Copy(w, localFile)
@@ -221,7 +249,7 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 	}()
 
 	// Run SCP command
-	cmd := fmt.Sprintf("scp -t %s", remoteDir)
+	cmd := fmt.Sprintf("scp -t %s", shell.Quote(remoteDir))
 	if err := session.Run(cmd); err != nil {
 		return fmt.Errorf("SCP failed: %w", err)
 	}
@@ -249,12 +277,14 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 		w, _ := session.StdinPipe()
 		defer func() { _ = w.Close() }()
 
-		_, _ = fmt.Fprintf(w, "C%04o %d %s\n", mode, len(content), remoteFile)
+		// Sanitize filename to prevent SCP protocol injection
+		safeRemoteFile := sanitizeSCPFilename(remoteFile)
+		_, _ = fmt.Fprintf(w, "C%04o %d %s\n", mode, len(content), safeRemoteFile)
 		_, _ = w.Write(content)
 		_, _ = fmt.Fprint(w, "\x00")
 	}()
 
-	cmd := fmt.Sprintf("scp -t %s", remoteDir)
+	cmd := fmt.Sprintf("scp -t %s", shell.Quote(remoteDir))
 	if err := session.Run(cmd); err != nil {
 		return fmt.Errorf("SCP failed: %w", err)
 	}
@@ -286,7 +316,7 @@ func (c *Connection) Download(remotePath, localPath string) error {
 	var stdout bytes.Buffer
 	session.Stdout = &stdout
 
-	cmd := fmt.Sprintf("cat %s", remotePath)
+	cmd := fmt.Sprintf("cat %s", shell.Quote(remotePath))
 	if err := session.Run(cmd); err != nil {
 		return fmt.Errorf("failed to read remote file: %w", err)
 	}
@@ -330,7 +360,9 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	if secs < 1 {
 		secs = 1
 	}
-	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'",
+	// Use double quotes for paths to allow ${HOME} expansion while protecting
+	// against spaces. Note: lockFile may contain ${HOME} for non-root users.
+	cmd := fmt.Sprintf("mkdir -p \"%s\" && flock -x -w %d \"%s\" sh -c 'echo LOCKED; cat'",
 		dir, secs, lockFile)
 
 	if err := session.Start(cmd); err != nil {
@@ -408,4 +440,22 @@ func (c *Connection) IsAlive() bool {
 	// Send a keepalive request
 	_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
 	return err == nil
+}
+
+// sanitizeSCPFilename removes or replaces characters that could be used for
+// SCP protocol injection (newlines, control characters). The SCP protocol
+// uses newline-delimited commands, so a filename containing \n could inject
+// additional protocol commands.
+func sanitizeSCPFilename(name string) string {
+	var result []byte
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		// Replace control characters (0x00-0x1F and 0x7F) with underscore
+		if c < 0x20 || c == 0x7F {
+			result = append(result, '_')
+		} else {
+			result = append(result, c)
+		}
+	}
+	return string(result)
 }

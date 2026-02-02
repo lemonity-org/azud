@@ -5,11 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/adriancarayol/azud/internal/shell"
+	"github.com/adriancarayol/azud/internal/state"
 )
 
-// PodmanAuthLockFile is the remote flock path used to serialize concurrent
-// podman login operations that write to the shared auth.json file.
-const PodmanAuthLockFile = "/var/lib/azud/podman-auth.lock"
+// PodmanAuthLockFileName is the name of the lock file used to serialize
+// concurrent podman login operations that write to the shared auth.json file.
+const PodmanAuthLockFileName = "podman-auth.lock"
+
+// PodmanAuthLockFile returns the path to the podman auth lock file for the given user.
+// Deprecated: Use state.LockFile(user, "podman-auth") instead.
+func PodmanAuthLockFile(user string) string {
+	return state.LockFile(user, "podman-auth")
+}
 
 // RegistryConfig holds registry authentication configuration.
 type RegistryConfig struct {
@@ -22,10 +31,22 @@ type RegistryConfig struct {
 // RegistryManager handles container registry operations via Podman.
 type RegistryManager struct {
 	client *Client
+	user   string // SSH user for determining state directory paths
 }
 
+// NewRegistryManager creates a new RegistryManager.
+// The user parameter is the SSH user (e.g., "root" or "deploy") used to
+// determine the correct state directory paths on remote hosts.
 func NewRegistryManager(client *Client) *RegistryManager {
-	return &RegistryManager{client: client}
+	return &RegistryManager{client: client, user: "root"}
+}
+
+// NewRegistryManagerWithUser creates a new RegistryManager with a specific SSH user.
+func NewRegistryManagerWithUser(client *Client, user string) *RegistryManager {
+	if user == "" {
+		user = "root"
+	}
+	return &RegistryManager{client: client, user: user}
 }
 
 func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
@@ -34,10 +55,15 @@ func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 		server = "docker.io"
 	}
 
-	cmd := fmt.Sprintf("mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'echo %q | podman login --username %q --password-stdin %s'",
-		PodmanAuthLockFile, config.Password, config.Username, server)
+	stateDir := state.DirQuoted(m.user)
+	lockFile := state.LockFileQuoted(m.user, "podman-auth")
 
-	result, err := m.client.ssh.Execute(host, cmd)
+	// Use ExecuteWithStdin to avoid exposing password in process list
+	// Note: stateDir and lockFile are already quoted with ${HOME} expansion support
+	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w 60 %s podman login --username %s --password-stdin %s",
+		stateDir, lockFile, shell.Quote(config.Username), shell.Quote(server))
+
+	result, err := m.client.ssh.ExecuteWithStdin(host, cmd, strings.NewReader(config.Password+"\n"))
 	if err != nil {
 		return err
 	}
@@ -50,20 +76,13 @@ func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 }
 
 func (m *RegistryManager) LoginAll(hosts []string, config *RegistryConfig) map[string]error {
-	server := config.Server
-	if server == "" {
-		server = "docker.io"
-	}
-
-	cmd := fmt.Sprintf("mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'echo %q | podman login --username %q --password-stdin %s'",
-		PodmanAuthLockFile, config.Password, config.Username, server)
-
-	results := m.client.ssh.ExecuteParallel(hosts, cmd)
 	errors := make(map[string]error)
 
-	for _, result := range results {
-		if !result.Success() {
-			errors[result.Host] = fmt.Errorf("login failed: %s", result.Stderr)
+	// Login to each host individually to use stdin for password
+	// This is more secure than embedding password in command line
+	for _, host := range hosts {
+		if err := m.Login(host, config); err != nil {
+			errors[host] = err
 		}
 	}
 
@@ -225,9 +244,20 @@ func BuildImageRef(registry, repository, tag string) string {
 
 // ECRLogin handles AWS ECR login via the AWS CLI.
 func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
+	// Validate inputs to prevent injection
+	if !shell.Validate(region) {
+		return fmt.Errorf("invalid region: %s", region)
+	}
+	if !shell.Validate(accountID) {
+		return fmt.Errorf("invalid account ID: %s", accountID)
+	}
+
+	stateDir := state.DirQuoted(m.user)
+	lockFile := state.LockFileQuoted(m.user, "podman-auth")
+
 	cmd := fmt.Sprintf(
-		"mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com'",
-		PodmanAuthLockFile, region, accountID, region,
+		"mkdir -p %s && flock -x -w 60 %s sh -c 'aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com'",
+		stateDir, lockFile, region, accountID, region,
 	)
 
 	result, err := m.client.ssh.Execute(host, cmd)
@@ -244,9 +274,12 @@ func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 
 // GCRLogin handles Google Container Registry login via a JSON key file.
 func (m *RegistryManager) GCRLogin(host, keyFile string) error {
+	stateDir := state.DirQuoted(m.user)
+	lockFile := state.LockFileQuoted(m.user, "podman-auth")
+
 	cmd := fmt.Sprintf(
-		"mkdir -p /var/lib/azud && flock -x -w 60 %s sh -c 'cat %s | podman login -u _json_key --password-stdin https://gcr.io'",
-		PodmanAuthLockFile, keyFile,
+		"mkdir -p %s && flock -x -w 60 %s sh -c 'cat %s | podman login -u _json_key --password-stdin https://gcr.io'",
+		stateDir, lockFile, shell.Quote(keyFile),
 	)
 
 	result, err := m.client.ssh.Execute(host, cmd)

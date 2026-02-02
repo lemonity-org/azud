@@ -11,6 +11,7 @@ import (
 	"github.com/adriancarayol/azud/internal/output"
 	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/adriancarayol/azud/internal/state"
 )
 
 const (
@@ -20,17 +21,29 @@ const (
 	CaddyHTTPPort      = 80
 	CaddyHTTPSPort     = 443
 
-	// CaddyConfigDir and CaddyConfigFile control where the Caddy JSON
-	// configuration is persisted on the remote host so it survives restarts.
-	CaddyConfigDir  = "/var/lib/azud"
-	CaddyConfigFile = "/var/lib/azud/caddy-config.json"
+	// CaddyConfigFileName is the name of the Caddy config file.
+	CaddyConfigFileName = "caddy-config.json"
 
-	// CaddyLockFile is the remote flock path used to serialize concurrent
-	// Caddy admin API mutations (GET→transform→PATCH sequences) and config
-	// persistence.
-	CaddyLockFile    = "/var/lib/azud/caddy.lock"
+	// CaddyLockFileName is the name of the Caddy lock file.
+	CaddyLockFileName = "caddy.lock"
+
 	CaddyLockTimeout = 120 * time.Second
 )
+
+// CaddyConfigDir returns the Caddy config directory for the given user.
+func CaddyConfigDir(user string) string {
+	return state.Dir(user)
+}
+
+// CaddyConfigFile returns the path to the Caddy config file for the given user.
+func CaddyConfigFile(user string) string {
+	return state.ConfigFile(user, CaddyConfigFileName)
+}
+
+// CaddyLockFile returns the path to the Caddy lock file for the given user.
+func CaddyLockFile(user string) string {
+	return state.LockFile(user, "caddy")
+}
 
 // Manager provisions and configures Caddy reverse proxies on remote hosts.
 type Manager struct {
@@ -38,11 +51,21 @@ type Manager struct {
 	caddyClient *CaddyClient
 	podman      *podman.ContainerManager
 	log         *output.Logger
+	user        string // SSH user for state directory paths
 }
 
+// NewManager creates a new proxy manager. Defaults to root user for state paths.
 func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
+	return NewManagerWithUser(sshClient, log, "root")
+}
+
+// NewManagerWithUser creates a new proxy manager with a specific SSH user.
+func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) *Manager {
 	if log == nil {
 		log = output.DefaultLogger
+	}
+	if user == "" {
+		user = "root"
 	}
 
 	podmanClient := podman.NewClient(sshClient)
@@ -52,51 +75,62 @@ func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
 		caddyClient: NewCaddyClient(sshClient),
 		podman:      podman.NewContainerManager(podmanClient),
 		log:         log,
+		user:        user,
 	}
 }
 
 // withCaddyLock acquires the remote Caddy lock on the given host, runs fn,
 // then releases. This serializes mutating Caddy admin API operations.
 func (m *Manager) withCaddyLock(host string, fn func() error) error {
-	return m.sshClient.WithRemoteLock(host, CaddyLockFile, CaddyLockTimeout, fn)
+	return m.sshClient.WithRemoteLock(host, CaddyLockFile(m.user), CaddyLockTimeout, fn)
 }
 
 // persistConfig fetches the current Caddy config from the admin API and
-// writes it to CaddyConfigFile on the remote host. Best-effort: errors are
-// logged at Debug level and never returned.
-func (m *Manager) persistConfig(host string) {
+// writes it to CaddyConfigFile on the remote host. Returns an error if
+// persistence fails so callers can surface warnings to users.
+func (m *Manager) persistConfig(host string) error {
 	data, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil)
 	if err != nil {
-		m.log.Debug("persistConfig: failed to GET config: %v", err)
-		return
+		return fmt.Errorf("failed to GET config from Caddy API: %w", err)
 	}
 
 	if !json.Valid(data) {
-		m.log.Debug("persistConfig: invalid JSON from Caddy admin API")
-		return
+		return fmt.Errorf("invalid JSON from Caddy admin API")
 	}
 
+	configDir := state.DirQuoted(m.user)
+	configFile := state.ConfigFileQuoted(m.user, CaddyConfigFileName)
+	tmpFile := state.ConfigFileQuoted(m.user, CaddyConfigFileName+".tmp")
+
 	// Write atomically via a temp file to avoid partial writes on failure.
-	tmpFile := CaddyConfigFile + ".tmp"
+	// Note: paths are pre-quoted with ${HOME} expansion support for non-root users.
 	cmd := fmt.Sprintf("mkdir -p %s && cat > %s && mv %s %s",
-		CaddyConfigDir, tmpFile, tmpFile, CaddyConfigFile)
+		configDir, tmpFile, tmpFile, configFile)
 	result, err := m.sshClient.ExecuteWithStdin(host, cmd, bytes.NewReader(data))
 	if err != nil {
-		m.log.Debug("persistConfig: failed to write config file: %v", err)
-		return
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	if result.ExitCode != 0 {
-		m.log.Debug("persistConfig: write command failed: %s", result.Stderr)
-		return
+		return fmt.Errorf("write command failed: %s", result.Stderr)
 	}
-	m.log.Debug("persistConfig: saved config to %s", CaddyConfigFile)
+	m.log.Debug("persistConfig: saved config to %s", configFile)
+	return nil
+}
+
+// persistConfigWithWarning calls persistConfig and logs a warning on failure.
+// Use this in places where persistence failure should not block operations.
+func (m *Manager) persistConfigWithWarning(host string) {
+	if err := m.persistConfig(host); err != nil {
+		m.log.Warn("Failed to persist proxy config on %s: %v (config may be lost on reboot)", host, err)
+	}
 }
 
 // restoreConfig reads a previously persisted Caddy config from CaddyConfigFile
 // on the remote host and loads it into Caddy via the admin API. Returns an
 // error so callers can decide whether to warn or fail.
 func (m *Manager) restoreConfig(host string) error {
-	cmd := fmt.Sprintf("test -f %s && cat %s", CaddyConfigFile, CaddyConfigFile)
+	configFile := state.ConfigFileQuoted(m.user, CaddyConfigFileName)
+	cmd := fmt.Sprintf("test -f %s && cat %s", configFile, configFile)
 	result, err := m.sshClient.Execute(host, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
@@ -114,7 +148,7 @@ func (m *Manager) restoreConfig(host string) error {
 		return fmt.Errorf("failed to load persisted config: %w", err)
 	}
 
-	m.log.Debug("restoreConfig: restored config from %s", CaddyConfigFile)
+	m.log.Debug("restoreConfig: restored config from %s", configFile)
 	return nil
 }
 
@@ -222,7 +256,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		},
 		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--watch"},
 		Env: map[string]string{
-			"CADDY_ADMIN": "0.0.0.0:2019",
+			"CADDY_ADMIN": "127.0.0.1:2019",
 		},
 	}
 
@@ -239,7 +273,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		if err := m.loadInitialConfig(host, config); err != nil {
 			return err
 		}
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		m.log.Warn("Failed to load initial config: %v", err)
@@ -252,7 +286,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 	caddyConfig := &CaddyConfig{
 		Admin: &AdminConfig{
-			Listen: "0.0.0.0:2019",
+			Listen: "127.0.0.1:2019",
 		},
 		Apps: &AppsConfig{
 			HTTP: &HTTPApp{
@@ -396,7 +430,7 @@ func (m *Manager) Remove(host string) error {
 	}
 
 	// Best-effort removal of persisted config file
-	rmCmd := fmt.Sprintf("rm -f %s", CaddyConfigFile)
+	rmCmd := fmt.Sprintf("rm -f %s", state.ConfigFileQuoted(m.user, CaddyConfigFileName))
 	if _, err := m.sshClient.Execute(host, rmCmd); err != nil {
 		m.log.Debug("Failed to remove persisted config file: %v", err)
 	}
@@ -476,7 +510,7 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 			}
 		}
 
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		return err
@@ -745,7 +779,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 					if routeMatchesHost(r, serviceHost) {
 						routePath := fmt.Sprintf("%s/%d", routesPath, i)
 						if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
-							m.persistConfig(host)
+							m.persistConfigWithWarning(host)
 							return nil
 						}
 						break
@@ -782,7 +816,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 			return fmt.Errorf("failed to apply config: %w", err)
 		}
 
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		return err
@@ -804,7 +838,7 @@ func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 			return err
 		}
 
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		return err
@@ -832,7 +866,7 @@ func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 			return err
 		}
 
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		return err
@@ -1058,7 +1092,7 @@ func (m *Manager) AddWeightedUpstream(host, serviceHost, upstream string, weight
 			return err
 		}
 
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		return err
@@ -1087,7 +1121,7 @@ func (m *Manager) SetUpstreamWeight(host, serviceHost, upstream string, weight i
 			return err
 		}
 
-		m.persistConfig(host)
+		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		return err

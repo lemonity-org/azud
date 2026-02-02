@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/adriancarayol/azud/internal/config"
+	"github.com/adriancarayol/azud/internal/shell"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
@@ -20,12 +21,12 @@ func NewClient(sshClient *ssh.Client) *Client {
 }
 
 func (c *Client) Execute(host string, args ...string) (*ssh.Result, error) {
-	cmd := "podman " + strings.Join(args, " ")
+	cmd := "podman " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.Execute(host, cmd)
 }
 
 func (c *Client) ExecuteAll(hosts []string, args ...string) []*ssh.Result {
-	cmd := "podman " + strings.Join(args, " ")
+	cmd := "podman " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.ExecuteParallel(hosts, cmd)
 }
 
@@ -75,68 +76,67 @@ func (c *ContainerConfig) BuildRunCommand() string {
 	}
 
 	if c.Name != "" {
-		args = append(args, "--name", c.Name)
+		args = append(args, "--name", shell.Quote(c.Name))
 	}
 
 	for key, value := range c.Env {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+		args = append(args, "-e", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 
 	if c.EnvFile == "" {
 		for _, key := range c.SecretEnv {
 			if value, ok := config.GetSecret(key); ok && value != "" {
-				args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+				args = append(args, "-e", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 			} else {
-				args = append(args, "-e", key)
+				args = append(args, "-e", shell.Quote(key))
 			}
 		}
 	}
 
 	for _, port := range c.Ports {
-		args = append(args, "-p", port)
+		args = append(args, "-p", shell.Quote(port))
 	}
 
 	for _, vol := range c.Volumes {
-		args = append(args, "-v", vol)
+		args = append(args, "-v", shell.Quote(vol))
 	}
 
 	for key, value := range c.Labels {
-		args = append(args, "-l", fmt.Sprintf("%s=%s", key, value))
+		args = append(args, "-l", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 
 	if c.Network != "" {
-		args = append(args, "--network", c.Network)
+		args = append(args, "--network", shell.Quote(c.Network))
 	}
 
 	for _, alias := range c.NetworkAliases {
-		args = append(args, "--network-alias", alias)
+		args = append(args, "--network-alias", shell.Quote(alias))
 	}
 
 	if c.Memory != "" {
-		args = append(args, "--memory", c.Memory)
+		args = append(args, "--memory", shell.Quote(c.Memory))
 	}
 	if c.CPUs != "" {
-		args = append(args, "--cpus", c.CPUs)
+		args = append(args, "--cpus", shell.Quote(c.CPUs))
 	}
 
 	if c.Restart != "" {
-		args = append(args, "--restart", c.Restart)
+		args = append(args, "--restart", shell.Quote(c.Restart))
 	}
 
 	if c.HealthCmd != "" {
-		quotedCmd := fmt.Sprintf("'%s'", strings.ReplaceAll(c.HealthCmd, "'", "'\\''"))
-		args = append(args, "--health-cmd", quotedCmd)
+		args = append(args, "--health-cmd", shell.Quote(c.HealthCmd))
 		if c.HealthInterval != "" {
-			args = append(args, "--health-interval", c.HealthInterval)
+			args = append(args, "--health-interval", shell.Quote(c.HealthInterval))
 		}
 		if c.HealthTimeout != "" {
-			args = append(args, "--health-timeout", c.HealthTimeout)
+			args = append(args, "--health-timeout", shell.Quote(c.HealthTimeout))
 		}
 		if c.HealthRetries > 0 {
 			args = append(args, "--health-retries", fmt.Sprintf("%d", c.HealthRetries))
 		}
 		if c.HealthStartPeriod != "" {
-			args = append(args, "--health-start-period", c.HealthStartPeriod)
+			args = append(args, "--health-start-period", shell.Quote(c.HealthStartPeriod))
 		}
 	}
 
@@ -146,10 +146,10 @@ func (c *ContainerConfig) BuildRunCommand() string {
 	copy(preImageArgs, args)
 
 	if len(c.Command) > 0 {
-		args = append(args, c.Image)
-		args = append(args, c.Command...)
+		args = append(args, shell.Quote(c.Image))
+		args = append(args, shell.QuoteAll(c.Command)...)
 	} else {
-		args = append(args, c.Image)
+		args = append(args, shell.Quote(c.Image))
 	}
 
 	baseCmd := "podman " + strings.Join(args, " ")
@@ -157,9 +157,12 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		return baseCmd
 	}
 
-	withEnvArgs := append(preImageArgs, "--env-file", c.EnvFile, c.Image)
+	// EnvFile may contain $HOME for shell expansion; use double quotes
+	// to allow variable expansion while protecting against spaces.
+	quotedEnvFile := fmt.Sprintf("\"%s\"", c.EnvFile)
+	withEnvArgs := append(preImageArgs, "--env-file", quotedEnvFile, shell.Quote(c.Image))
 	if len(c.Command) > 0 {
-		withEnvArgs = append(withEnvArgs, c.Command...)
+		withEnvArgs = append(withEnvArgs, shell.QuoteAll(c.Command)...)
 	}
 	withEnvCmd := "podman " + strings.Join(withEnvArgs, " ")
 
@@ -168,7 +171,7 @@ func (c *ContainerConfig) BuildRunCommand() string {
 	}
 
 	// Prefer env-file if present; otherwise run without it.
-	return fmt.Sprintf("if [ -f %s ]; then %s; else %s; fi", c.EnvFile, withEnvCmd, baseCmd)
+	return fmt.Sprintf("if [ -f %s ]; then %s; else %s; fi", quotedEnvFile, withEnvCmd, baseCmd)
 }
 
 // ExecConfig holds configuration for executing a command in a container.
@@ -199,19 +202,19 @@ func (c *ExecConfig) BuildExecCommand() string {
 	}
 
 	if c.User != "" {
-		args = append(args, "-u", c.User)
+		args = append(args, "-u", shell.Quote(c.User))
 	}
 
 	if c.WorkDir != "" {
-		args = append(args, "-w", c.WorkDir)
+		args = append(args, "-w", shell.Quote(c.WorkDir))
 	}
 
 	for key, value := range c.Env {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+		args = append(args, "-e", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 
-	args = append(args, c.Container)
-	args = append(args, c.Command...)
+	args = append(args, shell.Quote(c.Container))
+	args = append(args, shell.QuoteAll(c.Command)...)
 
 	return "podman " + strings.Join(args, " ")
 }
@@ -234,7 +237,7 @@ func (c *LogsConfig) BuildLogsCommand() string {
 	}
 
 	if c.Tail != "" {
-		args = append(args, "--tail", c.Tail)
+		args = append(args, "--tail", shell.Quote(c.Tail))
 	}
 
 	if c.Timestamps {
@@ -242,14 +245,14 @@ func (c *LogsConfig) BuildLogsCommand() string {
 	}
 
 	if c.Since != "" {
-		args = append(args, "--since", c.Since)
+		args = append(args, "--since", shell.Quote(c.Since))
 	}
 
 	if c.Until != "" {
-		args = append(args, "--until", c.Until)
+		args = append(args, "--until", shell.Quote(c.Until))
 	}
 
-	args = append(args, c.Container)
+	args = append(args, shell.Quote(c.Container))
 
 	return "podman " + strings.Join(args, " ")
 }
@@ -268,7 +271,7 @@ type Info struct {
 
 func (c *Client) GetInfo(host string) (*Info, error) {
 	format := `{{.ServerVersion}}|{{.Containers}}|{{.ContainersRunning}}|{{.ContainersPaused}}|{{.ContainersStopped}}|{{.Images}}|{{.Driver}}|{{.MemTotal}}|{{.NCPU}}`
-	result, err := c.Execute(host, "info", "--format", fmt.Sprintf("'%s'", format))
+	result, err := c.Execute(host, "info", "--format", format)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +299,7 @@ func (c *Client) GetInfo(host string) (*Info, error) {
 }
 
 func (c *Client) Version(host string) (string, error) {
-	result, err := c.Execute(host, "version", "--format", "'{{.Server.Version}}'")
+	result, err := c.Execute(host, "version", "--format", "{{.Server.Version}}")
 	if err != nil {
 		return "", err
 	}

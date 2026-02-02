@@ -5,12 +5,15 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/adriancarayol/azud/internal/config"
 	"github.com/adriancarayol/azud/internal/output"
 	"github.com/adriancarayol/azud/internal/podman"
+	"github.com/adriancarayol/azud/internal/shell"
+	"github.com/adriancarayol/azud/internal/state"
 )
 
 var cronCmd = &cobra.Command{
@@ -326,11 +329,44 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 	log.Header("Running Cron Job: %s", name)
 	log.Host(host, "Executing: %s", cronConfig.Command)
 
-	// Execute the command in a one-off container
+	// Build container config
 	runContainerName := fmt.Sprintf("%s-cron-%s-run", cfg.Service, name)
+	containerConfig := buildCronRunContainerConfig(name, runContainerName, cronConfig)
 
+	// If locking is enabled, acquire host-level lock before running
+	if cronConfig.Lock {
+		lockFile := cronLockFile(name)
+		lockTimeout := 5 * time.Minute
+		if cronConfig.Timeout != "" {
+			if d, err := time.ParseDuration(cronConfig.Timeout); err == nil {
+				lockTimeout = d + time.Minute // Add buffer for lock acquisition
+			}
+		}
+
+		log.Host(host, "Acquiring lock %s...", lockFile)
+		err := sshClient.WithRemoteLock(host, lockFile, lockTimeout, func() error {
+			_, runErr := containerManager.Run(host, containerConfig)
+			return runErr
+		})
+		if err != nil {
+			return fmt.Errorf("cron job failed: %w", err)
+		}
+	} else {
+		// No locking needed, run directly
+		_, err := containerManager.Run(host, containerConfig)
+		if err != nil {
+			return fmt.Errorf("cron job failed: %w", err)
+		}
+	}
+
+	log.Success("Cron job %s completed", name)
+	return nil
+}
+
+// buildCronRunContainerConfig builds the container config for a manual cron run.
+func buildCronRunContainerConfig(name, containerName string, cronConfig config.CronConfig) *podman.ContainerConfig {
 	containerConfig := &podman.ContainerConfig{
-		Name:    runContainerName,
+		Name:    containerName,
 		Image:   cfg.Image,
 		Detach:  false,
 		Remove:  true,
@@ -360,14 +396,7 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 	// Add volumes
 	containerConfig.Volumes = cfg.Volumes
 
-	// Run the container
-	_, err := containerManager.Run(host, containerConfig)
-	if err != nil {
-		return fmt.Errorf("cron job failed: %w", err)
-	}
-
-	log.Success("Cron job %s completed", name)
-	return nil
+	return containerConfig
 }
 
 func runCronList(cmd *cobra.Command, args []string) error {
@@ -419,6 +448,18 @@ func getCronContainerName(name string) string {
 	return fmt.Sprintf("%s-cron-%s", cfg.Service, name)
 }
 
+// cronLockFile returns the path to the host-level lock file for a cron job.
+// This lock file is shared between the scheduled container and manual runs.
+func cronLockFile(name string) string {
+	return state.LockFile(cfg.SSH.User, fmt.Sprintf("%s-cron-%s", cfg.Service, name))
+}
+
+// cronLockFileInContainer returns the lock file path as seen from inside
+// the cron container. The host state directory is mounted at /var/lib/azud.
+func cronLockFileInContainer(name string) string {
+	return fmt.Sprintf("/var/lib/azud/%s-cron-%s.lock", cfg.Service, name)
+}
+
 func getCronHosts(name string) []string {
 	if cronHost != "" {
 		return []string{cronHost}
@@ -431,7 +472,7 @@ func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman
 
 	// Build the cron command using supercronic or a shell-based approach
 	// We use a shell wrapper to run the command on schedule
-	cronCommand := buildCronCommand(cronConfig)
+	cronCommand := buildCronCommand(name, cronConfig)
 
 	containerConfig := &podman.ContainerConfig{
 		Name:    containerName,
@@ -466,20 +507,34 @@ func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman
 	}
 
 	// Add volumes from app config
-	containerConfig.Volumes = cfg.Volumes
+	containerConfig.Volumes = append([]string{}, cfg.Volumes...)
+
+	// If locking is enabled, mount the host state directory for coordination
+	// This allows the container's flock to coordinate with host-level locks
+	// Note: For non-root users, state.Dir returns ${HOME}/... which is expanded
+	// by the shell on the remote host when running podman. Inside the container,
+	// we mount to a fixed path (/var/lib/azud) to avoid ${HOME} mismatch issues.
+	if cronConfig.Lock {
+		stateDir := state.Dir(cfg.SSH.User)
+		// Mount to /var/lib/azud inside container for consistent path access
+		containerConfig.Volumes = append(containerConfig.Volumes,
+			fmt.Sprintf("%s:/var/lib/azud:rw", stateDir))
+	}
 
 	return containerConfig
 }
 
-func buildCronCommand(cronConfig config.CronConfig) string {
+func buildCronCommand(name string, cronConfig config.CronConfig) string {
 	// Create a crontab entry and run it using crond or a shell loop
 	// This approach works without needing supercronic installed
 
 	lockPrefix := ""
 	lockSuffix := ""
 	if cronConfig.Lock {
-		// Use flock for locking if available
-		lockPrefix = "flock -n /tmp/azud_cron.lock "
+		// Use flock with the in-container lock file path for cross-container coordination
+		// The host state directory is mounted at /var/lib/azud inside the container
+		lockFile := cronLockFileInContainer(name)
+		lockPrefix = fmt.Sprintf("flock -n %s ", lockFile)
 		lockSuffix = " || echo 'Skipped: lock held'"
 	}
 
@@ -490,7 +545,7 @@ func buildCronCommand(cronConfig config.CronConfig) string {
 
 	logRedirect := ""
 	if cronConfig.LogPath != "" {
-		logRedirect = fmt.Sprintf(" >> %s 2>&1", cronConfig.LogPath)
+		logRedirect = fmt.Sprintf(" >> %s 2>&1", shell.Quote(cronConfig.LogPath))
 	}
 
 	// Build the cron entry
@@ -502,12 +557,15 @@ func buildCronCommand(cronConfig config.CronConfig) string {
 		lockSuffix,
 	)
 
-	// Create a script that sets up crond with the crontab
+	// Create a script that sets up crond with the crontab.
+	// Use shell.Quote for the echo argument to prevent breakage when
+	// cron commands or log paths contain single quotes or shell metacharacters.
 	script := fmt.Sprintf(`
-echo '%s%s' > /tmp/crontab
+mkdir -p /var/lib/azud 2>/dev/null || true
+echo %s > /tmp/crontab
 crontab /tmp/crontab
 exec crond -f -l 2
-`, cronEntry, logRedirect)
+`, shell.Quote(cronEntry+logRedirect))
 
 	return script
 }

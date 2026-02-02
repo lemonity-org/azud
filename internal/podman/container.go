@@ -142,7 +142,7 @@ func (m *ContainerManager) Logs(host string, config *LogsConfig) (*ssh.Result, e
 }
 
 func (m *ContainerManager) List(host string, all bool, filters map[string]string) ([]Container, error) {
-	args := []string{"ps", "--format", "'{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}'"}
+	args := []string{"ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}"}
 	if all {
 		args = append(args, "-a")
 	}
@@ -205,7 +205,7 @@ func (m *ContainerManager) Inspect(host, container string) (string, error) {
 }
 
 func (m *ContainerManager) Exists(host, container string) (bool, error) {
-	result, err := m.client.Execute(host, "inspect", container, "--format", "'{{.Id}}'")
+	result, err := m.client.Execute(host, "inspect", container, "--format", "{{.Id}}")
 	if err != nil {
 		return false, err
 	}
@@ -214,7 +214,7 @@ func (m *ContainerManager) Exists(host, container string) (bool, error) {
 }
 
 func (m *ContainerManager) IsRunning(host, container string) (bool, error) {
-	result, err := m.client.Execute(host, "inspect", container, "--format", "'{{.State.Running}}'")
+	result, err := m.client.Execute(host, "inspect", container, "--format", "{{.State.Running}}")
 	if err != nil {
 		return false, err
 	}
@@ -230,7 +230,7 @@ func (m *ContainerManager) WaitHealthy(host, container string, timeout time.Dura
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		result, err := m.client.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
+		result, err := m.client.Execute(host, "inspect", container, "--format", "{{.State.Health.Status}}")
 		if err != nil {
 			return err
 		}
@@ -311,7 +311,7 @@ func (m *ContainerManager) Prune(host string) (int, error) {
 
 func (m *ContainerManager) Stats(host, container string) (string, error) {
 	result, err := m.client.Execute(host, "stats", container, "--no-stream", "--format",
-		"'CPU: {{.CPUPerc}} | Memory: {{.MemUsage}} | Net: {{.NetIO}} | Block: {{.BlockIO}}'")
+		"CPU: {{.CPUPerc}} | Memory: {{.MemUsage}} | Net: {{.NetIO}} | Block: {{.BlockIO}}")
 	if err != nil {
 		return "", err
 	}

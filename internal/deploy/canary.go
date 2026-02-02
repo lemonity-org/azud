@@ -14,6 +14,7 @@ import (
 	"github.com/adriancarayol/azud/internal/podman"
 	"github.com/adriancarayol/azud/internal/proxy"
 	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/adriancarayol/azud/internal/state"
 )
 
 // CanaryStatus represents the current state of a canary deployment
@@ -570,6 +571,15 @@ func (c *CanaryDeployer) loadStateLocked() {
 		return
 	}
 
+	// Acquire file lock to coordinate with other CLI processes
+	lockPath := c.statePath + ".lock"
+	lock, err := state.AcquireFileLock(lockPath)
+	if err != nil {
+		c.log.Debug("Failed to acquire canary state lock: %v", err)
+		return
+	}
+	defer func() { _ = lock.Release() }()
+
 	data, err := os.ReadFile(c.statePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -578,21 +588,21 @@ func (c *CanaryDeployer) loadStateLocked() {
 		return
 	}
 
-	var state CanaryState
-	if err := json.Unmarshal(data, &state); err != nil {
+	var s CanaryState
+	if err := json.Unmarshal(data, &s); err != nil {
 		c.log.Debug("Failed to parse canary state: %v", err)
 		return
 	}
 
-	if state.Service != "" && state.Service != c.cfg.Service {
-		c.log.Debug("Ignoring canary state for service %s", state.Service)
+	if s.Service != "" && s.Service != c.cfg.Service {
+		c.log.Debug("Ignoring canary state for service %s", s.Service)
 		return
 	}
-	if state.Service == "" {
-		state.Service = c.cfg.Service
+	if s.Service == "" {
+		s.Service = c.cfg.Service
 	}
 
-	c.state = &state
+	c.state = &s
 }
 
 func (c *CanaryDeployer) saveStateLocked() {
@@ -600,12 +610,21 @@ func (c *CanaryDeployer) saveStateLocked() {
 		return
 	}
 
-	state := *c.state
-	if state.Service == "" {
-		state.Service = c.cfg.Service
+	// Acquire file lock to coordinate with other CLI processes
+	lockPath := c.statePath + ".lock"
+	lock, err := state.AcquireFileLock(lockPath)
+	if err != nil {
+		c.log.Debug("Failed to acquire canary state lock: %v", err)
+		return
+	}
+	defer func() { _ = lock.Release() }()
+
+	s := *c.state
+	if s.Service == "" {
+		s.Service = c.cfg.Service
 	}
 
-	data, err := json.MarshalIndent(&state, "", "  ")
+	data, err := json.MarshalIndent(&s, "", "  ")
 	if err != nil {
 		c.log.Debug("Failed to marshal canary state: %v", err)
 		return

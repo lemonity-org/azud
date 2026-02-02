@@ -91,6 +91,11 @@ lint:
 	@echo "Running linter..."
 	$(GOLINT) run ./...
 
+## security-lint: Run security linter
+security-lint:
+	@echo "Running security linter..."
+	./scripts/security-lint.sh
+
 ## fmt: Format code
 fmt:
 	@echo "Formatting code..."

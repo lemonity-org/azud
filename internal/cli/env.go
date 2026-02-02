@@ -199,9 +199,9 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Write secrets file using a heredoc
-		writeCmd := fmt.Sprintf("cat > \"%s\" << 'AZUD_SECRETS_EOF'\n%s\nAZUD_SECRETS_EOF", remoteSecrets, content.String())
-		result, err = sshClient.Execute(host, writeCmd)
+		// Write secrets file via stdin to avoid heredoc delimiter injection
+		writeCmd := fmt.Sprintf("cat > \"%s\"", remoteSecrets)
+		result, err = sshClient.ExecuteWithStdin(host, writeCmd, strings.NewReader(content.String()))
 		if err != nil {
 			log.HostError(host, "Failed to write secrets: %v", err)
 			hasErrors = true

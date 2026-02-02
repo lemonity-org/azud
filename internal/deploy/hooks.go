@@ -137,7 +137,7 @@ func (h *HookRunner) resolveHook(name string) (string, error) {
 		}
 		return "", fmt.Errorf("failed to open hook: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Fstat on the open fd — immune to path-level races.
 	info, err := f.Stat()
@@ -262,7 +262,7 @@ func (h *HookRunner) Exists(name string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return false

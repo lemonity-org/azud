@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -247,13 +248,20 @@ func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([
 	// Execute curl command via SSH to reach Caddy's admin API.
 	// Use -f (--fail) so curl returns a non-zero exit code on HTTP 4xx/5xx
 	// errors, preventing silent failures when Caddy rejects a config change.
+	// Body is piped via stdin (-d @-) to avoid single-quote breakout issues
+	// when JSON values contain quote characters.
 	curlCmd := fmt.Sprintf("curl -sf -X %s", method)
 	if len(bodyJSON) > 0 {
-		curlCmd += fmt.Sprintf(" -H 'Content-Type: application/json' -d '%s'", string(bodyJSON))
+		curlCmd += " -H 'Content-Type: application/json' -d @-"
 	}
 	curlCmd += fmt.Sprintf(" http://localhost:%d%s", c.adminPort, path)
 
-	result, err := c.sshClient.Execute(host, curlCmd)
+	var result *ssh.Result
+	if len(bodyJSON) > 0 {
+		result, err = c.sshClient.ExecuteWithStdin(host, curlCmd, bytes.NewReader(bodyJSON))
+	} else {
+		result, err = c.sshClient.Execute(host, curlCmd)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute API request: %w", err)
 	}

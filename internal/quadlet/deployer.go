@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/adriancarayol/azud/internal/output"
+	"github.com/adriancarayol/azud/internal/shell"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
@@ -36,7 +37,9 @@ func (q *QuadletDeployer) Deploy(host, filename, content string) error {
 	q.log.Host(host, "Deploying quadlet %s...", filename)
 
 	filePath := q.path + filename
-	cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'QUADLET_EOF'\n%sQUADLET_EOF", q.path, filePath, content)
+	// Use shell.Quote for paths to prevent command injection
+	cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'QUADLET_EOF'\n%sQUADLET_EOF",
+		shell.Quote(q.path), shell.Quote(filePath), content)
 
 	result, err := q.ssh.Execute(host, cmd)
 	if err != nil {
@@ -58,7 +61,7 @@ func (q *QuadletDeployer) Remove(host, filename string) error {
 	q.log.Host(host, "Removing quadlet %s...", filename)
 
 	filePath := q.path + filename
-	cmd := fmt.Sprintf("rm -f %s", filePath)
+	cmd := fmt.Sprintf("rm -f %s", shell.Quote(filePath))
 
 	result, err := q.ssh.Execute(host, cmd)
 	if err != nil {
@@ -88,7 +91,7 @@ func (q *QuadletDeployer) Reload(host string) error {
 }
 
 func (q *QuadletDeployer) Start(host, service string) error {
-	result, err := q.ssh.Execute(host, q.systemctlCmd("start "+service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd("start "+shell.Quote(service)))
 	if err != nil {
 		return err
 	}
@@ -99,7 +102,7 @@ func (q *QuadletDeployer) Start(host, service string) error {
 }
 
 func (q *QuadletDeployer) Stop(host, service string) error {
-	result, err := q.ssh.Execute(host, q.systemctlCmd("stop "+service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd("stop "+shell.Quote(service)))
 	if err != nil {
 		return err
 	}
@@ -110,7 +113,7 @@ func (q *QuadletDeployer) Stop(host, service string) error {
 }
 
 func (q *QuadletDeployer) Enable(host, service string) error {
-	result, err := q.ssh.Execute(host, q.systemctlCmd("enable "+service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd("enable "+shell.Quote(service)))
 	if err != nil {
 		return err
 	}
@@ -121,7 +124,7 @@ func (q *QuadletDeployer) Enable(host, service string) error {
 }
 
 func (q *QuadletDeployer) Status(host, service string) (string, error) {
-	result, err := q.ssh.Execute(host, q.systemctlCmd(fmt.Sprintf("is-active %s 2>/dev/null || true", service)))
+	result, err := q.ssh.Execute(host, q.systemctlCmd(fmt.Sprintf("is-active %s 2>/dev/null || true", shell.Quote(service))))
 	if err != nil {
 		return "", err
 	}
@@ -129,9 +132,9 @@ func (q *QuadletDeployer) Status(host, service string) (string, error) {
 }
 
 func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*ssh.Result, error) {
-	cmd := fmt.Sprintf("journalctl -u %s --no-pager", service)
+	cmd := fmt.Sprintf("journalctl -u %s --no-pager", shell.Quote(service))
 	if q.user {
-		cmd = "journalctl --user-unit " + service + " --no-pager"
+		cmd = "journalctl --user-unit " + shell.Quote(service) + " --no-pager"
 	}
 	if follow {
 		cmd += " -f"

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/adriancarayol/azud/internal/shell"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
@@ -16,7 +17,7 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return nil
 	}
 
-	existsCmd := fmt.Sprintf("test -f \"%s\"", secretsPath)
+	existsCmd := fmt.Sprintf("test -f %s", shell.Quote(secretsPath))
 	results := sshClient.ExecuteParallel(hosts, existsCmd)
 
 	var missingFiles []string
@@ -35,7 +36,7 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return err
 	}
 
-	readCmd := fmt.Sprintf("cat \"%s\"", secretsPath)
+	readCmd := fmt.Sprintf("cat %s", shell.Quote(secretsPath))
 	readResults := sshClient.ExecuteParallel(hosts, readCmd)
 
 	unreadable := make([]string, 0)
@@ -144,7 +145,8 @@ func validateSecretsPermissions(sshClient *ssh.Client, hosts []string, secretsPa
 		return nil
 	}
 
-	cmd := fmt.Sprintf(`path="%s"; dir="$(dirname "$path")"; uid=$(id -u); if stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(stat -c '%%u %%a' "$path"); dstat=$(stat -c '%%u %%a' "$dir"); elif stat -f '%%u %%Lp' "$path" >/dev/null 2>&1; then fstat=$(stat -f '%%u %%Lp' "$path"); dstat=$(stat -f '%%u %%Lp' "$dir"); elif busybox stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(busybox stat -c '%%u %%a' "$path"); dstat=$(busybox stat -c '%%u %%a' "$dir"); else echo "stat unsupported" >&2; exit 2; fi; echo "$uid $fstat $dstat"`, secretsPath)
+	quotedPath := shell.Quote(secretsPath)
+	cmd := fmt.Sprintf(`path=%s; dir="$(dirname "$path")"; uid=$(id -u); if stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(stat -c '%%u %%a' "$path"); dstat=$(stat -c '%%u %%a' "$dir"); elif stat -f '%%u %%Lp' "$path" >/dev/null 2>&1; then fstat=$(stat -f '%%u %%Lp' "$path"); dstat=$(stat -f '%%u %%Lp' "$dir"); elif busybox stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(busybox stat -c '%%u %%a' "$path"); dstat=$(busybox stat -c '%%u %%a' "$dir"); else echo "stat unsupported" >&2; exit 2; fi; echo "$uid $fstat $dstat"`, quotedPath)
 	results := sshClient.ExecuteParallel(hosts, cmd)
 
 	var insecure []string

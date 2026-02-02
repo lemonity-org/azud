@@ -150,12 +150,14 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 
 func createSSHClient() *ssh.Client {
 	sshConfig := &ssh.Config{
-		User:                  cfg.SSH.User,
-		Port:                  cfg.SSH.Port,
-		Keys:                  cfg.SSH.Keys,
-		KnownHostsFile:        cfg.SSH.KnownHostsFile,
-		ConnectTimeout:        cfg.SSH.ConnectTimeout,
-		InsecureIgnoreHostKey: cfg.SSH.InsecureIgnoreHostKey,
+		User:                       cfg.SSH.User,
+		Port:                       cfg.SSH.Port,
+		Keys:                       cfg.SSH.Keys,
+		KnownHostsFile:             cfg.SSH.KnownHostsFile,
+		ConnectTimeout:             cfg.SSH.ConnectTimeout,
+		InsecureIgnoreHostKey:      cfg.SSH.InsecureIgnoreHostKey,
+		TrustedHostFingerprints:    cfg.SSH.TrustedHostFingerprints,
+		RequireTrustedFingerprints: cfg.Security.RequireTrustedFingerprints,
 	}
 
 	// Add proxy configuration if present

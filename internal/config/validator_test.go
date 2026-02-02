@@ -72,6 +72,68 @@ func TestValidate_RequiredFields(t *testing.T) {
 	}
 }
 
+func TestValidate_ServiceName(t *testing.T) {
+	validBase := func(service string) *Config {
+		return &Config{
+			Service: service,
+			Image:   "test:latest",
+			Servers: map[string]RoleConfig{
+				"web": {Hosts: []string{"localhost"}},
+			},
+			Proxy: ProxyConfig{
+				Host: "test.example.com",
+			},
+			SSH: SSHConfig{Port: 22},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		service string
+		wantErr bool
+	}{
+		{"valid simple", "myapp", false},
+		{"valid with hyphen", "my-app", false},
+		{"valid with underscore", "my_app", false},
+		{"valid with dot", "my.app", false},
+		{"valid with numbers", "app123", false},
+		{"valid mixed", "My-App_v1.0", false},
+		{"invalid starts with number", "123app", true},
+		{"invalid starts with hyphen", "-app", true},
+		{"invalid starts with underscore", "_app", true},
+		{"invalid starts with dot", ".app", true},
+		{"invalid contains space", "my app", true},
+		{"invalid contains slash", "my/app", true},
+		{"invalid contains colon", "my:app", true},
+		{"invalid contains at", "my@app", true},
+		{"invalid command injection", "app; rm -rf /", true},
+		{"invalid shell expansion", "$(whoami)", true},
+		{"invalid backtick", "`id`", true},
+		{"invalid too long", strings.Repeat("a", 64), true},
+		{"valid max length", strings.Repeat("a", 63), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBase(tt.service)
+			err := Validate(cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error for service %q, got nil", tt.service)
+					return
+				}
+				if !strings.Contains(err.Error(), "service") {
+					t.Errorf("expected error about service, got: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("expected no error for service %q, got: %v", tt.service, err)
+				}
+			}
+		})
+	}
+}
+
 func TestValidate_SSLRequiresACMEEmail(t *testing.T) {
 	cfg := &Config{
 		Service: "test",

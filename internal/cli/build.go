@@ -13,6 +13,7 @@ import (
 	"github.com/adriancarayol/azud/internal/config"
 	"github.com/adriancarayol/azud/internal/output"
 	"github.com/adriancarayol/azud/internal/podman"
+	"github.com/adriancarayol/azud/internal/shell"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
 
@@ -362,9 +363,9 @@ func pushImage(imageTag, latestTag string, multiarch bool) error {
 }
 
 func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, multiarch bool) error {
-	pushCmd := fmt.Sprintf("podman push %s", imageTag)
+	pushCmd := fmt.Sprintf("podman push %s", shell.Quote(imageTag))
 	if multiarch {
-		pushCmd = fmt.Sprintf("podman manifest push %s %s", imageTag, imageTag)
+		pushCmd = fmt.Sprintf("podman manifest push %s %s", shell.Quote(imageTag), shell.Quote(imageTag))
 	}
 	if result, err := sshClient.Execute(host, pushCmd); err != nil {
 		return err
@@ -374,9 +375,9 @@ func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, mu
 
 	var latestCmd string
 	if multiarch {
-		latestCmd = fmt.Sprintf("podman manifest push %s %s", imageTag, latestTag)
+		latestCmd = fmt.Sprintf("podman manifest push %s %s", shell.Quote(imageTag), shell.Quote(latestTag))
 	} else {
-		latestCmd = fmt.Sprintf("podman push %s", latestTag)
+		latestCmd = fmt.Sprintf("podman push %s", shell.Quote(latestTag))
 	}
 	if result, err := sshClient.Execute(host, latestCmd); err != nil {
 		return err

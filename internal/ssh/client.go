@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,9 +18,10 @@ import (
 
 // Client manages SSH connections to remote hosts
 type Client struct {
-	config *Config
-	pool   *Pool
-	mu     sync.RWMutex
+	config    *Config
+	pool      *Pool
+	agentConn net.Conn // SSH agent connection, closed on Client.Close()
+	mu        sync.RWMutex
 }
 
 // Config holds SSH client configuration
@@ -36,11 +38,21 @@ type Config struct {
 	// Connection timeout
 	ConnectTimeout time.Duration
 
+	// Command execution timeout (0 = no timeout)
+	CommandTimeout time.Duration
+
 	// Proxy/bastion host configuration
 	Proxy *ProxyConfig
 
 	// Known hosts file path (empty for default)
 	KnownHostsFile string
+
+	// Trusted host fingerprints by hostname (SHA256:...)
+	// If set, these are checked BEFORE known_hosts
+	TrustedHostFingerprints map[string][]string
+
+	// Require trusted fingerprints to match (reject if no fingerprint configured)
+	RequireTrustedFingerprints bool
 
 	// Skip host key verification (not recommended for production)
 	InsecureIgnoreHostKey bool
@@ -60,7 +72,7 @@ func NewClient(cfg *Config) *Client {
 		cfg.Port = 22
 	}
 	if cfg.User == "" {
-		cfg.User = "root"
+		cfg.User = currentUsername()
 	}
 	if cfg.ConnectTimeout == 0 {
 		cfg.ConnectTimeout = 30 * time.Second
@@ -102,9 +114,10 @@ func (c *Client) Connect(host string) (*Connection, error) {
 
 	// Create and store connection
 	conn := &Connection{
-		host:     host,
-		client:   client,
-		lastUsed: time.Now(),
+		host:           host,
+		client:         client,
+		lastUsed:       time.Now(),
+		commandTimeout: c.config.CommandTimeout,
 	}
 
 	c.pool.Put(host, conn)
@@ -260,8 +273,15 @@ func (c *Client) getAuthMethods(keyPaths []string) ([]ssh.AuthMethod, error) {
 	return authMethods, nil
 }
 
-// getAgentAuth returns SSH agent authentication if available
+// getAgentAuth returns SSH agent authentication if available.
+// The agent connection is stored in c.agentConn and closed when c.Close() is called.
 func (c *Client) getAgentAuth() ssh.AuthMethod {
+	// If we already have an agent connection, reuse it
+	if c.agentConn != nil {
+		agentClient := agent.NewClient(c.agentConn)
+		return ssh.PublicKeysCallback(agentClient.Signers)
+	}
+
 	socket := os.Getenv("SSH_AUTH_SOCK")
 	if socket == "" {
 		return nil
@@ -280,6 +300,9 @@ func (c *Client) getAgentAuth() ssh.AuthMethod {
 		_ = conn.Close()
 		return nil
 	}
+
+	// Store the connection to close it later
+	c.agentConn = conn
 
 	return ssh.PublicKeysCallback(agentClient.Signers)
 }
@@ -301,12 +324,16 @@ func (c *Client) loadPrivateKey(path string) (ssh.Signer, error) {
 	return signer, nil
 }
 
-// getHostKeyCallback returns the host key callback function
+// getHostKeyCallback returns the host key callback function.
+// If TrustedHostFingerprints is configured, it checks fingerprints first.
+// Falls back to known_hosts if no fingerprint match and RequireTrustedFingerprints is false.
 func (c *Client) getHostKeyCallback() (ssh.HostKeyCallback, error) {
 	if c.config.InsecureIgnoreHostKey {
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
 
+	// Prepare known_hosts callback as fallback
+	var knownHostsCallback ssh.HostKeyCallback
 	knownHostsPath := c.config.KnownHostsFile
 	if knownHostsPath == "" {
 		knownHostsPath = expandPath("~/.ssh/known_hosts")
@@ -326,13 +353,78 @@ func (c *Client) getHostKeyCallback() (ssh.HostKeyCallback, error) {
 
 	callback, err := knownhosts.New(knownHostsPath)
 	if err != nil {
-		if c.config.InsecureIgnoreHostKey {
-			return ssh.InsecureIgnoreHostKey(), nil
-		}
 		return nil, fmt.Errorf("failed to load known_hosts: %w", err)
 	}
+	knownHostsCallback = callback
 
-	return callback, nil
+	// If no trusted fingerprints configured, just use known_hosts
+	if len(c.config.TrustedHostFingerprints) == 0 {
+		if c.config.RequireTrustedFingerprints {
+			return nil, fmt.Errorf("require_trusted_fingerprints is enabled but no trusted_host_fingerprints configured")
+		}
+		return knownHostsCallback, nil
+	}
+
+	// Return a composite callback that checks fingerprints first
+	return c.fingerprintCheckingCallback(knownHostsCallback), nil
+}
+
+// fingerprintCheckingCallback returns a HostKeyCallback that verifies host keys
+// against configured trusted fingerprints before falling back to known_hosts.
+func (c *Client) fingerprintCheckingCallback(fallback ssh.HostKeyCallback) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		// Extract hostname and port
+		host := hostname
+		port := ""
+		if h, p, err := net.SplitHostPort(hostname); err == nil {
+			host = h
+			port = p
+		}
+
+		// Compute the SHA256 fingerprint of the presented key
+		fingerprint := ssh.FingerprintSHA256(key)
+
+		// Look up fingerprints in order of specificity:
+		// 1. Exact hostname:port as passed by SSH (e.g., "example.com:22")
+		// 2. Bracketed format "[host]:port" for non-standard ports (e.g., "[example.com]:2222")
+		// 3. Plain host without port
+		lookupKeys := []string{hostname}
+		if port != "" && port != "22" {
+			lookupKeys = append(lookupKeys, fmt.Sprintf("[%s]:%s", host, port))
+		}
+		lookupKeys = append(lookupKeys, host)
+
+		var trustedFPs []string
+		var matchedKey string
+		for _, k := range lookupKeys {
+			if fps, ok := c.config.TrustedHostFingerprints[k]; ok && len(fps) > 0 {
+				trustedFPs = fps
+				matchedKey = k
+				break
+			}
+		}
+
+		if len(trustedFPs) > 0 {
+			// Check if the presented fingerprint matches any trusted one
+			for _, trusted := range trustedFPs {
+				if fingerprint == trusted {
+					// Fingerprint matches - accept the connection
+					return nil
+				}
+			}
+			// We have fingerprints configured but none match - reject
+			return fmt.Errorf("host key fingerprint mismatch for %s: got %s, expected one of %v",
+				matchedKey, fingerprint, trustedFPs)
+		}
+
+		// No fingerprints configured for this specific host
+		if c.config.RequireTrustedFingerprints {
+			return fmt.Errorf("no trusted fingerprint configured for host %s (got %s)", host, fingerprint)
+		}
+
+		// Fall back to known_hosts verification
+		return fallback(hostname, remote, key)
+	}
 }
 
 // Execute runs a command on the given host and returns the output
@@ -414,10 +506,17 @@ func (c *Client) WithRemoteLock(host, lockFile string, timeout time.Duration, fn
 	return conn.WithRemoteLock(lockFile, timeout, fn)
 }
 
-// Close closes all connections in the pool
+// Close closes all connections in the pool and the SSH agent connection
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Close SSH agent connection if open
+	if c.agentConn != nil {
+		_ = c.agentConn.Close()
+		c.agentConn = nil
+	}
+
 	return c.pool.CloseAll()
 }
 
@@ -431,4 +530,18 @@ func expandPath(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// currentUsername returns the current OS user's username.
+// Falls back to "root" if the user cannot be determined.
+func currentUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	// Fall back to checking USER environment variable
+	if username := os.Getenv("USER"); username != "" {
+		return username
+	}
+	// Last resort fallback
+	return "root"
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -676,9 +677,9 @@ func nodeHasPath(node *yaml.Node, path ...string) bool {
 
 // applyDefaults sets default values for unset configuration options
 func applyDefaults(cfg *Config) {
-	// SSH defaults
+	// SSH defaults - use current user instead of root for security
 	if cfg.SSH.User == "" {
-		cfg.SSH.User = "root"
+		cfg.SSH.User = currentUsername()
 	}
 	if cfg.SSH.Port == 0 {
 		cfg.SSH.Port = 22
@@ -767,4 +768,18 @@ func applyDefaults(cfg *Config) {
 	if cfg.Hooks.Timeout == 0 {
 		cfg.Hooks.Timeout = 5 * time.Minute
 	}
+}
+
+// currentUsername returns the current OS user's username.
+// Falls back to "root" if the user cannot be determined.
+func currentUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	// Fall back to checking USER environment variable
+	if username := os.Getenv("USER"); username != "" {
+		return username
+	}
+	// Last resort fallback
+	return "root"
 }

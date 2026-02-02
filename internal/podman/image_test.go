@@ -264,7 +264,7 @@ func TestManifestBuildCommands_WithBuildArgs(t *testing.T) {
 	cmds := cfg.ManifestBuildCommands()
 
 	// Check the build command (index 1) has the build arg
-	if !strings.Contains(cmds[1], "--build-arg NODE_ENV=production") {
+	if !strings.Contains(cmds[1], "--build-arg 'NODE_ENV=production'") {
 		t.Errorf("expected build arg in build command, got: %s", cmds[1])
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/adriancarayol/azud/internal/shell"
 )
 
 type Image struct {
@@ -98,34 +100,34 @@ func (c *BuildConfig) BuildCommand() string {
 	args := []string{"build"}
 
 	if c.Dockerfile != "" {
-		args = append(args, "-f", c.Dockerfile)
+		args = append(args, "-f", shell.Quote(c.Dockerfile))
 	}
 
 	if c.Tag != "" {
-		args = append(args, "-t", c.Tag)
+		args = append(args, "-t", shell.Quote(c.Tag))
 	}
 
 	for _, tag := range c.Tags {
-		args = append(args, "-t", tag)
+		args = append(args, "-t", shell.Quote(tag))
 	}
 
 	for key, value := range c.Args {
-		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
+		args = append(args, "--build-arg", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 
 	if c.Target != "" {
-		args = append(args, "--target", c.Target)
+		args = append(args, "--target", shell.Quote(c.Target))
 	}
 
 	for _, cache := range c.CacheFrom {
-		args = append(args, "--cache-from", cache)
+		args = append(args, "--cache-from", shell.Quote(cache))
 	}
 	if c.CacheTo != "" {
-		args = append(args, "--cache-to", c.CacheTo)
+		args = append(args, "--cache-to", shell.Quote(c.CacheTo))
 	}
 
 	if c.Platform != "" {
-		args = append(args, "--platform", c.Platform)
+		args = append(args, "--platform", shell.Quote(c.Platform))
 	}
 
 	if c.NoCache {
@@ -137,11 +139,11 @@ func (c *BuildConfig) BuildCommand() string {
 	}
 
 	for _, secret := range c.Secrets {
-		args = append(args, "--secret", secret)
+		args = append(args, "--secret", shell.Quote(secret))
 	}
 
 	for _, s := range c.SSH {
-		args = append(args, "--ssh", s)
+		args = append(args, "--ssh", shell.Quote(s))
 	}
 
 	args = append(args, c.Options...)
@@ -150,7 +152,7 @@ func (c *BuildConfig) BuildCommand() string {
 	if context == "" {
 		context = "."
 	}
-	args = append(args, context)
+	args = append(args, shell.Quote(context))
 
 	return "podman " + strings.Join(args, " ")
 }
@@ -188,35 +190,35 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 		tag = "localhost/build:latest"
 	}
 
-	commands = append(commands, fmt.Sprintf("podman manifest create %s", tag))
+	commands = append(commands, fmt.Sprintf("podman manifest create %s", shell.Quote(tag)))
 
 	for _, platform := range c.Platforms {
 		args := []string{"build"}
 
-		args = append(args, "--platform", platform)
-		args = append(args, "--manifest", tag)
+		args = append(args, "--platform", shell.Quote(platform))
+		args = append(args, "--manifest", shell.Quote(tag))
 
 		if c.Dockerfile != "" {
-			args = append(args, "-f", c.Dockerfile)
+			args = append(args, "-f", shell.Quote(c.Dockerfile))
 		}
 
 		for _, t := range c.Tags {
-			args = append(args, "-t", t)
+			args = append(args, "-t", shell.Quote(t))
 		}
 
 		for key, value := range c.Args {
-			args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
+			args = append(args, "--build-arg", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 		}
 
 		if c.Target != "" {
-			args = append(args, "--target", c.Target)
+			args = append(args, "--target", shell.Quote(c.Target))
 		}
 
 		for _, cache := range c.CacheFrom {
-			args = append(args, "--cache-from", cache)
+			args = append(args, "--cache-from", shell.Quote(cache))
 		}
 		if c.CacheTo != "" {
-			args = append(args, "--cache-to", c.CacheTo)
+			args = append(args, "--cache-to", shell.Quote(c.CacheTo))
 		}
 
 		if c.NoCache {
@@ -228,11 +230,11 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 		}
 
 		for _, secret := range c.Secrets {
-			args = append(args, "--secret", secret)
+			args = append(args, "--secret", shell.Quote(secret))
 		}
 
 		for _, s := range c.SSH {
-			args = append(args, "--ssh", s)
+			args = append(args, "--ssh", shell.Quote(s))
 		}
 
 		args = append(args, c.Options...)
@@ -241,13 +243,13 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 		if context == "" {
 			context = "."
 		}
-		args = append(args, context)
+		args = append(args, shell.Quote(context))
 
 		commands = append(commands, "podman "+strings.Join(args, " "))
 	}
 
 	if c.Push {
-		commands = append(commands, fmt.Sprintf("podman manifest push %s %s", tag, tag))
+		commands = append(commands, fmt.Sprintf("podman manifest push %s %s", shell.Quote(tag), shell.Quote(tag)))
 		seen := map[string]struct{}{tag: {}}
 		for _, t := range c.Tags {
 			if t == "" {
@@ -257,7 +259,7 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 				continue
 			}
 			seen[t] = struct{}{}
-			commands = append(commands, fmt.Sprintf("podman manifest push %s %s", tag, t))
+			commands = append(commands, fmt.Sprintf("podman manifest push %s %s", shell.Quote(tag), shell.Quote(t)))
 		}
 	}
 
@@ -282,7 +284,7 @@ func (m *ImageManager) ManifestBuild(host string, config *ManifestBuildConfig) e
 }
 
 func (m *ImageManager) List(host string, filters map[string]string) ([]Image, error) {
-	args := []string{"images", "--format", "'{{.ID}}|{{.Repository}}|{{.Tag}}|{{.Size}}|{{.CreatedAt}}'"}
+	args := []string{"images", "--format", "{{.ID}}|{{.Repository}}|{{.Tag}}|{{.Size}}|{{.CreatedAt}}"}
 
 	for key, value := range filters {
 		args = append(args, "-f", fmt.Sprintf("%s=%s", key, value))
@@ -365,7 +367,7 @@ func (m *ImageManager) Prune(host string, all bool) error {
 }
 
 func (m *ImageManager) Exists(host, image string) (bool, error) {
-	result, err := m.client.Execute(host, "image", "inspect", image, "--format", "'{{.Id}}'")
+	result, err := m.client.Execute(host, "image", "inspect", image, "--format", "{{.Id}}")
 	if err != nil {
 		return false, err
 	}
@@ -374,7 +376,7 @@ func (m *ImageManager) Exists(host, image string) (bool, error) {
 }
 
 func (m *ImageManager) GetDigest(host, image string) (string, error) {
-	result, err := m.client.Execute(host, "image", "inspect", image, "--format", "'{{index .RepoDigests 0}}'")
+	result, err := m.client.Execute(host, "image", "inspect", image, "--format", "{{index .RepoDigests 0}}")
 	if err != nil {
 		return "", err
 	}
