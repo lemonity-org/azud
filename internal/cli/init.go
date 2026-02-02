@@ -339,9 +339,11 @@ func getPreConnectHook() string {
 # Environment:
 #   AZUD_SERVICE      Service name
 #   AZUD_IMAGE        Full image reference
+#   AZUD_VERSION      Image version/tag
 #   AZUD_HOSTS        Target hosts (comma-separated)
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
+#   AZUD_ROLE         Target role (if deploying by role)
 #   AZUD_HOOK         This hook's name
 #   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
@@ -357,6 +359,7 @@ func getPreBuildHook() string {
 # Environment:
 #   AZUD_SERVICE      Service name
 #   AZUD_IMAGE        Full image reference (with tag)
+#   AZUD_VERSION      Image version/tag
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
 #   AZUD_HOOK         This hook's name
@@ -373,6 +376,7 @@ func getPostBuildHook() string {
 # Environment:
 #   AZUD_SERVICE      Service name
 #   AZUD_IMAGE        Full image reference (with tag)
+#   AZUD_VERSION      Image version/tag
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
 #   AZUD_HOOK         This hook's name
@@ -394,6 +398,7 @@ func getPreDeployHook() string {
 #   AZUD_HOSTS        Target hosts (comma-separated)
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
+#   AZUD_ROLE         Target role (if deploying by role)
 #   AZUD_HOOK         This hook's name
 #   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
@@ -403,15 +408,19 @@ echo "Running pre-deploy hook..."
 
 func getPreAppBootHook() string {
 	return `#!/bin/sh
-# Pre-app-boot hook — runs before starting a new container on each host
-# Exit with non-zero to abort deployment on this host
+# Pre-app-boot hook — runs locally before starting a new container on each host.
+# This hook executes on the machine running azud, NOT on the remote host.
+# AZUD_HOSTS contains the target host being deployed to.
+# Exit with non-zero to abort deployment on this host.
 #
 # Environment:
 #   AZUD_SERVICE      Service name
 #   AZUD_IMAGE        Full image reference
-#   AZUD_HOSTS        Current host being deployed to
+#   AZUD_VERSION      Image version/tag
+#   AZUD_HOSTS        Target host being deployed to
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
+#   AZUD_ROLE         Target role (if deploying by role)
 #   AZUD_HOOK         This hook's name
 #   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
@@ -421,14 +430,18 @@ echo "Running pre-app-boot hook..."
 
 func getPostAppBootHook() string {
 	return `#!/bin/sh
-# Post-app-boot hook — runs after container passes health check on each host
+# Post-app-boot hook — runs locally after container passes health check on each host.
+# This hook executes on the machine running azud, NOT on the remote host.
+# AZUD_HOSTS contains the target host that was deployed to.
 #
 # Environment:
 #   AZUD_SERVICE      Service name
 #   AZUD_IMAGE        Full image reference
-#   AZUD_HOSTS        Current host being deployed to
+#   AZUD_VERSION      Image version/tag
+#   AZUD_HOSTS        Target host that was deployed to
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
+#   AZUD_ROLE         Target role (if deploying by role)
 #   AZUD_HOOK         This hook's name
 #   AZUD_RECORDED_AT  Timestamp (RFC3339)
 
@@ -447,6 +460,7 @@ func getPostDeployHook() string {
 #   AZUD_HOSTS        Target hosts (comma-separated)
 #   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
+#   AZUD_ROLE         Target role (if deploying by role)
 #   AZUD_HOOK         This hook's name
 #   AZUD_RECORDED_AT  Timestamp (RFC3339)
 #   AZUD_RUNTIME      Deployment duration in seconds
@@ -495,9 +509,12 @@ func getPostRollbackHook() string {
 #
 # Environment:
 #   AZUD_SERVICE      Service name
+#   AZUD_IMAGE        Full image reference
 #   AZUD_VERSION      Version rolled back to
 #   AZUD_HOSTS        Hosts that were rolled back (comma-separated)
+#   AZUD_DESTINATION  Deployment destination
 #   AZUD_PERFORMER    User running the command
+#   AZUD_ROLE         Target role (if deploying by role)
 #   AZUD_HOOK         This hook's name
 #   AZUD_RECORDED_AT  Timestamp (RFC3339)
 

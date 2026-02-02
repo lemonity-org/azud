@@ -181,7 +181,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		SkipPull: false,
 	}
 
-	if err := deployer.Deploy(opts); err != nil {
+	if err := deployer.Deploy(cmd.Context(), opts); err != nil {
 		return fmt.Errorf("deploy failed: %w", err)
 	}
 

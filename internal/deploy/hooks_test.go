@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,11 +64,32 @@ func TestHookContext_Environ(t *testing.T) {
 	}
 }
 
+func TestHookContext_Environ_Role(t *testing.T) {
+	ctx := &HookContext{
+		Service: "my-app",
+		Role:    "web",
+	}
+
+	env := ctx.Environ()
+
+	lookup := make(map[string]string)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			lookup[parts[0]] = parts[1]
+		}
+	}
+
+	if got := lookup["AZUD_ROLE"]; got != "web" {
+		t.Errorf("AZUD_ROLE = %q, want %q", got, "web")
+	}
+}
+
 func TestHookRunner_Run_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	runner := NewHookRunner(dir, 5*time.Second, nil)
 
-	err := runner.Run("nonexistent", nil)
+	err := runner.Run(context.Background(), "nonexistent", nil)
 	if err != nil {
 		t.Errorf("Run on non-existent hook should return nil, got: %v", err)
 	}
@@ -82,7 +104,7 @@ func TestHookRunner_Run_NotExecutable(t *testing.T) {
 
 	runner := NewHookRunner(dir, 5*time.Second, nil)
 
-	err := runner.Run("my-hook", nil)
+	err := runner.Run(context.Background(), "my-hook", nil)
 	if err != nil {
 		t.Errorf("Run on non-executable hook should return nil (skip), got: %v", err)
 	}
@@ -97,7 +119,7 @@ func TestHookRunner_Run_Success(t *testing.T) {
 
 	runner := NewHookRunner(dir, 5*time.Second, nil)
 
-	err := runner.Run("ok-hook", nil)
+	err := runner.Run(context.Background(), "ok-hook", nil)
 	if err != nil {
 		t.Errorf("Run on exit-0 hook should succeed, got: %v", err)
 	}
@@ -112,7 +134,7 @@ func TestHookRunner_Run_Failure(t *testing.T) {
 
 	runner := NewHookRunner(dir, 5*time.Second, nil)
 
-	err := runner.Run("fail-hook", nil)
+	err := runner.Run(context.Background(), "fail-hook", nil)
 	if err == nil {
 		t.Fatal("Run on exit-1 hook should return error")
 	}
@@ -130,12 +152,38 @@ func TestHookRunner_Run_Timeout(t *testing.T) {
 
 	runner := NewHookRunner(dir, 100*time.Millisecond, nil)
 
-	err := runner.Run("slow-hook", nil)
+	err := runner.Run(context.Background(), "slow-hook", nil)
 	if err == nil {
 		t.Fatal("Run on slow hook with short timeout should return error")
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("error should mention timeout, got: %v", err)
+	}
+}
+
+func TestHookRunner_Run_ParentContextCancellation(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "slow-hook")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nsleep 30\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Long timeout so only parent cancellation should stop it
+	runner := NewHookRunner(dir, 5*time.Minute, nil)
+
+	parent, cancel := context.WithCancel(context.Background())
+	// Cancel the parent context after a short delay
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	err := runner.Run(parent, "slow-hook", nil)
+	if err == nil {
+		t.Fatal("Run should return error when parent context is cancelled")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("error should mention cancellation, got: %v", err)
 	}
 }
 
@@ -152,7 +200,7 @@ func TestHookRunner_Run_EnvVars(t *testing.T) {
 		Service: "test-svc",
 	}
 
-	out, err := runner.RunWithOutput("env-hook", ctx)
+	out, err := runner.RunWithOutput(context.Background(), "env-hook", ctx)
 	if err != nil {
 		t.Fatalf("RunWithOutput should succeed, got: %v", err)
 	}
@@ -194,5 +242,239 @@ func TestHookRunner_Exists(t *testing.T) {
 	}
 	if runner.Exists("no-such-hook") {
 		t.Error("Exists should return false for non-existing hook")
+	}
+}
+
+func TestHookContext_Environ_FiltersStaleVars(t *testing.T) {
+	// Set a stale AZUD_ variable in the process environment
+	t.Setenv("AZUD_SERVICE", "stale-service")
+	t.Setenv("AZUD_STALE", "should-be-removed")
+
+	ctx := &HookContext{
+		Service: "fresh-service",
+	}
+
+	env := ctx.Environ()
+
+	lookup := make(map[string]string)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			lookup[parts[0]] = parts[1]
+		}
+	}
+
+	// Fresh value must win over stale
+	if got := lookup["AZUD_SERVICE"]; got != "fresh-service" {
+		t.Errorf("AZUD_SERVICE = %q, want %q", got, "fresh-service")
+	}
+
+	// Stale AZUD_ vars not in the struct must be filtered out
+	if _, ok := lookup["AZUD_STALE"]; ok {
+		t.Error("expected AZUD_STALE to be filtered out, but found in env")
+	}
+}
+
+func TestHookRunner_Run_Directory(t *testing.T) {
+	dir := t.TempDir()
+	// Create a directory with a hook name
+	hookDir := filepath.Join(dir, "my-hook")
+	if err := os.Mkdir(hookDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	err := runner.Run(context.Background(), "my-hook", nil)
+	if err != nil {
+		t.Errorf("Run on directory hook should return nil (skip), got: %v", err)
+	}
+}
+
+func TestHookRunner_List_ExcludesHidden(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a normal hook and a hidden file
+	for _, name := range []string{"hook-a", ".gitkeep"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+	hooks, err := runner.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hooks) != 1 {
+		t.Errorf("expected 1 hook (hidden excluded), got %d: %v", len(hooks), hooks)
+	}
+	if len(hooks) > 0 && hooks[0] != "hook-a" {
+		t.Errorf("expected hook-a, got %s", hooks[0])
+	}
+}
+
+func TestHookRunner_Exists_NotExecutable(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "no-exec-hook")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	if runner.Exists("no-exec-hook") {
+		t.Error("Exists should return false for non-executable hook")
+	}
+}
+
+func TestHookRunner_Exists_Directory(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "dir-hook")
+	if err := os.Mkdir(hookDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	if runner.Exists("dir-hook") {
+		t.Error("Exists should return false for directory")
+	}
+}
+
+func TestHookRunner_Run_PathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	err := runner.Run(context.Background(), "../../../etc/passwd", nil)
+	if err == nil {
+		t.Fatal("Run with path traversal should return error")
+	}
+	if !strings.Contains(err.Error(), "escapes hooks directory") {
+		t.Errorf("error should mention escaping hooks directory, got: %v", err)
+	}
+}
+
+func TestHookRunner_Run_Symlink(t *testing.T) {
+	dir := t.TempDir()
+	// Create a real executable file
+	realPath := filepath.Join(dir, "real-hook")
+	if err := os.WriteFile(realPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a symlink to it
+	linkPath := filepath.Join(dir, "link-hook")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	// Real hook should work
+	if err := runner.Run(context.Background(), "real-hook", nil); err != nil {
+		t.Errorf("Run on real hook should succeed, got: %v", err)
+	}
+
+	// Symlink should be skipped
+	if err := runner.Run(context.Background(), "link-hook", nil); err != nil {
+		t.Errorf("Run on symlink hook should return nil (skip), got: %v", err)
+	}
+}
+
+func TestHookRunner_Exists_Symlink(t *testing.T) {
+	dir := t.TempDir()
+	// Create a real executable file
+	realPath := filepath.Join(dir, "real-hook")
+	if err := os.WriteFile(realPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a symlink to it
+	linkPath := filepath.Join(dir, "link-hook")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	if !runner.Exists("real-hook") {
+		t.Error("Exists should return true for real executable hook")
+	}
+	if runner.Exists("link-hook") {
+		t.Error("Exists should return false for symlink hook")
+	}
+}
+
+func TestHookRunner_Run_NilContext_FiltersAzudVars(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "check-env")
+	// Script that prints AZUD_STALE if set, or "clean" if not
+	script := "#!/bin/sh\nif [ -n \"$AZUD_STALE\" ]; then echo \"leaked\"; else echo \"clean\"; fi\n"
+	if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set a stale AZUD_ variable
+	t.Setenv("AZUD_STALE", "should-not-appear")
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	out, err := runner.RunWithOutput(context.Background(), "check-env", nil)
+	if err != nil {
+		t.Fatalf("RunWithOutput should succeed, got: %v", err)
+	}
+	if strings.Contains(out, "leaked") {
+		t.Error("expected AZUD_STALE to be filtered out when context is nil, but it leaked through")
+	}
+	if !strings.Contains(out, "clean") {
+		t.Errorf("expected 'clean' in output, got: %q", out)
+	}
+}
+
+func TestHookRunner_List_ExcludesSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	// Create a regular executable hook
+	realPath := filepath.Join(dir, "real-hook")
+	if err := os.WriteFile(realPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a symlink hook
+	linkPath := filepath.Join(dir, "link-hook")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+	hooks, err := runner.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hooks) != 1 {
+		t.Errorf("expected 1 hook (symlink excluded), got %d: %v", len(hooks), hooks)
+	}
+	if len(hooks) > 0 && hooks[0] != "real-hook" {
+		t.Errorf("expected real-hook, got %s", hooks[0])
+	}
+}
+
+func TestHookRunner_RunWithOutput_Role(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "role-hook")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho \"role=$AZUD_ROLE\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewHookRunner(dir, 5*time.Second, nil)
+
+	ctx := &HookContext{
+		Service: "my-app",
+		Role:    "web,workers",
+	}
+
+	out, err := runner.RunWithOutput(context.Background(), "role-hook", ctx)
+	if err != nil {
+		t.Fatalf("RunWithOutput should succeed, got: %v", err)
+	}
+	if !strings.Contains(out, "role=web,workers") {
+		t.Errorf("output should contain role, got: %q", out)
 	}
 }

@@ -141,7 +141,7 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 	hooks := newHookRunner()
 	hookCtx := newHookContext()
 	hookCtx.Hosts = strings.Join(hosts, ",")
-	if err := hooks.Run("pre-proxy-reboot", hookCtx); err != nil {
+	if err := hooks.Run(cmd.Context(), "pre-proxy-reboot", hookCtx); err != nil {
 		return fmt.Errorf("pre-proxy-reboot hook failed: %w", err)
 	}
 
@@ -182,16 +182,29 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 	}
 
 	// Boot on all hosts
+	var bootErrors []string
+	var succeededHosts []string
 	for _, host := range hosts {
 		if err := manager.Boot(host, proxyConfig); err != nil {
 			log.HostError(host, "failed to boot proxy: %v", err)
+			bootErrors = append(bootErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
+		succeededHosts = append(succeededHosts, host)
 	}
 
-	// Run post-proxy-reboot hook
-	if err := hooks.Run("post-proxy-reboot", hookCtx); err != nil {
+	if len(bootErrors) == len(hosts) {
+		return fmt.Errorf("proxy boot failed on all hosts: %s", strings.Join(bootErrors, "; "))
+	}
+
+	// Run post-proxy-reboot hook (only with succeeded hosts)
+	hookCtx.Hosts = strings.Join(succeededHosts, ",")
+	if err := hooks.Run(cmd.Context(), "post-proxy-reboot", hookCtx); err != nil {
 		log.Warn("post-proxy-reboot hook failed: %v", err)
+	}
+
+	if len(bootErrors) > 0 {
+		return fmt.Errorf("proxy boot failed on %d host(s): %s", len(bootErrors), strings.Join(bootErrors, "; "))
 	}
 
 	log.Success("Proxy boot complete")
@@ -236,7 +249,7 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 	hooks := newHookRunner()
 	hookCtx := newHookContext()
 	hookCtx.Hosts = strings.Join(hosts, ",")
-	if err := hooks.Run("pre-proxy-reboot", hookCtx); err != nil {
+	if err := hooks.Run(cmd.Context(), "pre-proxy-reboot", hookCtx); err != nil {
 		return fmt.Errorf("pre-proxy-reboot hook failed: %w", err)
 	}
 
@@ -245,16 +258,29 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 
 	manager := proxy.NewManager(sshClient, log)
 
+	var rebootErrors []string
+	var succeededHosts []string
 	for _, host := range hosts {
 		if err := manager.Reboot(host); err != nil {
 			log.HostError(host, "failed to reboot proxy: %v", err)
+			rebootErrors = append(rebootErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
+		succeededHosts = append(succeededHosts, host)
 	}
 
-	// Run post-proxy-reboot hook
-	if err := hooks.Run("post-proxy-reboot", hookCtx); err != nil {
+	if len(rebootErrors) == len(hosts) {
+		return fmt.Errorf("proxy reboot failed on all hosts: %s", strings.Join(rebootErrors, "; "))
+	}
+
+	// Run post-proxy-reboot hook (only with succeeded hosts)
+	hookCtx.Hosts = strings.Join(succeededHosts, ",")
+	if err := hooks.Run(cmd.Context(), "post-proxy-reboot", hookCtx); err != nil {
 		log.Warn("post-proxy-reboot hook failed: %v", err)
+	}
+
+	if len(rebootErrors) > 0 {
+		return fmt.Errorf("proxy reboot failed on %d host(s): %s", len(rebootErrors), strings.Join(rebootErrors, "; "))
 	}
 
 	log.Success("Proxy rebooted")

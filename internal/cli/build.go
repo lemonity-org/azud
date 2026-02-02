@@ -66,7 +66,8 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	hooks := newHookRunner()
 	hookCtx := newHookContext()
 	hookCtx.Image = imageTag
-	if err := hooks.Run("pre-build", hookCtx); err != nil {
+	hookCtx.Version = generateVersion()
+	if err := hooks.Run(cmd.Context(), "pre-build", hookCtx); err != nil {
 		return fmt.Errorf("pre-build hook failed: %w", err)
 	}
 
@@ -75,7 +76,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	// Check if we should use remote builder
 	if cfg.Builder.Remote.Host != "" {
 		version := generateVersion()
-		return buildRemote(imageTag, latestTag, version, multiarch)
+		if err := buildRemote(imageTag, latestTag, version, multiarch); err != nil {
+			return err
+		}
+		if err := hooks.Run(cmd.Context(), "post-build", hookCtx); err != nil {
+			log.Warn("post-build hook failed: %v", err)
+		}
+		return nil
 	}
 
 	// Build locally
@@ -84,7 +91,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run post-build hook
-	if err := hooks.Run("post-build", hookCtx); err != nil {
+	if err := hooks.Run(cmd.Context(), "post-build", hookCtx); err != nil {
 		log.Warn("post-build hook failed: %v", err)
 	}
 

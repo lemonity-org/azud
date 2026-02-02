@@ -96,7 +96,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run pre-connect hook
-	if err := newHookRunner().Run("pre-connect", newHookContext()); err != nil {
+	hookCtx := newHookContext()
+	hookCtx.Version = deployVersion
+	hookCtx.Role = deployRole
+	if err := newHookRunner().Run(cmd.Context(), "pre-connect", hookCtx); err != nil {
 		return fmt.Errorf("pre-connect hook failed: %w", err)
 	}
 
@@ -122,7 +125,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run deployment
-	return deployer.Deploy(opts)
+	return deployer.Deploy(cmd.Context(), opts)
 }
 
 func runRedeploy(cmd *cobra.Command, args []string) error {
@@ -132,7 +135,9 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 	log.Header("Azud Redeploy")
 
 	// Run pre-connect hook
-	if err := newHookRunner().Run("pre-connect", newHookContext()); err != nil {
+	hookCtx := newHookContext()
+	hookCtx.Role = deployRole
+	if err := newHookRunner().Run(cmd.Context(), "pre-connect", hookCtx); err != nil {
 		return fmt.Errorf("pre-connect hook failed: %w", err)
 	}
 
@@ -154,7 +159,7 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 		opts.Roles = []string{deployRole}
 	}
 
-	return deployer.Redeploy(opts)
+	return deployer.Redeploy(cmd.Context(), opts)
 }
 
 func runRollback(cmd *cobra.Command, args []string) error {
@@ -167,7 +172,10 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	// Run pre-connect hook
 	hookCtx := newHookContext()
 	hookCtx.Version = version
-	if err := newHookRunner().Run("pre-connect", hookCtx); err != nil {
+	if deployHost != "" {
+		hookCtx.Hosts = deployHost
+	}
+	if err := newHookRunner().Run(cmd.Context(), "pre-connect", hookCtx); err != nil {
 		return fmt.Errorf("pre-connect hook failed: %w", err)
 	}
 
@@ -176,5 +184,10 @@ func runRollback(cmd *cobra.Command, args []string) error {
 
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
-	return deployer.Rollback(version)
+	var hosts []string
+	if deployHost != "" {
+		hosts = []string{deployHost}
+	}
+
+	return deployer.Rollback(cmd.Context(), version, GetDestination(), hosts)
 }

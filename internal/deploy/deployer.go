@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -57,6 +58,7 @@ func (d *Deployer) hookContext(opts *DeployOptions, image, version string) *Hook
 		Hosts:       strings.Join(d.getTargetHosts(opts), ","),
 		Destination: opts.Destination,
 		Performer:   CurrentUser(),
+		Role:        strings.Join(opts.Roles, ","),
 		RecordedAt:  time.Now().Format(time.RFC3339),
 	}
 }
@@ -83,7 +85,7 @@ type DeployOptions struct {
 
 // Deploy pulls the image, starts new containers, health-checks them,
 // registers them with the proxy, and drains old containers.
-func (d *Deployer) Deploy(opts *DeployOptions) error {
+func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	deployStart := time.Now()
 	timer := d.log.NewTimer("Deployment")
 	defer timer.Stop()
@@ -134,7 +136,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 
 	// Run pre-deploy hook
 	hookCtx := d.hookContext(opts, image, version)
-	if err := d.hooks.Run("pre-deploy", hookCtx); err != nil {
+	if err := d.hooks.Run(ctx, "pre-deploy", hookCtx); err != nil {
 		record.Fail(err)
 		_ = d.history.Record(record)
 		return fmt.Errorf("pre-deploy hook failed: %w", err)
@@ -174,7 +176,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 	var deployErrors []string
 	var succeededHosts []string
 	for _, host := range hosts {
-		if err := d.deployToHost(host, image, opts); err != nil {
+		if err := d.deployToHost(ctx, host, image, version, opts); err != nil {
 			d.log.HostError(host, "deployment failed: %v", err)
 			deployErrors = append(deployErrors, fmt.Sprintf("%s: %v", host, err))
 
@@ -182,7 +184,7 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 			// hosts immediately to keep the fleet on a single version.
 			if d.cfg.Deploy.RollbackOnFailure && len(succeededHosts) > 0 {
 				d.log.Warn("Rolling back %d already-deployed host(s) due to failure on %s...", len(succeededHosts), host)
-				d.rollbackHosts(succeededHosts, record.PreviousVersion)
+				d.rollbackHosts(ctx, succeededHosts, record.PreviousVersion, opts.Roles)
 				succeededHosts = nil
 			}
 			continue
@@ -200,7 +202,8 @@ func (d *Deployer) Deploy(opts *DeployOptions) error {
 
 	// Run post-deploy hook
 	hookCtx.Runtime = fmt.Sprintf("%.0f", time.Since(deployStart).Seconds())
-	if err := d.hooks.Run("post-deploy", hookCtx); err != nil {
+	hookCtx.RecordedAt = time.Now().Format(time.RFC3339)
+	if err := d.hooks.Run(ctx, "post-deploy", hookCtx); err != nil {
 		d.log.Warn("post-deploy hook failed: %v", err)
 	}
 
@@ -259,7 +262,7 @@ func (d *Deployer) loginToRegistry(hosts []string) error {
 	return nil
 }
 
-func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
+func (d *Deployer) deployToHost(ctx context.Context, host, image, version string, opts *DeployOptions) error {
 	d.log.Host(host, "Starting deployment...")
 
 	newContainerName := d.generateContainerName("new")
@@ -268,9 +271,9 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	containerConfig := d.buildContainerConfig(image, newContainerName)
 
 	// Run pre-app-boot hook
-	bootCtx := d.hookContext(opts, image, "")
+	bootCtx := d.hookContext(opts, image, version)
 	bootCtx.Hosts = host
-	if err := d.hooks.Run("pre-app-boot", bootCtx); err != nil {
+	if err := d.hooks.Run(ctx, "pre-app-boot", bootCtx); err != nil {
 		return fmt.Errorf("pre-app-boot hook failed: %w", err)
 	}
 
@@ -298,7 +301,7 @@ func (d *Deployer) deployToHost(host, image string, opts *DeployOptions) error {
 	}
 
 	// Run post-app-boot hook
-	if err := d.hooks.Run("post-app-boot", bootCtx); err != nil {
+	if err := d.hooks.Run(ctx, "post-app-boot", bootCtx); err != nil {
 		d.log.Warn("post-app-boot hook failed: %v", err)
 	}
 
@@ -488,19 +491,21 @@ func (d *Deployer) generateContainerName(suffix string) string {
 }
 
 // Rollback re-deploys a previous version.
-func (d *Deployer) Rollback(version string) error {
+func (d *Deployer) Rollback(ctx context.Context, version, destination string, hosts []string) error {
 	d.log.Header("Rolling back to %s", version)
 
 	opts := &DeployOptions{
-		Version: version,
+		Version:     version,
+		Destination: destination,
+		Hosts:       hosts,
 	}
 
-	return d.Deploy(opts)
+	return d.Deploy(ctx, opts)
 }
 
-func (d *Deployer) Redeploy(opts *DeployOptions) error {
+func (d *Deployer) Redeploy(ctx context.Context, opts *DeployOptions) error {
 	d.log.Header("Redeploying %s", d.cfg.Service)
-	return d.Deploy(opts)
+	return d.Deploy(ctx, opts)
 }
 
 func (d *Deployer) Stop(hosts []string) error {
@@ -526,11 +531,17 @@ func (d *Deployer) Restart(hosts []string) error {
 // rollbackHosts reverts a deployment on hosts that succeeded, restoring the
 // previous version. This is a best-effort operation: errors are logged but
 // do not prevent rollback attempts on other hosts.
-func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
+func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVersion string, roles []string) {
 	if previousVersion == "" {
 		d.log.Warn("No previous version recorded, cannot auto-rollback")
 		return
 	}
+
+	prevImage := d.cfg.Image
+	if idx := strings.LastIndex(prevImage, ":"); idx > 0 && !strings.Contains(prevImage[idx:], "/") {
+		prevImage = prevImage[:idx]
+	}
+	prevImage = fmt.Sprintf("%s:%s", prevImage, previousVersion)
 
 	for _, host := range hosts {
 		d.log.Host(host, "Rolling back to %s...", previousVersion)
@@ -562,18 +573,13 @@ func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
 			Version:     previousVersion,
 			SkipPull:    true, // Image should still be cached from last deployment
 			Hosts:       []string{host},
+			Roles:       roles,
 			Destination: "rollback",
 		}
 
 		// Use deployToHost directly to avoid recursion into the full Deploy
 		// method (which would run hooks, record history, etc.)
-		prevImage := d.cfg.Image
-		if idx := strings.LastIndex(prevImage, ":"); idx > 0 && !strings.Contains(prevImage[idx:], "/") {
-			prevImage = prevImage[:idx]
-		}
-		prevImage = fmt.Sprintf("%s:%s", prevImage, previousVersion)
-
-		if err := d.deployToHost(host, prevImage, rollbackOpts); err != nil {
+		if err := d.deployToHost(ctx, host, prevImage, previousVersion, rollbackOpts); err != nil {
 			d.log.HostError(host, "rollback failed: %v", err)
 			continue
 		}
@@ -583,12 +589,15 @@ func (d *Deployer) rollbackHosts(hosts []string, previousVersion string) {
 	// Run post-rollback hook
 	rollbackCtx := &HookContext{
 		Service:     d.cfg.Service,
+		Image:       prevImage,
 		Version:     previousVersion,
 		Hosts:       strings.Join(hosts, ","),
+		Destination: "rollback",
 		Performer:   CurrentUser(),
+		Role:        strings.Join(roles, ","),
 		RecordedAt:  time.Now().Format(time.RFC3339),
 	}
-	if err := d.hooks.Run("post-rollback", rollbackCtx); err != nil {
+	if err := d.hooks.Run(ctx, "post-rollback", rollbackCtx); err != nil {
 		d.log.Warn("post-rollback hook failed: %v", err)
 	}
 }

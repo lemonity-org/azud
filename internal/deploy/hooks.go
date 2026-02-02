@@ -2,10 +2,13 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/adriancarayol/azud/internal/output"
@@ -27,7 +30,12 @@ type HookContext struct {
 
 // Environ returns os.Environ() with AZUD_* entries appended. Empty fields are omitted.
 func (ctx *HookContext) Environ() []string {
-	env := os.Environ()
+	var env []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "AZUD_") {
+			env = append(env, e)
+		}
+	}
 
 	add := func(key, val string) {
 		if val != "" {
@@ -85,18 +93,61 @@ func NewHookRunner(hooksPath string, timeout time.Duration, log *output.Logger) 
 	}
 }
 
+// insideHooksDir checks whether the given hook name resolves to a path inside
+// the hooks directory. Returns false for traversal attempts like "../foo".
+func (h *HookRunner) insideHooksDir(name string) bool {
+	hookPath := filepath.Join(h.hooksPath, name)
+	absHooksPath, err := filepath.Abs(h.hooksPath)
+	if err != nil {
+		return false
+	}
+	absHookPath, err := filepath.Abs(hookPath)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(absHookPath, absHooksPath+string(filepath.Separator))
+}
+
 // resolveHook validates that a hook exists and is executable. It returns the
 // resolved path or ("", nil) when the hook should be silently skipped.
+//
+// The file is opened with O_NOFOLLOW and checked via Fstat on the open fd,
+// which eliminates the TOCTOU race between stat and exec. If the file is
+// replaced with a symlink between the path check and open, O_NOFOLLOW causes
+// the open to fail with ELOOP.
 func (h *HookRunner) resolveHook(name string) (string, error) {
 	hookPath := filepath.Join(h.hooksPath, name)
 
-	info, err := os.Stat(hookPath)
+	if !h.insideHooksDir(name) {
+		return "", fmt.Errorf("hook name %q escapes hooks directory", name)
+	}
+
+	// O_NOFOLLOW prevents following symlinks on the final path component.
+	// If the file was swapped for a symlink after insideHooksDir, this fails
+	// with ELOOP instead of silently following the link.
+	f, err := os.OpenFile(hookPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if os.IsNotExist(err) {
 		h.log.Debug("Hook %s not found, skipping", name)
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to check hook: %w", err)
+		if errors.Is(err, syscall.ELOOP) {
+			h.log.Warn("Hook %s is a symlink, skipping", name)
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to open hook: %w", err)
+	}
+	defer f.Close()
+
+	// Fstat on the open fd — immune to path-level races.
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("failed to stat hook: %w", err)
+	}
+
+	if info.IsDir() {
+		h.log.Debug("Hook %s is a directory, skipping", name)
+		return "", nil
 	}
 
 	if info.Mode()&0111 == 0 {
@@ -116,34 +167,47 @@ type hookCmd struct {
 }
 
 // prepareCmd builds an exec.Cmd for the given hook path and context, applying
-// timeout and AZUD_* environment variables.
-func (h *HookRunner) prepareCmd(hookPath, name string, ctx *HookContext) *hookCmd {
+// timeout and AZUD_* environment variables. The parent context allows callers
+// to cancel hook execution (e.g. on SIGINT).
+func (h *HookRunner) prepareCmd(parent context.Context, hookPath, name string, ctx *HookContext) *hookCmd {
 	if ctx != nil {
 		ctx.HookName = name
 	}
 
-	runCtx, cancel := context.WithTimeout(context.Background(), h.timeout)
+	runCtx, cancel := context.WithTimeout(parent, h.timeout)
 	cmd := exec.CommandContext(runCtx, hookPath)
 
 	if ctx != nil {
 		cmd.Env = ctx.Environ()
 	} else {
-		cmd.Env = os.Environ()
+		var env []string
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, "AZUD_") {
+				env = append(env, e)
+			}
+		}
+		cmd.Env = env
 	}
 
 	return &hookCmd{Cmd: cmd, ctx: runCtx, cancel: cancel}
 }
 
-// wrapError returns a timeout-aware error for a hook execution failure.
+// wrapError returns a context-aware error for a hook execution failure,
+// distinguishing between timeout, cancellation, and general failures.
 func (h *HookRunner) wrapError(name string, hc *hookCmd, err error) error {
-	if hc.ctx.Err() == context.DeadlineExceeded {
+	switch hc.ctx.Err() {
+	case context.DeadlineExceeded:
 		return fmt.Errorf("hook %s timed out after %s", name, h.timeout)
+	case context.Canceled:
+		return fmt.Errorf("hook %s cancelled", name)
+	default:
+		return fmt.Errorf("hook %s failed: %w", name, err)
 	}
-	return fmt.Errorf("hook %s failed: %w", name, err)
 }
 
-// Run executes a hook by name with the given context.
-func (h *HookRunner) Run(name string, ctx *HookContext) error {
+// Run executes a hook by name with the given context. The parent context
+// allows callers to cancel hook execution externally.
+func (h *HookRunner) Run(parent context.Context, name string, ctx *HookContext) error {
 	hookPath, err := h.resolveHook(name)
 	if hookPath == "" || err != nil {
 		return err
@@ -151,7 +215,7 @@ func (h *HookRunner) Run(name string, ctx *HookContext) error {
 
 	h.log.Info("Running hook: %s", name)
 
-	hc := h.prepareCmd(hookPath, name, ctx)
+	hc := h.prepareCmd(parent, hookPath, name, ctx)
 	defer hc.cancel()
 
 	hc.Stdout = os.Stdout
@@ -165,14 +229,17 @@ func (h *HookRunner) Run(name string, ctx *HookContext) error {
 	return nil
 }
 
-// RunWithOutput executes a hook and returns its output.
-func (h *HookRunner) RunWithOutput(name string, ctx *HookContext) (string, error) {
+// RunWithOutput executes a hook and returns its output. The parent context
+// allows callers to cancel hook execution externally.
+func (h *HookRunner) RunWithOutput(parent context.Context, name string, ctx *HookContext) (string, error) {
 	hookPath, err := h.resolveHook(name)
 	if hookPath == "" || err != nil {
 		return "", err
 	}
 
-	hc := h.prepareCmd(hookPath, name, ctx)
+	h.log.Info("Running hook: %s", name)
+
+	hc := h.prepareCmd(parent, hookPath, name, ctx)
 	defer hc.cancel()
 
 	out, err := hc.CombinedOutput()
@@ -180,14 +247,27 @@ func (h *HookRunner) RunWithOutput(name string, ctx *HookContext) (string, error
 		return string(out), h.wrapError(name, hc, err)
 	}
 
+	h.log.Success("Hook %s completed", name)
 	return string(out), nil
 }
 
-// Exists checks if a hook exists
+// Exists checks if a hook exists, is not a directory, is not a symlink, and
+// is executable. Uses O_NOFOLLOW + Fstat to avoid TOCTOU races.
 func (h *HookRunner) Exists(name string) bool {
+	if !h.insideHooksDir(name) {
+		return false
+	}
 	hookPath := filepath.Join(h.hooksPath, name)
-	_, err := os.Stat(hookPath)
-	return err == nil
+	f, err := os.OpenFile(hookPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() && info.Mode()&0111 != 0
 }
 
 // List returns all available hooks
@@ -202,7 +282,7 @@ func (h *HookRunner) List() ([]string, error) {
 
 	var hooks []string
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") && entry.Type()&os.ModeSymlink == 0 {
 			hooks = append(hooks, entry.Name())
 		}
 	}

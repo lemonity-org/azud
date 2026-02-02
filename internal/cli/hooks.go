@@ -70,11 +70,6 @@ func runHooksList(cmd *cobra.Command, args []string) error {
 		standardSet[name] = true
 	}
 
-	existingSet := make(map[string]bool)
-	for _, name := range existing {
-		existingSet[name] = true
-	}
-
 	var rows [][]string
 
 	// Standard hooks first
@@ -97,12 +92,18 @@ func runHooksList(cmd *cobra.Command, args []string) error {
 }
 
 func hookStatus(hooksPath, name string) string {
-	info, err := os.Stat(filepath.Join(hooksPath, name))
+	info, err := os.Lstat(filepath.Join(hooksPath, name))
 	if os.IsNotExist(err) {
 		return "missing"
 	}
 	if err != nil {
 		return "error"
+	}
+	if info.IsDir() {
+		return "directory"
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "symlink"
 	}
 	if info.Mode()&0111 == 0 {
 		return "not executable"
@@ -118,13 +119,20 @@ func runHooksRun(cmd *cobra.Command, args []string) error {
 	runner := newHookRunner()
 
 	if !runner.Exists(name) {
+		// Only check hookStatus for simple names (no path traversal)
+		if !strings.Contains(name, "/") && !strings.Contains(name, "..") {
+			status := hookStatus(cfg.HooksPath, name)
+			if status == "not executable" {
+				return fmt.Errorf("hook %s is not executable, run: chmod +x %s", name, filepath.Join(cfg.HooksPath, name))
+			}
+		}
 		return fmt.Errorf("hook %s not found in %s", name, cfg.HooksPath)
 	}
 
 	ctx := newHookContext()
 	ctx.Version = "test"
 
-	return runner.Run(name, ctx)
+	return runner.Run(cmd.Context(), name, ctx)
 }
 
 // newHookRunner creates a HookRunner from the current config.
