@@ -255,9 +255,12 @@ func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 	stateDir := state.DirQuoted(m.user)
 	lockFile := state.LockFileQuoted(m.user, "podman-auth")
 
+	// shell.Validate() above ensures region/accountID are safe, but Quote()
+	// provides defense-in-depth in case validation logic is changed later.
+	ecrURL := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", accountID, region)
 	cmd := fmt.Sprintf(
-		"mkdir -p %s && flock -x -w 60 %s sh -c 'aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com'",
-		stateDir, lockFile, region, accountID, region,
+		"mkdir -p %s && flock -x -w 60 %s sh -c 'aws ecr get-login-password --region %s | podman login --username AWS --password-stdin %s'",
+		stateDir, lockFile, shell.Quote(region), shell.Quote(ecrURL),
 	)
 
 	result, err := m.client.ssh.Execute(host, cmd)

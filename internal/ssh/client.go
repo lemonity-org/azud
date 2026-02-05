@@ -102,8 +102,9 @@ func (c *Client) Connect(host string) (*Connection, error) {
 
 	// Connect through proxy if configured
 	var client *ssh.Client
+	var proxyClient *ssh.Client
 	if c.config.Proxy != nil && c.config.Proxy.Host != "" {
-		client, err = c.connectViaProxy(host, sshConfig)
+		client, proxyClient, err = c.connectViaProxy(host, sshConfig)
 	} else {
 		client, err = c.connectDirect(host, sshConfig)
 	}
@@ -116,6 +117,7 @@ func (c *Client) Connect(host string) (*Connection, error) {
 	conn := &Connection{
 		host:           host,
 		client:         client,
+		proxyClient:    proxyClient,
 		lastUsed:       time.Now(),
 		commandTimeout: c.config.CommandTimeout,
 	}
@@ -134,12 +136,14 @@ func (c *Client) connectDirect(host string, sshConfig *ssh.ClientConfig) (*ssh.C
 	return client, nil
 }
 
-// connectViaProxy establishes an SSH connection through a bastion host
-func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh.Client, error) {
+// connectViaProxy establishes an SSH connection through a bastion host.
+// Returns both the target client and the proxy client so the caller can
+// close the proxy connection when the target is no longer needed.
+func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh.Client, *ssh.Client, error) {
 	// Build proxy SSH config
 	proxyConfig, err := c.buildProxySSHConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build proxy SSH config: %w", err)
+		return nil, nil, fmt.Errorf("failed to build proxy SSH config: %w", err)
 	}
 
 	// Connect to proxy
@@ -151,7 +155,7 @@ func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh
 
 	proxyClient, err := ssh.Dial("tcp", proxyAddr, proxyConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to proxy %s: %w", proxyAddr, err)
+		return nil, nil, fmt.Errorf("failed to connect to proxy %s: %w", proxyAddr, err)
 	}
 
 	// Connect to target through proxy
@@ -159,17 +163,17 @@ func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh
 	conn, err := proxyClient.Dial("tcp", targetAddr)
 	if err != nil {
 		_ = proxyClient.Close()
-		return nil, fmt.Errorf("failed to connect to %s via proxy: %w", targetAddr, err)
+		return nil, nil, fmt.Errorf("failed to connect to %s via proxy: %w", targetAddr, err)
 	}
 
 	ncc, chans, reqs, err := ssh.NewClientConn(conn, targetAddr, sshConfig)
 	if err != nil {
 		_ = conn.Close()
 		_ = proxyClient.Close()
-		return nil, fmt.Errorf("failed to create SSH connection to %s: %w", targetAddr, err)
+		return nil, nil, fmt.Errorf("failed to create SSH connection to %s: %w", targetAddr, err)
 	}
 
-	return ssh.NewClient(ncc, chans, reqs), nil
+	return ssh.NewClient(ncc, chans, reqs), proxyClient, nil
 }
 
 // buildSSHConfig creates an ssh.ClientConfig from the client configuration

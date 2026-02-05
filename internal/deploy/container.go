@@ -21,8 +21,7 @@ const shellMetacharacters = "&|;><$`\"'\\"
 // single-quote escaping so they survive the remote SSH shell.
 func parseCommandArgs(cmd string) []string {
 	if strings.ContainsAny(cmd, shellMetacharacters) {
-		escaped := strings.ReplaceAll(cmd, "'", "'\\''")
-		return []string{"sh", "-c", "'" + escaped + "'"}
+		return []string{"sh", "-c", cmd}
 	}
 	return strings.Fields(cmd)
 }

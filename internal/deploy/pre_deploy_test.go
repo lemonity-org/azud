@@ -136,22 +136,22 @@ func TestParseCommandArgs(t *testing.T) {
 		{
 			name: "shell AND operator",
 			cmd:  "./migrate postgres up && ./migrate clickhouse up",
-			want: []string{"sh", "-c", "'./migrate postgres up && ./migrate clickhouse up'"},
+			want: []string{"sh", "-c", "./migrate postgres up && ./migrate clickhouse up"},
 		},
 		{
 			name: "shell OR operator",
 			cmd:  "./migrate up || exit 1",
-			want: []string{"sh", "-c", "'./migrate up || exit 1'"},
+			want: []string{"sh", "-c", "./migrate up || exit 1"},
 		},
 		{
 			name: "shell variable expansion",
 			cmd:  "echo $HOME",
-			want: []string{"sh", "-c", "'echo $HOME'"},
+			want: []string{"sh", "-c", "echo $HOME"},
 		},
 		{
-			name: "embedded single quotes are escaped",
+			name: "embedded single quotes",
 			cmd:  "./run 'my arg'",
-			want: []string{"sh", "-c", "'./run '\\''my arg'\\'''"},
+			want: []string{"sh", "-c", "./run 'my arg'"},
 		},
 	}
 

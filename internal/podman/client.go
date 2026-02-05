@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/adriancarayol/azud/internal/config"
 	"github.com/adriancarayol/azud/internal/shell"
 	"github.com/adriancarayol/azud/internal/ssh"
 )
@@ -28,6 +27,32 @@ func (c *Client) Execute(host string, args ...string) (*ssh.Result, error) {
 func (c *Client) ExecuteAll(hosts []string, args ...string) []*ssh.Result {
 	cmd := "podman " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.ExecuteParallel(hosts, cmd)
+}
+
+// deniedContainerOptions lists podman run flags that could escalate container
+// privileges or break isolation. These are blocked in ContainerConfig.Options
+// to prevent configuration-driven privilege escalation.
+var deniedContainerOptions = []string{
+	"--privileged",
+	"--cap-add",
+	"--pid=host",
+	"--userns=host",
+	"--ipc=host",
+	"--security-opt=seccomp=unconfined",
+	"--security-opt=apparmor=unconfined",
+}
+
+// ValidateOptions checks that none of the extra options contain denied flags.
+func ValidateOptions(options []string) error {
+	for _, opt := range options {
+		normalized := strings.ToLower(strings.TrimSpace(opt))
+		for _, denied := range deniedContainerOptions {
+			if normalized == denied || strings.HasPrefix(normalized, denied+"=") {
+				return fmt.Errorf("container option %q is not allowed (privilege escalation)", opt)
+			}
+		}
+	}
+	return nil
 }
 
 // ContainerConfig holds configuration for running a container.
@@ -84,12 +109,12 @@ func (c *ContainerConfig) BuildRunCommand() string {
 	}
 
 	if c.EnvFile == "" {
+		// Pass only key names — never secret values as command-line arguments,
+		// as they would be visible in /proc/[pid]/cmdline and ps output.
+		// Podman will attempt to inherit the value from the host environment.
+		// The preferred path is always --env-file (handled below).
 		for _, key := range c.SecretEnv {
-			if value, ok := config.GetSecret(key); ok && value != "" {
-				args = append(args, "-e", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
-			} else {
-				args = append(args, "-e", shell.Quote(key))
-			}
+			args = append(args, "-e", shell.Quote(key))
 		}
 	}
 

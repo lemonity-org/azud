@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 type Connection struct {
 	host           string
 	client         *ssh.Client
+	proxyClient    *ssh.Client // bastion/proxy connection, closed with client
 	lastUsed       time.Time
 	commandTimeout time.Duration
 	mu             sync.Mutex
@@ -360,10 +362,17 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	if secs < 1 {
 		secs = 1
 	}
-	// Use double quotes for paths to allow ${HOME} expansion while protecting
-	// against spaces. Note: lockFile may contain ${HOME} for non-root users.
-	cmd := fmt.Sprintf("mkdir -p \"%s\" && flock -x -w %d \"%s\" sh -c 'echo LOCKED; cat'",
-		dir, secs, lockFile)
+	// Quote paths safely. Paths containing ${HOME} (non-root users) must use
+	// double quotes to allow variable expansion. All other paths use
+	// shell.Quote() (single-quote based) which is immune to injection.
+	quotedDir := shell.Quote(dir)
+	quotedLockFile := shell.Quote(lockFile)
+	if strings.Contains(lockFile, "${") {
+		quotedDir = fmt.Sprintf(`"%s"`, dir)
+		quotedLockFile = fmt.Sprintf(`"%s"`, lockFile)
+	}
+	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'",
+		quotedDir, secs, quotedLockFile)
 
 	if err := session.Start(cmd); err != nil {
 		return fmt.Errorf("failed to start lock command: %w", err)
@@ -405,15 +414,20 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	return fnErr
 }
 
-// Close closes the SSH connection
+// Close closes the SSH connection and any underlying proxy connection.
 func (c *Connection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	var err error
 	if c.client != nil {
-		return c.client.Close()
+		err = c.client.Close()
 	}
-	return nil
+	if c.proxyClient != nil {
+		_ = c.proxyClient.Close()
+		c.proxyClient = nil
+	}
+	return err
 }
 
 // Host returns the host address

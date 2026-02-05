@@ -64,6 +64,27 @@ func (l *Loader) Load() (*Config, error) {
 	return cfg, nil
 }
 
+// maxConfigFileSize is the maximum allowed size for a configuration file.
+// This prevents memory exhaustion from extremely large or malicious YAML input.
+const maxConfigFileSize = 1 << 20 // 1 MiB
+
+// safeExpandEnv performs environment variable expansion only for variables
+// whose names match safe patterns (uppercase letters, digits, underscores).
+// This prevents accidental leakage of sensitive variables like AWS_SECRET_KEY
+// that might match patterns in the YAML file.
+func safeExpandEnv(s string) string {
+	return os.Expand(s, func(key string) string {
+		// Only expand variables that look like intentional config references:
+		// uppercase letters, digits, and underscores (e.g., APP_NAME, PORT).
+		for _, c := range key {
+			if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				return fmt.Sprintf("${%s}", key) // leave unexpanded
+			}
+		}
+		return os.Getenv(key)
+	})
+}
+
 // loadFile reads and parses a single YAML file
 func (l *Loader) loadFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -71,8 +92,12 @@ func (l *Loader) loadFile(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Expand environment variables
-	data = []byte(os.ExpandEnv(string(data)))
+	if len(data) > maxConfigFileSize {
+		return nil, fmt.Errorf("config file exceeds maximum size (%d bytes)", maxConfigFileSize)
+	}
+
+	// Expand only safe environment variables
+	data = []byte(safeExpandEnv(string(data)))
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -88,7 +113,11 @@ func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 		return nil, nil, err
 	}
 
-	data = []byte(os.ExpandEnv(string(data)))
+	if len(data) > maxConfigFileSize {
+		return nil, nil, fmt.Errorf("config file exceeds maximum size (%d bytes)", maxConfigFileSize)
+	}
+
+	data = []byte(safeExpandEnv(string(data)))
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -137,9 +166,24 @@ func (l *Loader) loadSecretsFromFile(cfg *Config) error {
 		secretsPath = ".azud/secrets"
 	}
 
+	// Prevent path traversal: reject paths with ".." components.
+	cleaned := filepath.Clean(secretsPath)
+	if strings.Contains(cleaned, "..") {
+		return fmt.Errorf("secrets_path must not contain path traversal (..): %s", secretsPath)
+	}
+
 	// Check if secrets file exists
-	if _, err := os.Stat(secretsPath); os.IsNotExist(err) {
+	info, err := os.Stat(secretsPath)
+	if os.IsNotExist(err) {
 		return nil // No secrets file, that's okay
+	}
+	if err != nil {
+		return err
+	}
+
+	// Warn if the secrets file is readable by group or others
+	if perm := info.Mode().Perm(); perm&0077 != 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: secrets file %s has insecure permissions %04o (recommended: 0600)\n", secretsPath, perm)
 	}
 
 	file, err := os.Open(secretsPath)

@@ -316,13 +316,13 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 			fields := make(map[string]*Filter)
 			for _, header := range config.RedactRequestHeaders {
 				header = strings.TrimSpace(header)
-				if header != "" {
+				if header != "" && isValidHeaderName(header) {
 					fields[fmt.Sprintf("request>headers>%s", header)] = &Filter{Filter: "delete"}
 				}
 			}
 			for _, header := range config.RedactResponseHeaders {
 				header = strings.TrimSpace(header)
-				if header != "" {
+				if header != "" && isValidHeaderName(header) {
 					fields[fmt.Sprintf("resp_headers>%s", header)] = &Filter{Filter: "delete"}
 				}
 			}
@@ -1259,4 +1259,20 @@ func extractWeights(upstreams []*Upstream) []UpstreamWeight {
 		}
 	}
 	return weights
+}
+
+// isValidHeaderName checks if s is a valid HTTP header field name per RFC 7230.
+// This prevents injection of Caddy filter path separators (>) or other
+// control characters into log field paths.
+func isValidHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		// RFC 7230 token characters: !#$%&'*+-.^_`|~ plus DIGIT and ALPHA
+		if c <= ' ' || c >= 0x7F || c == '>' || c == '/' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }

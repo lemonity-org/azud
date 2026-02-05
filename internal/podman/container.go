@@ -29,6 +29,9 @@ func NewContainerManager(client *Client) *ContainerManager {
 }
 
 func (m *ContainerManager) Run(host string, config *ContainerConfig) (string, error) {
+	if err := ValidateOptions(config.Options); err != nil {
+		return "", err
+	}
 	cmd := config.BuildRunCommand()
 	result, err := m.client.ssh.Execute(host, cmd)
 	if err != nil {

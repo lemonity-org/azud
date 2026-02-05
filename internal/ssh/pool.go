@@ -29,8 +29,8 @@ func NewPool() *Pool {
 
 // Get retrieves a connection from the pool
 func (p *Pool) Get(host string) *Connection {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	conn, ok := p.connections[host]
 	if !ok {
@@ -39,13 +39,10 @@ func (p *Pool) Get(host string) *Connection {
 
 	// Check if connection is still alive
 	if !conn.IsAlive() {
-		// Remove stale connection (will be done asynchronously)
-		go func() {
-			p.mu.Lock()
-			delete(p.connections, host)
-			p.mu.Unlock()
-			_ = conn.Close()
-		}()
+		// Remove stale entry while we hold the write lock so no other
+		// goroutine can retrieve the same dead connection.
+		delete(p.connections, host)
+		go func() { _ = conn.Close() }()
 		return nil
 	}
 

@@ -27,6 +27,20 @@ type ContainerUnit struct {
 	WantedBy        string
 }
 
+// sanitizeINIValue removes newlines and control characters from a string
+// to prevent injection of additional systemd directives via crafted values.
+func sanitizeINIValue(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\r' || (r < 0x20 && r != '\t') || r == 0x7F {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // GenerateContainerFile generates a .container quadlet INI file from the unit configuration
 func GenerateContainerFile(unit *ContainerUnit) string {
 	var sb strings.Builder
@@ -34,53 +48,53 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	// [Unit] section
 	sb.WriteString("[Unit]\n")
 	if unit.Description != "" {
-		sb.WriteString(fmt.Sprintf("Description=%s\n", unit.Description))
+		sb.WriteString(fmt.Sprintf("Description=%s\n", sanitizeINIValue(unit.Description)))
 	}
 	for _, after := range unit.After {
-		sb.WriteString(fmt.Sprintf("After=%s\n", after))
+		sb.WriteString(fmt.Sprintf("After=%s\n", sanitizeINIValue(after)))
 	}
 	for _, req := range unit.Requires {
-		sb.WriteString(fmt.Sprintf("Requires=%s\n", req))
+		sb.WriteString(fmt.Sprintf("Requires=%s\n", sanitizeINIValue(req)))
 	}
 	sb.WriteString("\n")
 
 	// [Container] section
 	sb.WriteString("[Container]\n")
 	if unit.Image != "" {
-		sb.WriteString(fmt.Sprintf("Image=%s\n", unit.Image))
+		sb.WriteString(fmt.Sprintf("Image=%s\n", sanitizeINIValue(unit.Image)))
 	}
 	if unit.ContainerName != "" {
-		sb.WriteString(fmt.Sprintf("ContainerName=%s\n", unit.ContainerName))
+		sb.WriteString(fmt.Sprintf("ContainerName=%s\n", sanitizeINIValue(unit.ContainerName)))
 	}
 	for key, value := range unit.Environment {
-		sb.WriteString(fmt.Sprintf("Environment=%s=%s\n", key, value))
+		sb.WriteString(fmt.Sprintf("Environment=%s=%s\n", sanitizeINIValue(key), sanitizeINIValue(value)))
 	}
 	for _, file := range unit.EnvironmentFile {
-		sb.WriteString(fmt.Sprintf("EnvironmentFile=%s\n", file))
+		sb.WriteString(fmt.Sprintf("EnvironmentFile=%s\n", sanitizeINIValue(file)))
 	}
 	for _, port := range unit.PublishPort {
-		sb.WriteString(fmt.Sprintf("PublishPort=%s\n", port))
+		sb.WriteString(fmt.Sprintf("PublishPort=%s\n", sanitizeINIValue(port)))
 	}
 	for _, vol := range unit.Volume {
-		sb.WriteString(fmt.Sprintf("Volume=%s\n", vol))
+		sb.WriteString(fmt.Sprintf("Volume=%s\n", sanitizeINIValue(vol)))
 	}
 	for _, net := range unit.Network {
-		sb.WriteString(fmt.Sprintf("Network=%s\n", net))
+		sb.WriteString(fmt.Sprintf("Network=%s\n", sanitizeINIValue(net)))
 	}
 	for key, value := range unit.Label {
-		sb.WriteString(fmt.Sprintf("Label=%s=%s\n", key, value))
+		sb.WriteString(fmt.Sprintf("Label=%s=%s\n", sanitizeINIValue(key), sanitizeINIValue(value)))
 	}
 	if unit.HealthCmd != "" {
-		sb.WriteString(fmt.Sprintf("HealthCmd=%s\n", unit.HealthCmd))
+		sb.WriteString(fmt.Sprintf("HealthCmd=%s\n", sanitizeINIValue(unit.HealthCmd)))
 	}
 	if unit.HealthInterval != "" {
-		sb.WriteString(fmt.Sprintf("HealthInterval=%s\n", unit.HealthInterval))
+		sb.WriteString(fmt.Sprintf("HealthInterval=%s\n", sanitizeINIValue(unit.HealthInterval)))
 	}
 	if unit.Exec != "" {
-		sb.WriteString(fmt.Sprintf("Exec=%s\n", unit.Exec))
+		sb.WriteString(fmt.Sprintf("Exec=%s\n", sanitizeINIValue(unit.Exec)))
 	}
 	for _, arg := range unit.PodmanArgs {
-		sb.WriteString(fmt.Sprintf("PodmanArgs=%s\n", arg))
+		sb.WriteString(fmt.Sprintf("PodmanArgs=%s\n", sanitizeINIValue(arg)))
 	}
 	sb.WriteString("\n")
 

@@ -162,6 +162,17 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 			_ = d.history.Record(record)
 			return fmt.Errorf("failed to pull image: %w", err)
 		}
+
+		// Verify image digest is consistent across all hosts to detect
+		// supply-chain attacks via mutable tag replacement.
+		if digest, err := d.verifyImageDigest(hosts, image); err != nil {
+			record.Fail(err)
+			_ = d.history.Record(record)
+			return fmt.Errorf("image digest verification failed: %w", err)
+		} else if digest != "" {
+			record.Metadata["image_digest"] = digest
+			d.log.Info("Image digest: %s", digest)
+		}
 	}
 
 	// Run pre-deploy command from new image (e.g., database migrations)
@@ -371,7 +382,9 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 		// Drain: poll Caddy for in-flight requests on the old upstream,
 		// falling back to a sleep if the API is unavailable.
 		if d.cfg.Deploy.DrainTimeout > 0 {
-			_ = d.proxy.DrainUpstream(host, oldUpstream, d.cfg.Deploy.DrainTimeout)
+			if err := d.proxy.DrainUpstream(host, oldUpstream, d.cfg.Deploy.DrainTimeout); err != nil {
+				d.log.Warn("Drain did not complete cleanly (continuing anyway): %v", err)
+			}
 		}
 
 		// Stop and remove old container
@@ -478,6 +491,36 @@ func (d *Deployer) registerWithProxy(host, upstream string) error {
 	return d.proxy.RegisterService(host, serviceConfig)
 }
 
+// verifyImageDigest checks that the pulled image has the same digest on all
+// hosts. A mismatch indicates a possible supply-chain attack (e.g., tag was
+// replaced between pulls). Returns the verified digest or an error.
+func (d *Deployer) verifyImageDigest(hosts []string, image string) (string, error) {
+	if len(hosts) == 0 {
+		return "", nil
+	}
+
+	// Get digest from the first host as reference
+	refDigest, err := d.images.GetDigest(hosts[0], image)
+	if err != nil {
+		// Digest retrieval may fail for local images without repo digests.
+		d.log.Debug("Could not retrieve image digest (non-registry image?): %v", err)
+		return "", nil
+	}
+
+	// Verify all other hosts have the same digest
+	for _, host := range hosts[1:] {
+		digest, err := d.images.GetDigest(host, image)
+		if err != nil {
+			return "", fmt.Errorf("failed to get image digest on %s: %w", host, err)
+		}
+		if digest != refDigest {
+			return "", fmt.Errorf("image digest mismatch: %s has %s, %s has %s", hosts[0], refDigest, host, digest)
+		}
+	}
+
+	return refDigest, nil
+}
+
 func (d *Deployer) pullImageOnHosts(hosts []string, image string) error {
 	errors := d.images.PullAll(hosts, image)
 	if len(errors) > 0 {
@@ -576,16 +619,16 @@ func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVe
 		upstream := fmt.Sprintf("%s:%d", serviceName, d.cfg.Proxy.AppPort)
 		if proxyHost != "" {
 			if err := d.proxy.RemoveUpstream(host, proxyHost, upstream); err != nil {
-				d.log.Debug("Rollback: failed to remove upstream on %s: %v", host, err)
+				d.log.Warn("Rollback: failed to remove upstream on %s: %v", host, err)
 			}
 		}
 
 		// Stop and remove the new container
 		if err := d.containers.Stop(host, serviceName, stopTimeout); err != nil {
-			d.log.Debug("Rollback: failed to stop container on %s: %v", host, err)
+			d.log.Warn("Rollback: failed to stop container on %s: %v", host, err)
 		}
 		if err := d.containers.Remove(host, serviceName, true); err != nil {
-			d.log.Debug("Rollback: failed to remove container on %s: %v", host, err)
+			d.log.Warn("Rollback: failed to remove container on %s: %v", host, err)
 		}
 
 		// Re-deploy the previous version
