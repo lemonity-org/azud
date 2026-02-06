@@ -545,22 +545,24 @@ func appendToGitignore() {
 
 func getGitHubActionsWorkflow() string {
 	return `# Azud Deployment Workflow
-# This workflow deploys your application when pushing to main
+# This workflow deploys your application when pushing to main.
+#
+# Required GitHub secrets:
+#   AZUD_SSH_KEY              - SSH private key for server access
+#   KNOWN_HOSTS               - Output of: ssh-keyscan your-server-ip
+#   AZUD_REGISTRY_PASSWORD    - Container registry password/token
+#   DATABASE_PASSWORD          - (Example) Application secrets
+#
+# Your config/deploy.yml should include:
+#   secrets_provider: env
+#   secrets_env_prefix: AZUD_SECRET_
 
 name: Deploy
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      destination:
-        description: 'Deployment destination'
-        required: false
-        default: 'production'
-
-env:
-  AZUD_VERSION: "latest"
 
 jobs:
   deploy:
@@ -569,60 +571,29 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Install Azud
-        run: |
-          curl -fsSL https://get.azud.dev | sh
-          echo "$HOME/.azud/bin" >> $GITHUB_PATH
-
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AZUD_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Create secrets file
-        run: |
-          mkdir -p .azud
-          cat > .azud/secrets << 'EOF'
-          AZUD_REGISTRY_PASSWORD=${{ secrets.AZUD_REGISTRY_PASSWORD }}
-          DATABASE_PASSWORD=${{ secrets.DATABASE_PASSWORD }}
-          RAILS_MASTER_KEY=${{ secrets.RAILS_MASTER_KEY }}
-          EOF
-          chmod 600 .azud/secrets
-
-      - name: Set up Podman
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y podman
-
-      - name: Login to Container Registry
-        uses: docker/login-action@v3
+      - name: Setup Azud
+        uses: adriancarayol/azud@v1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          ssh-key: ${{ secrets.AZUD_SSH_KEY }}
+          known-hosts: ${{ secrets.KNOWN_HOSTS }}
+          registry-server: ghcr.io
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Container Image
-        run: |
-          azud build --no-cache
-
-      - name: Deploy to servers
-        run: |
-          azud deploy --skip-build
-
-      - name: Verify deployment
-        run: |
-          azud app details
+      - name: Deploy
+        env:
+          AZUD_SECRET_AZUD_REGISTRY_PASSWORD: ${{ secrets.AZUD_REGISTRY_PASSWORD }}
+          AZUD_SECRET_DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+        run: azud deploy
 
   # Optional: Run tests before deploying
   # test:
   #   name: Run Tests
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v6
   #     - name: Run tests
   #       run: |
   #         # Add your test commands here
@@ -633,8 +604,14 @@ jobs:
   #   name: Deploy to Staging
   #   runs-on: ubuntu-latest
   #   environment: staging
+  #   needs: [test]
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v6
+  #     - name: Setup Azud
+  #       uses: adriancarayol/azud@v1
+  #       with:
+  #         ssh-key: ${{ secrets.AZUD_SSH_KEY }}
+  #         known-hosts: ${{ secrets.KNOWN_HOSTS }}
   #     - name: Deploy to staging
   #       run: azud deploy -d staging
 `

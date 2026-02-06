@@ -1,0 +1,83 @@
+name: "Setup Azud"
+description: "Install Azud and optionally configure SSH and container registry credentials"
+author: "adriancarayol"
+
+branding:
+  icon: "upload-cloud"
+  color: "blue"
+
+inputs:
+  version:
+    description: "Azud version to install (e.g. v1.0.0). Defaults to latest."
+    required: false
+    default: "latest"
+  ssh-key:
+    description: "SSH private key for connecting to deploy servers"
+    required: false
+  known-hosts:
+    description: "Known hosts content (output of ssh-keyscan)"
+    required: false
+  registry-server:
+    description: "Container registry server (e.g. ghcr.io)"
+    required: false
+  registry-username:
+    description: "Container registry username"
+    required: false
+  registry-password:
+    description: "Container registry password or token"
+    required: false
+
+outputs:
+  version:
+    description: "The installed azud version"
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Azud
+      id: install
+      shell: bash
+      env:
+        AZUD_VERSION: ${{ inputs.version }}
+      run: |
+        curl -fsSL "https://raw.githubusercontent.com/${{ github.action_repository || github.repository }}/${{ github.action_ref || github.sha }}/scripts/install.sh" | sh
+        echo "$HOME/.azud/bin" >> "$GITHUB_PATH"
+        VERSION=$("$HOME/.azud/bin/azud" version 2>/dev/null || echo "$AZUD_VERSION")
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup SSH key
+      if: inputs.ssh-key != ''
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+
+    - name: Setup known hosts
+      if: inputs.known-hosts != ''
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+        chmod 644 ~/.ssh/known_hosts
+      env:
+        KNOWN_HOSTS: ${{ inputs.known-hosts }}
+
+    - name: Login to container registry
+      if: inputs.registry-server != '' && inputs.registry-username != '' && inputs.registry-password != ''
+      shell: bash
+      run: |
+        if command -v podman >/dev/null 2>&1; then
+          podman login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+        else
+          docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+        fi
+      env:
+        REGISTRY_SERVER: ${{ inputs.registry-server }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}

@@ -4,32 +4,33 @@ Azud is designed with CI/CD in mind. Its stateless CLI and configuration-as-code
 
 ## GitHub Actions
 
-Azud provides native support for GitHub Actions.
+### Using the Azud Action (Recommended)
 
-### 1. Generate Workflow
+The easiest way to deploy with Azud from GitHub Actions is the official composite action.
 
-You can generate a starter workflow using the `init` command:
+#### 1. Generate Workflow
 
 ```bash
 azud init --github-actions
 ```
 
-This creates `.github/workflows/deploy.yml`.
+This creates `.github/workflows/deploy.yml` with everything pre-configured.
 
-### 2. Configure Secrets
+#### 2. Configure Secrets
 
-For the pipeline to work, you need to set up the following secrets in your GitHub repository settings (**Settings** > **Secrets and variables** > **Actions**).
+Add these secrets in your GitHub repository (**Settings** > **Secrets and variables** > **Actions**):
 
 | Secret Name | Description |
 |-------------|-------------|
-| `AZUD_SSH_KEY` | The private SSH key used to connect to your servers. The corresponding public key must be in `~/.ssh/authorized_keys` on your servers. |
-| `AZUD_REGISTRY_PASSWORD` | Password/Token for your container registry (e.g., GitHub Personal Access Token for GHCR). |
-| `DATABASE_PASSWORD` | (Example) Your application secrets. |
-| `RAILS_MASTER_KEY` | (Example) Any other secrets defined in your `config/deploy.yml`. |
+| `AZUD_SSH_KEY` | SSH private key for connecting to your servers |
+| `KNOWN_HOSTS` | Output of `ssh-keyscan your-server-ip` |
+| `AZUD_SECRET_AZUD_REGISTRY_PASSWORD` | Registry password/token |
+| `AZUD_SECRET_DATABASE_PASSWORD` | (Example) Your application secrets |
+| `AZUD_SECRET_RAILS_MASTER_KEY` | (Example) Any other secrets from `config/deploy.yml` |
 
-### 3. Example Workflow
+Secrets prefixed with `AZUD_SECRET_` are automatically loaded when using `secrets_provider: env` (see below).
 
-Here is a typical workflow configuration:
+#### 3. Example Workflow
 
 ```yaml
 name: Deploy
@@ -42,49 +43,80 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Install Azud
-        run: |
-          curl -fsSL https://get.azud.dev | sh
-          echo "$HOME/.azud/bin" >> $GITHUB_PATH
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AZUD_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          # Scan host keys to prevent interactive prompt
-          ssh-keyscan -H 192.168.1.1 >> ~/.ssh/known_hosts
-
-      - name: Create Secrets File
-        run: |
-          mkdir -p .azud
-          cat > .azud/secrets << 'EOF'
-          AZUD_REGISTRY_PASSWORD=${{ secrets.AZUD_REGISTRY_PASSWORD }}
-          DATABASE_PASSWORD=${{ secrets.DATABASE_PASSWORD }}
-          EOF
-          chmod 600 .azud/secrets
-
-      - name: Login to Registry
-        uses: docker/login-action@v3
+      - name: Setup Azud
+        uses: adriancarayol/azud@v1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Push
-        run: azud build --no-cache
+          ssh-key: ${{ secrets.AZUD_SSH_KEY }}
+          known-hosts: ${{ secrets.KNOWN_HOSTS }}
+          registry-server: ghcr.io
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy
-        run: azud deploy --skip-build
+        env:
+          AZUD_SECRET_AZUD_REGISTRY_PASSWORD: ${{ secrets.AZUD_REGISTRY_PASSWORD }}
+          AZUD_SECRET_DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+        run: azud deploy
+```
+
+#### Action Inputs
+
+| Input | Description | Default |
+|-------|-------------|---------|
+| `version` | Azud version to install | `latest` |
+| `ssh-key` | SSH private key (triggers SSH setup) | — |
+| `known-hosts` | Known hosts content | — |
+| `registry-server` | Container registry server | — |
+| `registry-username` | Registry username | — |
+| `registry-password` | Registry password/token | — |
+
+### Using `secrets_provider: env`
+
+Instead of creating a `.azud/secrets` file in CI, you can configure Azud to read secrets directly from environment variables. Add this to your `config/deploy.yml`:
+
+```yaml
+secrets_provider: env
+secrets_env_prefix: AZUD_SECRET_
+```
+
+With this configuration, an environment variable like `AZUD_SECRET_DATABASE_PASSWORD` is mapped to the secret `DATABASE_PASSWORD`. This is the recommended approach for CI/CD because:
+
+- No file creation step needed
+- Secrets never touch disk
+- Works natively with GitHub Actions secrets, GitLab CI variables, etc.
+
+### Alternative: curl-based Install
+
+If you prefer not to use the composite action, you can install Azud directly:
+
+```yaml
+- name: Install Azud
+  run: |
+    curl -fsSL https://raw.githubusercontent.com/adriancarayol/azud/main/scripts/install.sh | sh
+    echo "$HOME/.azud/bin" >> $GITHUB_PATH
+
+- name: Setup SSH
+  run: |
+    mkdir -p ~/.ssh
+    echo "${{ secrets.AZUD_SSH_KEY }}" > ~/.ssh/id_ed25519
+    chmod 600 ~/.ssh/id_ed25519
+    ssh-keyscan -H your-server-ip >> ~/.ssh/known_hosts
 ```
 
 ---
 
-## GitLab CI
+## Docker Image
 
-You can also use Azud with GitLab CI. Here is a sample `.gitlab-ci.yml`:
+Azud publishes a Docker image to `ghcr.io/adriancarayol/azud` with every release. This is useful for container-based CI systems like GitLab CI.
+
+```
+ghcr.io/adriancarayol/azud:latest
+ghcr.io/adriancarayol/azud:v1.0.0
+```
+
+## GitLab CI
 
 ```yaml
 stages:
@@ -92,29 +124,29 @@ stages:
 
 deploy:
   stage: deploy
-  image: golang:1.21
+  image: ghcr.io/adriancarayol/azud:latest
   only:
     - main
+  variables:
+    AZUD_SECRET_AZUD_REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+    AZUD_SECRET_DATABASE_PASSWORD: $DATABASE_PASSWORD
   before_script:
-    # Install Azud
-    - curl -fsSL https://get.azud.dev | sh
-    - export PATH=$PATH:$HOME/.azud/bin
-    
-    # Setup SSH
     - mkdir -p ~/.ssh
     - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
     - chmod 600 ~/.ssh/id_ed25519
     - ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts
-
-    # Setup Secrets
-    - mkdir -p .azud
-    - echo "AZUD_REGISTRY_PASSWORD=$CI_REGISTRY_PASSWORD" >> .azud/secrets
-    - echo "DATABASE_PASSWORD=$DATABASE_PASSWORD" >> .azud/secrets
-    - chmod 600 .azud/secrets
-
   script:
-    - azud setup --skip-bootstrap # or azud deploy
+    - azud deploy
 ```
+
+Ensure your `config/deploy.yml` includes:
+
+```yaml
+secrets_provider: env
+secrets_env_prefix: AZUD_SECRET_
+```
+
+---
 
 ## Best Practices
 
@@ -130,11 +162,11 @@ In larger pipelines, you might want to separate the build and deploy jobs.
 1.  **Build Job:** Build the image and push to registry using `azud build` or `docker build`.
 2.  **Deploy Job:** Run `azud deploy --skip-build`.
 
-### 3. Environment Secrets
-Keep your `.azud/secrets` file out of version control. In CI, reconstruct this file dynamically from the CI system's secret store (as shown in the examples above).
+### 3. Use `secrets_provider: env`
+In CI environments, prefer `secrets_provider: env` over creating a `.azud/secrets` file. This avoids writing secrets to disk and integrates naturally with your CI system's secret management.
 
 ### 4. Known Hosts
-To avoid "Host key verification failed" errors, use `ssh-keyscan` in your CI script to populate `~/.ssh/known_hosts`, or set `ssh.insecure_ignore_host_key: true` (less secure) in your `config/deploy.yml` if your internal policy allows.
+To avoid "Host key verification failed" errors, use `ssh-keyscan` to populate `~/.ssh/known_hosts`, or pass `known-hosts` to the Azud action. You can also set `ssh.insecure_ignore_host_key: true` in your `config/deploy.yml` (less secure) if your internal policy allows.
 
 ---
 
