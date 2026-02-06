@@ -77,7 +77,7 @@ func safeExpandEnv(s string) string {
 		// Only expand variables that look like intentional config references:
 		// uppercase letters, digits, and underscores (e.g., APP_NAME, PORT).
 		for _, c := range key {
-			if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			if (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
 				return fmt.Sprintf("${%s}", key) // leave unexpanded
 			}
 		}
