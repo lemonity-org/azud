@@ -82,7 +82,7 @@ Then run `azud env push` from each project to sync secrets to the correct path.
 3.  **Verbose mode:** Run your command with `-v` (e.g., `azud deploy -v`) to see detailed SSH output and error messages.
 
 ### How do I rollback?
-Run `azud rollback <version>`. Azud keeps a history of deployments. You can find the version hash in the output of your previous deployments or by checking your container image tags.
+Run `azud history list` to find a previous version, then `azud rollback <version>`.
 
 ### The health check is failing.
 - Ensure your app is actually listening on the `app_port` defined in `config/deploy.yml`.

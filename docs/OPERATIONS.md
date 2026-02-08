@@ -66,6 +66,7 @@ azud canary promote
 ## Rollbacks
 
 ```bash
+azud history list
 azud rollback v1.2.2
 ```
 

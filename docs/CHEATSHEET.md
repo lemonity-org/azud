@@ -9,6 +9,7 @@ azud init
 azud preflight
 azud setup
 azud deploy
+azud history list
 azud rollback <version>
 ```
 

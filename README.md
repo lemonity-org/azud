@@ -166,6 +166,7 @@ builder:
 | `azud deploy` | Deploy with zero-downtime |
 | `azud redeploy` | Redeploy without rebuilding |
 | `azud rollback [version]` | Rollback to a previous version |
+| `azud history list` | Show recent deployment history |
 | `azud setup` | Bootstrap servers and deploy |
 | `azud preflight` | Validate hosts and configuration before deploying |
 

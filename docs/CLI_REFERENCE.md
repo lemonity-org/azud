@@ -171,6 +171,23 @@ azud rollback <version> [flags]
 azud rollback v1.2.2
 ```
 
+#### `azud history`
+
+View deployment history records for the configured service.
+
+**Usage:**
+```bash
+azud history list [--limit 20]
+azud history show <id>
+```
+
+**Examples:**
+```bash
+azud history list
+azud history list --limit 50
+azud history show deploy_1739078148500123000
+```
+
 ---
 
 ### Application Management
