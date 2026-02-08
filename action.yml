@@ -41,7 +41,7 @@ runs:
       env:
         AZUD_VERSION: ${{ inputs.version }}
       run: |
-        curl -fsSL "https://raw.githubusercontent.com/${{ github.action_repository || github.repository }}/${{ github.action_ref || github.sha }}/scripts/install.sh" | sh
+        sh "${{ github.action_path }}/scripts/install.sh"
         echo "$HOME/.azud/bin" >> "$GITHUB_PATH"
         VERSION=$("$HOME/.azud/bin/azud" version 2>/dev/null || echo "$AZUD_VERSION")
         echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
