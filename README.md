@@ -6,6 +6,8 @@
 
 **Deploy web apps anywhere with zero downtime**
 
+> **Note:** Azud is currently in beta. APIs and configuration formats may change between releases.
+
 Azud is a modern deployment tool for containerized web applications. It deploys Podman-based applications to any server with zero-downtime deployments, combining simplicity with multi-server capabilities.
 
 ## Why Azud?
