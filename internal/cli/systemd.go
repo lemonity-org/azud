@@ -20,10 +20,11 @@ var systemdCmd = &cobra.Command{
 
 var systemdEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Install and enable quadlet units",
-	Long: `Generate quadlet unit files for the app and proxy and enable them.
+	Short: "Install quadlet units",
+	Long: `Generate quadlet unit files for the app and proxy.
 
-This improves reboot reliability, especially for rootless Podman.`,
+This improves reboot reliability, especially for rootless Podman.
+Units are installed into quadlet paths and can be started immediately.`,
 	RunE: runSystemdEnable,
 }
 
@@ -49,6 +50,7 @@ func init() {
 func runSystemdEnable(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
+	hasErrors := false
 
 	hosts := getSystemdHosts()
 	if len(hosts) == 0 {
@@ -66,21 +68,47 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	deployer := quadlet.NewQuadletDeployer(sshClient, log, cfg.Podman.QuadletPath, cfg.Podman.Rootless)
+	appUseSudo := !cfg.Podman.Rootless && cfg.SSH.User != "root"
+	appDeployer := quadlet.NewQuadletDeployerWithOptions(
+		sshClient,
+		log,
+		cfg.Podman.QuadletPath,
+		cfg.Podman.Rootless,
+		appUseSudo,
+	)
 
-	// Ensure azud network quadlet exists
-	netFile := quadlet.GenerateNetworkFile("azud", true)
-	for _, host := range hosts {
-		if err := deployer.Deploy(host, "azud.network", netFile); err != nil {
-			log.HostError(host, "Failed to deploy network unit: %v", err)
-			continue
-		}
-		if err := deployer.Enable(host, "azud-network"); err != nil {
-			log.HostError(host, "Failed to enable network unit: %v", err)
-		}
-		if !systemdNoStart {
-			if err := deployer.Start(host, "azud-network"); err != nil {
-				log.HostError(host, "Failed to start network unit: %v", err)
+	proxyRootless := cfg.Podman.Rootless && !cfg.Proxy.Rootful
+	proxyPath := cfg.Podman.QuadletPath
+	if cfg.Proxy.Rootful {
+		proxyPath = "/etc/containers/systemd/"
+	}
+	proxyUseSudo := !proxyRootless && cfg.SSH.User != "root"
+	proxyDeployer := quadlet.NewQuadletDeployerWithOptions(
+		sshClient,
+		log,
+		proxyPath,
+		proxyRootless,
+		proxyUseSudo,
+	)
+
+	// Ensure azud network quadlet exists only when app units need it, or when
+	// proxy units run in bridge mode and need azud DNS/network access.
+	needsAzudNetwork := needsAzudNetworkUnit(systemdSkipApp, systemdSkipProxy)
+	if needsAzudNetwork {
+		networkUnitName := "azud.network"
+		networkServiceName := "azud-network"
+		netFile := quadlet.GenerateNetworkFile("azud", true)
+		for _, host := range hosts {
+			if err := appDeployer.Deploy(host, networkUnitName, netFile); err != nil {
+				log.HostError(host, "Failed to deploy network unit: %v", err)
+				hasErrors = true
+				continue
+			}
+			if !systemdNoStart {
+				if err := appDeployer.Start(host, networkServiceName); err != nil {
+					log.HostError(host, "Failed to start network unit: %v", err)
+					hasErrors = true
+				}
 			}
 		}
 	}
@@ -94,17 +122,15 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 		appUnit := buildAppQuadletUnit(image)
 		unitName := fmt.Sprintf("%s.container", cfg.Service)
 		for _, host := range hosts {
-			if err := deployer.Deploy(host, unitName, quadlet.GenerateContainerFile(appUnit)); err != nil {
+			if err := appDeployer.Deploy(host, unitName, quadlet.GenerateContainerFile(appUnit)); err != nil {
 				log.HostError(host, "Failed to deploy app unit: %v", err)
-				continue
-			}
-			if err := deployer.Enable(host, cfg.Service); err != nil {
-				log.HostError(host, "Failed to enable app unit: %v", err)
+				hasErrors = true
 				continue
 			}
 			if !systemdNoStart {
-				if err := deployer.Start(host, cfg.Service); err != nil {
+				if err := appDeployer.Start(host, cfg.Service); err != nil {
 					log.HostError(host, "Failed to start app unit: %v", err)
+					hasErrors = true
 				}
 			}
 		}
@@ -114,23 +140,25 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 		proxyUnit := buildProxyQuadletUnit()
 		unitName := fmt.Sprintf("%s.container", proxy.CaddyContainerName)
 		for _, host := range hosts {
-			if err := deployer.Deploy(host, unitName, quadlet.GenerateContainerFile(proxyUnit)); err != nil {
+			if err := proxyDeployer.Deploy(host, unitName, quadlet.GenerateContainerFile(proxyUnit)); err != nil {
 				log.HostError(host, "Failed to deploy proxy unit: %v", err)
-				continue
-			}
-			if err := deployer.Enable(host, proxy.CaddyContainerName); err != nil {
-				log.HostError(host, "Failed to enable proxy unit: %v", err)
+				hasErrors = true
 				continue
 			}
 			if !systemdNoStart {
-				if err := deployer.Start(host, proxy.CaddyContainerName); err != nil {
+				if err := proxyDeployer.Start(host, proxy.CaddyContainerName); err != nil {
 					log.HostError(host, "Failed to start proxy unit: %v", err)
+					hasErrors = true
 				}
 			}
 		}
 	}
 
-	log.Success("systemd units enabled")
+	if hasErrors {
+		return fmt.Errorf("one or more systemd operations failed")
+	}
+
+	log.Success("systemd units installed")
 	return nil
 }
 
@@ -164,6 +192,11 @@ func buildAppQuadletUnit(image string) *quadlet.ContainerUnit {
 		"azud.service": cfg.Service,
 	}
 
+	publishPorts := []string{}
+	if cfg.UseHostPortUpstreams() {
+		publishPorts = append(publishPorts, fmt.Sprintf("127.0.0.1::%d", cfg.Proxy.AppPort))
+	}
+
 	unit := &quadlet.ContainerUnit{
 		Description:    fmt.Sprintf("Azud service %s", cfg.Service),
 		After:          []string{"network-online.target"},
@@ -171,7 +204,7 @@ func buildAppQuadletUnit(image string) *quadlet.ContainerUnit {
 		Image:          image,
 		ContainerName:  cfg.Service,
 		Environment:    cfg.Env.Clear,
-		PublishPort:    []string{},
+		PublishPort:    publishPorts,
 		Volume:         cfg.Volumes,
 		Network:        []string{"azud"},
 		Label:          labels,
@@ -194,13 +227,15 @@ func buildAppQuadletUnit(image string) *quadlet.ContainerUnit {
 }
 
 func buildProxyQuadletUnit() *quadlet.ContainerUnit {
-	httpPort := proxy.CaddyHTTPPort
-	httpsPort := proxy.CaddyHTTPSPort
-	if cfg.Proxy.HTTPPort > 0 {
-		httpPort = cfg.Proxy.HTTPPort
+	network := []string{"azud"}
+	publishPorts := []string{
+		fmt.Sprintf("%d:80", cfg.Proxy.EffectiveHTTPPort()),
+		fmt.Sprintf("%d:443", cfg.Proxy.EffectiveHTTPSPort()),
+		fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort),
 	}
-	if cfg.Proxy.HTTPSPort > 0 {
-		httpsPort = cfg.Proxy.HTTPSPort
+	if cfg.UseHostPortUpstreams() {
+		network = []string{"host"}
+		publishPorts = []string{}
 	}
 
 	unit := &quadlet.ContainerUnit{
@@ -210,9 +245,9 @@ func buildProxyQuadletUnit() *quadlet.ContainerUnit {
 		Image:          proxy.CaddyImage,
 		ContainerName:  proxy.CaddyContainerName,
 		Environment:    map[string]string{"CADDY_ADMIN": "127.0.0.1:2019"},
-		PublishPort:    []string{fmt.Sprintf("%d:80", httpPort), fmt.Sprintf("%d:443", httpsPort), fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort)},
+		PublishPort:    publishPorts,
 		Volume:         []string{"caddy_data:/data", "caddy_config:/config"},
-		Network:        []string{"azud"},
+		Network:        network,
 		Label:          map[string]string{"azud.managed": "true", "azud.type": "proxy"},
 		Exec:           "caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --watch",
 		Restart:        "always",
@@ -221,4 +256,11 @@ func buildProxyQuadletUnit() *quadlet.ContainerUnit {
 	}
 
 	return unit
+}
+
+func needsAzudNetworkUnit(skipApp, skipProxy bool) bool {
+	if cfg == nil {
+		return !skipApp || !skipProxy
+	}
+	return !skipApp || (!skipProxy && !cfg.UseHostPortUpstreams())
 }

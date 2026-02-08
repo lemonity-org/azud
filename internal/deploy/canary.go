@@ -72,7 +72,7 @@ func NewCanaryDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Lo
 		podman:     podmanClient,
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
-		proxy:      proxy.NewManager(sshClient, log),
+		proxy:      proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams()),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
 		statePath:  statePath,
@@ -249,13 +249,23 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 		c.log.HostPhase(host, phases)
 
 		// Register canary with proxy at initial weight
-		canaryUpstream := c.upstreamAddr(canaryContainerName)
+		canaryUpstream, err := c.upstreamAddr(host, canaryContainerName)
+		if err != nil {
+			c.state.Status = CanaryStatusNone
+			c.state.LastUpdated = time.Now()
+			c.saveStateLocked()
+			return err
+		}
 		stableWeight := 100 - initialWeight
 
 		c.log.Host(host, "Registering canary with proxy (weight=%d%%, stable=%d%%)", initialWeight, stableWeight)
 
 		// Update stable container weight first
-		stableUpstream := c.upstreamAddr(c.cfg.Service)
+		stableUpstream, err := c.upstreamAddr(host, c.cfg.Service)
+		if err != nil {
+			c.log.Debug("Failed to resolve stable upstream (may not exist yet): %v", err)
+			stableUpstream = fmt.Sprintf("%s:%d", c.cfg.Service, c.cfg.Proxy.AppPort)
+		}
 		proxyHost := c.proxyRouteHost()
 		if err := c.proxy.SetUpstreamWeight(host, proxyHost, stableUpstream, stableWeight); err != nil {
 			c.log.Debug("Failed to set stable weight (may not exist yet): %v", err)
@@ -311,11 +321,16 @@ func (c *CanaryDeployer) Promote() error {
 	c.saveStateLocked()
 	c.log.Header("Promoting canary to production")
 
-	canaryUpstream := c.upstreamAddr(c.state.CanaryContainer)
-	stableUpstream := c.upstreamAddr(c.state.StableContainer)
-
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Promoting canary...")
+		canaryUpstream, err := c.upstreamAddr(host, c.state.CanaryContainer)
+		if err != nil {
+			return err
+		}
+		stableUpstream, err := c.upstreamAddr(host, c.state.StableContainer)
+		if err != nil {
+			return err
+		}
 
 		// Set canary to 100%
 		proxyHost := c.proxyRouteHost()
@@ -359,23 +374,26 @@ func (c *CanaryDeployer) Promote() error {
 			livenessPath = c.cfg.Proxy.Healthcheck.GetLivenessPath()
 		}
 		hosts := c.cfg.Proxy.AllHosts()
-		finalUpstream := c.upstreamAddr(c.state.StableContainer)
+		finalUpstream, err := c.upstreamAddr(host, c.state.StableContainer)
+		if err != nil {
+			return err
+		}
 		serviceConfig := &proxy.ServiceConfig{
-			Name:            c.cfg.Service,
-			Host:            proxyHost,
-			Hosts:           hosts,
-			Upstreams:       []string{finalUpstream},
-			HealthPath:      livenessPath,
-			HealthInterval:  c.cfg.Proxy.Healthcheck.Interval,
-			HealthTimeout:   c.cfg.Proxy.Healthcheck.Timeout,
+			Name:                  c.cfg.Service,
+			Host:                  proxyHost,
+			Hosts:                 hosts,
+			Upstreams:             []string{finalUpstream},
+			HealthPath:            livenessPath,
+			HealthInterval:        c.cfg.Proxy.Healthcheck.Interval,
+			HealthTimeout:         c.cfg.Proxy.Healthcheck.Timeout,
 			ResponseTimeout:       c.cfg.Proxy.ResponseTimeout,
 			ResponseHeaderTimeout: c.cfg.Proxy.ResponseHeaderTimeout,
-			ForwardHeaders:  c.cfg.Proxy.ForwardHeaders,
-			BufferRequests:  c.cfg.Proxy.Buffering.Requests,
-			BufferResponses: c.cfg.Proxy.Buffering.Responses,
-			MaxRequestBody:  c.cfg.Proxy.Buffering.MaxRequestBody,
-			BufferMemory:    c.cfg.Proxy.Buffering.Memory,
-			HTTPS:           c.cfg.Proxy.SSL,
+			ForwardHeaders:        c.cfg.Proxy.ForwardHeaders,
+			BufferRequests:        c.cfg.Proxy.Buffering.Requests,
+			BufferResponses:       c.cfg.Proxy.Buffering.Responses,
+			MaxRequestBody:        c.cfg.Proxy.Buffering.MaxRequestBody,
+			BufferMemory:          c.cfg.Proxy.Buffering.Memory,
+			HTTPS:                 c.cfg.Proxy.SSL,
 		}
 		if err := c.proxy.RegisterService(host, serviceConfig); err != nil {
 			c.log.Warn("Failed to update proxy to final name: %v", err)
@@ -416,11 +434,16 @@ func (c *CanaryDeployer) Rollback() error {
 	c.saveStateLocked()
 	c.log.Header("Rolling back canary deployment")
 
-	canaryUpstream := c.upstreamAddr(c.state.CanaryContainer)
-	stableUpstream := c.upstreamAddr(c.state.StableContainer)
-
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Rolling back canary...")
+		canaryUpstream, err := c.upstreamAddr(host, c.state.CanaryContainer)
+		if err != nil {
+			return err
+		}
+		stableUpstream, err := c.upstreamAddr(host, c.state.StableContainer)
+		if err != nil {
+			return err
+		}
 
 		// Restore stable to 100% first so it handles all new traffic
 		proxyHost := c.proxyRouteHost()
@@ -511,11 +534,17 @@ func (c *CanaryDeployer) SetWeight(weight int) error {
 
 	c.log.Info("Adjusting canary weight to %d%%", weight)
 
-	canaryUpstream := c.upstreamAddr(c.state.CanaryContainer)
-	stableUpstream := c.upstreamAddr(c.state.StableContainer)
 	stableWeight := 100 - weight
 
 	for _, host := range c.state.Hosts {
+		canaryUpstream, err := c.upstreamAddr(host, c.state.CanaryContainer)
+		if err != nil {
+			return err
+		}
+		stableUpstream, err := c.upstreamAddr(host, c.state.StableContainer)
+		if err != nil {
+			return err
+		}
 		proxyHost := c.proxyRouteHost()
 		if err := c.proxy.SetUpstreamWeight(host, proxyHost, canaryUpstream, weight); err != nil {
 			return fmt.Errorf("failed to set canary weight on %s: %w", host, err)
@@ -536,15 +565,21 @@ func (c *CanaryDeployer) SetWeight(weight int) error {
 	return nil
 }
 
-// upstreamAddr returns "name:port" for the configured application port.
-func (c *CanaryDeployer) upstreamAddr(name string) string {
-	return fmt.Sprintf("%s:%d", name, c.cfg.Proxy.AppPort)
+func (c *CanaryDeployer) upstreamAddr(host, name string) (string, error) {
+	if !c.cfg.UseHostPortUpstreams() {
+		return fmt.Sprintf("%s:%d", name, c.cfg.Proxy.AppPort), nil
+	}
+
+	port, err := c.containers.HostPort(host, name, c.cfg.Proxy.AppPort)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve host port for %s on %s: %w", name, host, err)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port), nil
 }
 
 func (c *CanaryDeployer) proxyRouteHost() string {
 	return c.cfg.Proxy.PrimaryHost()
 }
-
 
 func (c *CanaryDeployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
 	return newAppContainerConfig(c.cfg, image, name, map[string]string{

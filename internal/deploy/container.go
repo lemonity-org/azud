@@ -85,6 +85,9 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 		Labels:         labels,
 		Env:            make(map[string]string),
 	}
+	if cfg.UseHostPortUpstreams() {
+		containerCfg.Ports = append(containerCfg.Ports, fmt.Sprintf("127.0.0.1::%d", cfg.Proxy.AppPort))
+	}
 
 	for key, value := range cfg.Env.Clear {
 		containerCfg.Env[key] = value

@@ -91,7 +91,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 	}
 
 	bootstrapper := server.NewBootstrapper(sshClient, log, cfg.Podman.NetworkBackend)
-	proxyManager := proxy.NewManager(sshClient, log)
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
 	rows := make([][]string, len(hosts))
 	var wg sync.WaitGroup

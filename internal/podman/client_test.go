@@ -5,6 +5,44 @@ import (
 	"testing"
 )
 
+func TestNewClientWithCommand_DefaultsToPodman(t *testing.T) {
+	client := NewClientWithCommand(nil, "   ")
+	if client.command != "podman" {
+		t.Fatalf("expected default command 'podman', got %q", client.command)
+	}
+}
+
+func TestClientRewriteCommand_DefaultNoOp(t *testing.T) {
+	client := NewClientWithCommand(nil, "podman")
+	cmd := "podman run --name app nginx:latest"
+	if got := client.RewriteCommand(cmd); got != cmd {
+		t.Fatalf("expected command unchanged, got %q", got)
+	}
+}
+
+func TestClientRewriteCommand_CustomPrefix(t *testing.T) {
+	client := NewClientWithCommand(nil, "sudo -n podman")
+	cmd := "podman run --name app nginx:latest"
+	got := client.RewriteCommand(cmd)
+	want := "sudo -n podman run --name app nginx:latest"
+	if got != want {
+		t.Fatalf("unexpected rewritten command:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestClientRewriteCommand_CustomPrefixInConditional(t *testing.T) {
+	client := NewClientWithCommand(nil, "sudo -n podman")
+	cmd := "if [ -f \"/tmp/.env\" ]; then podman run --env-file \"/tmp/.env\" app; else podman run app; fi"
+	got := client.RewriteCommand(cmd)
+
+	if strings.Count(got, "sudo -n podman") != 2 {
+		t.Fatalf("expected both podman invocations to be rewritten, got %q", got)
+	}
+	if strings.Contains(got, " then podman ") || strings.Contains(got, " else podman ") {
+		t.Fatalf("expected no raw podman token in conditional, got %q", got)
+	}
+}
+
 func TestBuildRunCommand_Basic(t *testing.T) {
 	cfg := &ContainerConfig{
 		Name:   "myapp",

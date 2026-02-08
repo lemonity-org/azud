@@ -177,6 +177,8 @@ proxy:
   host: my-app.example.com
   # Enable automatic SSL via Let's Encrypt
   ssl: true
+  # Run proxy with rootful Podman (useful when podman.rootless=true and binding 80/443)
+  # rootful: true
   # Application port inside the container
   app_port: 3000
   # Health check configuration
@@ -252,6 +254,8 @@ ssh:
 #   require_rootless_podman: true
 #   require_known_hosts: true
 #   require_trusted_fingerprints: true
+# NOTE: rootless Podman cannot bind proxy ports 80/443 directly.
+# Set proxy.http_port/proxy.https_port >= 1024, or enable proxy.rootful.
 
 # Builder configuration
 builder:

@@ -13,6 +13,7 @@ func TestMergeConfigs_AllowsExplicitFalseAndZero(t *testing.T) {
 			SSL:         true,
 			SSLRedirect: true,
 			AppPort:     3000,
+			Rootful:     true,
 		},
 		Deploy: DeployConfig{
 			RollbackOnFailure: true,
@@ -34,6 +35,7 @@ proxy:
   ssl: false
   ssl_redirect: false
   app_port: 0
+  rootful: false
 deploy:
   rollback_on_failure: false
   retain_containers: 0
@@ -64,6 +66,9 @@ security:
 	}
 	if merged.Proxy.AppPort != 0 {
 		t.Fatalf("expected proxy.app_port to be overridden to 0")
+	}
+	if merged.Proxy.Rootful {
+		t.Fatalf("expected proxy.rootful to be overridden to false")
 	}
 	if merged.Deploy.RollbackOnFailure {
 		t.Fatalf("expected deploy.rollback_on_failure to be overridden to false")

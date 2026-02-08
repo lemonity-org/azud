@@ -468,12 +468,16 @@ View logs from a cron job.
 ### System Integration
 
 #### `azud systemd enable`
-Generate and enable systemd/quadlet units for the application and proxy. This ensures services start automatically on server reboot.
+Generate and install systemd/quadlet units for the application and proxy. This improves reboot reliability and can start services immediately unless `--no-start` is set.
 
 **Flags:**
 *   `--host`, `--role`
 *   `--no-start`: Only enable, do not start immediately.
 *   `--skip-app`, `--skip-proxy`
+
+Notes:
+*   With `podman.rootless: true` + `proxy.rootful: true`, app units stay rootless while the proxy unit is installed as a system unit.
+*   When `ssh.user` is non-root and a system unit is managed, passwordless `sudo` is required for `systemctl` and quadlet file writes.
 
 ---
 
@@ -557,6 +561,7 @@ proxy:
   host: example.com             # Single host
   # hosts: [example.com, www.example.com] # Multiple hosts
   ssl: true                     # Auto HTTPS
+  # rootful: true               # Run proxy with rootful Podman (supports 80/443 with rootless app mode)
   app_port: 3000                # Container port
   healthcheck:
     path: /up

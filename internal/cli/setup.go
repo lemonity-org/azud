@@ -116,15 +116,15 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 3: Start proxy
 	if !setupSkipProxy {
 		log.Header("Step 3: Start Proxy")
-		proxyManager := proxy.NewManager(sshClient, log)
+		proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
 		proxyConfig := &proxy.ProxyConfig{
-			AutoHTTPS:          cfg.Proxy.SSL,
-			Email:              cfg.Proxy.ACMEEmail,
-			Staging:            cfg.Proxy.ACMEStaging,
-			SSLRedirect:        cfg.Proxy.SSLRedirect,
-			HTTPPort:           cfg.Proxy.HTTPPort,
-			HTTPSPort:          cfg.Proxy.HTTPSPort,
+			AutoHTTPS:             cfg.Proxy.SSL,
+			Email:                 cfg.Proxy.ACMEEmail,
+			Staging:               cfg.Proxy.ACMEStaging,
+			SSLRedirect:           cfg.Proxy.SSLRedirect,
+			HTTPPort:              cfg.Proxy.HTTPPort,
+			HTTPSPort:             cfg.Proxy.HTTPSPort,
 			LoggingEnabled:        cfg.Proxy.Logging.Enabled,
 			RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
 			RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,

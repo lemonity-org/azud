@@ -51,9 +51,19 @@ Other useful fields:
 
 - `ssl_redirect`, `acme_email`, `acme_staging`
 - `http_port`, `https_port`
+- `rootful` (run proxy container with rootful Podman)
 - `response_timeout`, `response_header_timeout`
 - `buffering`, `forward_headers`
 - `logging` (redaction and toggles)
+
+Note:
+- With `podman.rootless: true` and `proxy.rootful: false`, proxy
+  `http_port`/`https_port` must be `>= 1024`.
+- Set `proxy.rootful: true` to run only the proxy with rootful Podman so it
+  can bind `80/443` while app containers remain rootless.
+- In this mixed mode, `http_port`/`https_port` currently must stay at `80/443`.
+- When `proxy.rootful: true` and `ssh.user` is non-root, the SSH user needs
+  passwordless `sudo` for Podman commands.
 
 ## Registry
 
