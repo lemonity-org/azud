@@ -43,10 +43,18 @@ detect_platform() {
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
     log "Resolving latest version..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    # Try stable release first, fall back to any release (including pre-releases)
+    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
       | grep '"tag_name"' \
       | head -1 \
       | sed 's/.*"tag_name": *"//;s/".*//')
+    if [ -z "$VERSION" ]; then
+      log "No stable release found, checking pre-releases..."
+      VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+        | grep '"tag_name"' \
+        | head -1 \
+        | sed 's/.*"tag_name": *"//;s/".*//')
+    fi
     if [ -z "$VERSION" ]; then
       fatal "Could not determine latest version. Set AZUD_VERSION explicitly."
     fi
