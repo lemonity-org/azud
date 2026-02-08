@@ -6,14 +6,11 @@
 
 **Deploy web apps anywhere with zero downtime**
 
-Azud is a modern deployment tool for containerized web applications. It deploys Podman-based applications to any server with zero-downtime deployments, combining the simplicity of Dokku with the multi-server capabilities of Kamal—while addressing the pain points of both.
+Azud is a modern deployment tool for containerized web applications. It deploys Podman-based applications to any server with zero-downtime deployments, combining simplicity with multi-server capabilities.
 
 ## Why Azud?
 
-Existing deployment tools have fundamental design issues:
-
-- **Kamal** locks you into kamal-proxy with limited features, has verbose output, complex environment management, and no built-in SSL
-- **Dokku** is single-host only, has downtime during upgrades, relies heavily on plugins, and has a fragile app state
+Existing deployment tools have fundamental design issues—limited proxy options, single-host constraints, downtime during upgrades, complex environment management, and no built-in SSL.
 
 Azud solves these with:
 
@@ -45,8 +42,6 @@ Azud solves these with:
 - `docs/PRODUCTION_CHECKLIST.md` - Production readiness checklist
 - `docs/TROUBLESHOOTING.md` - Common failures and fixes
 - `docs/CHEATSHEET.md` - Command quick reference
-- `docs/MIGRATION_KAMAL2.md` - Move from Kamal 2 to Azud
-- `docs/MIGRATION_DOKKU.md` - Move from Dokku to Azud
 - `docs/SECURITY.md` - Security and secrets guidance
 - `docs/CLI_REFERENCE.md` - Full CLI and config reference
 - `docs/ADVANCED_USAGE.md` - Recipes and advanced configs
