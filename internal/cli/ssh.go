@@ -13,7 +13,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 var sshCmd = &cobra.Command{

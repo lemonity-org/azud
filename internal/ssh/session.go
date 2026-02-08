@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/shell"
 	"golang.org/x/crypto/ssh"
 )
 

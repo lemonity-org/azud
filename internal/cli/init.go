@@ -135,7 +135,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 func getConfigTemplate() string {
 	return `# Azud Deployment Configuration
-# Documentation: https://github.com/adriancarayol/azud
+# Documentation: https://github.com/lemonity-org/azud
 
 # Service name (used as container name prefix)
 service: my-app
@@ -574,7 +574,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Azud
-        uses: adriancarayol/azud@v1
+        uses: lemonity-org/azud@v1
         with:
           ssh-key: ${{ secrets.AZUD_SSH_KEY }}
           known-hosts: ${{ secrets.KNOWN_HOSTS }}
@@ -608,7 +608,7 @@ jobs:
   #   steps:
   #     - uses: actions/checkout@v6
   #     - name: Setup Azud
-  #       uses: adriancarayol/azud@v1
+  #       uses: lemonity-org/azud@v1
   #       with:
   #         ssh-key: ${{ secrets.AZUD_SSH_KEY }}
   #         known-hosts: ${{ secrets.KNOWN_HOSTS }}

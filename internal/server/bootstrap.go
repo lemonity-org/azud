@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/adriancarayol/azud/internal/output"
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // Bootstrapper installs Podman and configures remote servers for deployment.

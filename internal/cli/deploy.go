@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/deploy"
-	"github.com/adriancarayol/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 var deployCmd = &cobra.Command{

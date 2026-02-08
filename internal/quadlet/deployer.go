@@ -3,9 +3,9 @@ package quadlet
 import (
 	"fmt"
 
-	"github.com/adriancarayol/azud/internal/output"
-	"github.com/adriancarayol/azud/internal/shell"
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // QuadletDeployer writes systemd quadlet unit files to remote hosts and

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/adriancarayol/azud/internal/shell"
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 func enableLinger(sshClient *ssh.Client, host, user string) error {

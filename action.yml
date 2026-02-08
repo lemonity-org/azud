@@ -1,6 +1,6 @@
 name: "Setup Azud"
 description: "Install Azud and optionally configure SSH and container registry credentials"
-author: "adriancarayol"
+author: "lemonity-org"
 
 branding:
   icon: "upload-cloud"

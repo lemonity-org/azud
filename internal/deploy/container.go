@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/podman"
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/podman"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // shellMetacharacters is the set of characters that indicate a command

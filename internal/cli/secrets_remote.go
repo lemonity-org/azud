@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/deploy"
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 func ensureRemoteSecretsFile(sshClient *ssh.Client, hosts []string, requiredKeys []string) error {

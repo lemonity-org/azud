@@ -11,9 +11,9 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 go build \
-    -ldflags "-X github.com/adriancarayol/azud/pkg/version.Version=${VERSION} \
-              -X github.com/adriancarayol/azud/pkg/version.Commit=${COMMIT} \
-              -X github.com/adriancarayol/azud/pkg/version.BuildDate=${BUILD_DATE}" \
+    -ldflags "-X github.com/lemonity-org/azud/pkg/version.Version=${VERSION} \
+              -X github.com/lemonity-org/azud/pkg/version.Commit=${COMMIT} \
+              -X github.com/lemonity-org/azud/pkg/version.BuildDate=${BUILD_DATE}" \
     -o /azud ./cmd/azud
 
 # Stage 2: Minimal runtime image

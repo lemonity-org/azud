@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/adriancarayol/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/config"
 )
 
 const (

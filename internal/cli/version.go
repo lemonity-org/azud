@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/pkg/version"
+	"github.com/lemonity-org/azud/pkg/version"
 )
 
 var versionCmd = &cobra.Command{

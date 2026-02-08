@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/adriancarayol/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/config"
 )
 
 // TempConfig creates a temporary config file and returns its path

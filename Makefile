@@ -21,9 +21,9 @@ BUILD_DIR = bin
 CMD_DIR = cmd
 
 # LDFLAGS for version injection
-LDFLAGS = -ldflags "-X github.com/adriancarayol/azud/pkg/version.Version=$(VERSION) \
-	-X github.com/adriancarayol/azud/pkg/version.Commit=$(COMMIT) \
-	-X github.com/adriancarayol/azud/pkg/version.BuildDate=$(BUILD_DATE)"
+LDFLAGS = -ldflags "-X github.com/lemonity-org/azud/pkg/version.Version=$(VERSION) \
+	-X github.com/lemonity-org/azud/pkg/version.Commit=$(COMMIT) \
+	-X github.com/lemonity-org/azud/pkg/version.BuildDate=$(BUILD_DATE)"
 
 # Platforms for cross-compilation
 PLATFORMS = darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64

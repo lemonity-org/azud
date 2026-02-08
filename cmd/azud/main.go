@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/adriancarayol/azud/internal/cli"
+	"github.com/lemonity-org/azud/internal/cli"
 )
 
 func main() {

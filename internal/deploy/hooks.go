@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 // HookContext provides deployment context to hook scripts via AZUD_* environment variables.

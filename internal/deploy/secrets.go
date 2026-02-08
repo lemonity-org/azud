@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/adriancarayol/azud/internal/shell"
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // ValidateRemoteSecrets ensures the remote secrets file exists and includes all required keys.

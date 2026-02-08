@@ -57,7 +57,7 @@ Azud solves these with:
 ## Installation
 
 ```bash
-go install github.com/adriancarayol/azud@latest
+go install github.com/lemonity-org/azud@latest
 ```
 
 ## Prerequisites

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/adriancarayol/azud/internal/shell"
-	"github.com/adriancarayol/azud/internal/state"
+	"github.com/lemonity-org/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/state"
 )
 
 // PodmanAuthLockFileName is the name of the lock file used to serialize

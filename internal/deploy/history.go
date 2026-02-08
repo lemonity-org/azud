@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 // DeploymentStatus represents the status of a deployment

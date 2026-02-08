@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Setup Azud
-        uses: adriancarayol/azud@v1
+        uses: lemonity-org/azud@v1
         with:
           ssh-key: ${{ secrets.AZUD_SSH_KEY }}
           known-hosts: ${{ secrets.KNOWN_HOSTS }}
@@ -94,7 +94,7 @@ If you prefer not to use the composite action, you can install Azud directly:
 ```yaml
 - name: Install Azud
   run: |
-    curl -fsSL https://raw.githubusercontent.com/adriancarayol/azud/main/scripts/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/main/scripts/install.sh | sh
     echo "$HOME/.azud/bin" >> $GITHUB_PATH
 
 - name: Setup SSH
@@ -109,11 +109,11 @@ If you prefer not to use the composite action, you can install Azud directly:
 
 ## Docker Image
 
-Azud publishes a Docker image to `ghcr.io/adriancarayol/azud` with every release. This is useful for container-based CI systems like GitLab CI.
+Azud publishes a Docker image to `ghcr.io/lemonity-org/azud` with every release. This is useful for container-based CI systems like GitLab CI.
 
 ```
-ghcr.io/adriancarayol/azud:latest
-ghcr.io/adriancarayol/azud:v1.0.0
+ghcr.io/lemonity-org/azud:latest
+ghcr.io/lemonity-org/azud:v1.0.0
 ```
 
 ## GitLab CI
@@ -124,7 +124,7 @@ stages:
 
 deploy:
   stage: deploy
-  image: ghcr.io/adriancarayol/azud:latest
+  image: ghcr.io/lemonity-org/azud:latest
   only:
     - main
   variables:

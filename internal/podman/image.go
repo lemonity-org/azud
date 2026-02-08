@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/shell"
 )
 
 type Image struct {

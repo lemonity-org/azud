@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 func TestSetupIntegration(t *testing.T) {

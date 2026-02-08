@@ -2,7 +2,7 @@
 # Azud installer — downloads a pre-built binary from GitHub Releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/adriancarayol/azud/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/main/scripts/install.sh | sh
 #
 # Environment variables:
 #   AZUD_VERSION      Version to install (default: latest)
@@ -10,7 +10,7 @@
 
 set -eu
 
-REPO="adriancarayol/azud"
+REPO="lemonity-org/azud"
 INSTALL_DIR="${AZUD_INSTALL_DIR:-$HOME/.azud/bin}"
 VERSION="${AZUD_VERSION:-latest}"
 

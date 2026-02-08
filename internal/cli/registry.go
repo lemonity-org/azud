@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/output"
-	"github.com/adriancarayol/azud/internal/podman"
+	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/podman"
 )
 
 var registryCmd = &cobra.Command{

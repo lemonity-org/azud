@@ -72,7 +72,7 @@ jobs:
         id: docker-meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/adriancarayol/azud
+          images: ghcr.io/lemonity-org/azud
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ steps.meta.outputs.prerelease == 'false' }}

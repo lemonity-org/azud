@@ -1,4 +1,4 @@
-module github.com/adriancarayol/azud
+module github.com/lemonity-org/azud
 
 go 1.25.5
 

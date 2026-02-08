@@ -5,7 +5,7 @@ This guide takes you from zero to a first successful deploy.
 ## 1) Install the CLI
 
 ```bash
-go install github.com/adriancarayol/azud@latest
+go install github.com/lemonity-org/azud@latest
 ```
 
 ## 2) Initialize your project

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // CaddyClient manages Caddy proxy via its admin API

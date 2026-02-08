@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 var envCmd = &cobra.Command{

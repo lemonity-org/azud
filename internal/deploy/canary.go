@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adriancarayol/azud/internal/config"
-	"github.com/adriancarayol/azud/internal/output"
-	"github.com/adriancarayol/azud/internal/podman"
-	"github.com/adriancarayol/azud/internal/proxy"
-	"github.com/adriancarayol/azud/internal/ssh"
-	"github.com/adriancarayol/azud/internal/state"
+	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/podman"
+	"github.com/lemonity-org/azud/internal/proxy"
+	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/state"
 )
 
 // CanaryStatus represents the current state of a canary deployment

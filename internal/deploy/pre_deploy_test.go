@@ -3,7 +3,7 @@ package deploy
 import (
 	"testing"
 
-	"github.com/adriancarayol/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/config"
 )
 
 func TestNewPreDeployContainerConfig(t *testing.T) {
