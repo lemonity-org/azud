@@ -44,7 +44,7 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
 		registry:   podman.NewRegistryManagerWithUser(podmanClient, cfg.SSH.User),
-		proxy:      proxy.NewManagerWithUser(sshClient, log, cfg.SSH.User),
+		proxy:      proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams()),
 		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
@@ -338,7 +338,10 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 
 	// Register new container with proxy
 	d.log.Host(host, "Registering with proxy...")
-	newUpstream := fmt.Sprintf("%s:%d", newContainerName, d.cfg.Proxy.AppPort)
+	newUpstream, err := d.upstreamAddr(host, newContainerName)
+	if err != nil {
+		return err
+	}
 	proxyHost := d.cfg.Proxy.PrimaryHost()
 
 	if oldExists {
@@ -367,7 +370,11 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 
 	// If old container exists, drain and remove it
 	if oldExists {
-		oldUpstream := fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+		oldUpstream, oldUpstreamErr := d.upstreamAddr(host, oldContainerName)
+		if oldUpstreamErr != nil {
+			d.log.Debug("Failed to resolve old upstream: %v", oldUpstreamErr)
+			oldUpstream = fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+		}
 
 		// Remove old container from proxy so no new requests are routed to it.
 		// The old upstream is still tracked by Caddy until its in-flight
@@ -410,11 +417,22 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 		return nil
 	}
 
+	// In mixed rootless/rootful mode, upstreams are host loopback ports.
+	// Renaming a container does not change its published host port, so the
+	// upstream address stays the same and there is nothing to swap.
+	if d.cfg.UseHostPortUpstreams() {
+		return nil
+	}
+
 	// Swap the upstream from the temporary name to the final service name.
 	// Add the final upstream first, then remove the temporary one. This
 	// ensures there is always at least one healthy upstream in the route,
 	// eliminating the brief gap that a full route replacement would cause.
-	finalUpstream := fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+	finalUpstream, finalUpstreamErr := d.upstreamAddr(host, oldContainerName)
+	if finalUpstreamErr != nil {
+		d.log.Debug("Failed to resolve final upstream after rename: %v", finalUpstreamErr)
+		finalUpstream = fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+	}
 	if proxyHost != "" {
 		if err := d.proxy.AddUpstream(host, proxyHost, finalUpstream); err != nil {
 			// Fallback: if add fails, do a full route replacement
@@ -471,24 +489,36 @@ func (d *Deployer) registerWithProxy(host, upstream string) error {
 	proxyHost := d.cfg.Proxy.PrimaryHost()
 
 	serviceConfig := &proxy.ServiceConfig{
-		Name:            d.cfg.Service,
-		Host:            proxyHost,
-		Hosts:           hosts,
-		Upstreams:       []string{upstream},
-		HealthPath:      livenessPath,
-		HealthInterval:  d.cfg.Proxy.Healthcheck.Interval,
-		HealthTimeout:   d.cfg.Proxy.Healthcheck.Timeout,
+		Name:                  d.cfg.Service,
+		Host:                  proxyHost,
+		Hosts:                 hosts,
+		Upstreams:             []string{upstream},
+		HealthPath:            livenessPath,
+		HealthInterval:        d.cfg.Proxy.Healthcheck.Interval,
+		HealthTimeout:         d.cfg.Proxy.Healthcheck.Timeout,
 		ResponseTimeout:       d.cfg.Proxy.ResponseTimeout,
 		ResponseHeaderTimeout: d.cfg.Proxy.ResponseHeaderTimeout,
-		ForwardHeaders:  d.cfg.Proxy.ForwardHeaders,
-		BufferRequests:  d.cfg.Proxy.Buffering.Requests,
-		BufferResponses: d.cfg.Proxy.Buffering.Responses,
-		MaxRequestBody:  d.cfg.Proxy.Buffering.MaxRequestBody,
-		BufferMemory:    d.cfg.Proxy.Buffering.Memory,
-		HTTPS:           d.cfg.Proxy.SSL,
+		ForwardHeaders:        d.cfg.Proxy.ForwardHeaders,
+		BufferRequests:        d.cfg.Proxy.Buffering.Requests,
+		BufferResponses:       d.cfg.Proxy.Buffering.Responses,
+		MaxRequestBody:        d.cfg.Proxy.Buffering.MaxRequestBody,
+		BufferMemory:          d.cfg.Proxy.Buffering.Memory,
+		HTTPS:                 d.cfg.Proxy.SSL,
 	}
 
 	return d.proxy.RegisterService(host, serviceConfig)
+}
+
+func (d *Deployer) upstreamAddr(host, container string) (string, error) {
+	if !d.cfg.UseHostPortUpstreams() {
+		return fmt.Sprintf("%s:%d", container, d.cfg.Proxy.AppPort), nil
+	}
+
+	port, err := d.containers.HostPort(host, container, d.cfg.Proxy.AppPort)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve host port for %s on %s: %w", container, host, err)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port), nil
 }
 
 // verifyImageDigest checks that the pulled image has the same digest on all
@@ -616,7 +646,11 @@ func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVe
 		stopTimeout := d.cfg.Deploy.GetStopTimeout()
 
 		// Remove the newly deployed container from the proxy
-		upstream := fmt.Sprintf("%s:%d", serviceName, d.cfg.Proxy.AppPort)
+		upstream, upstreamErr := d.upstreamAddr(host, serviceName)
+		if upstreamErr != nil {
+			d.log.Debug("Rollback: failed to resolve upstream for %s on %s: %v", serviceName, host, upstreamErr)
+			upstream = fmt.Sprintf("%s:%d", serviceName, d.cfg.Proxy.AppPort)
+		}
 		if proxyHost != "" {
 			if err := d.proxy.RemoveUpstream(host, proxyHost, upstream); err != nil {
 				d.log.Warn("Rollback: failed to remove upstream on %s: %v", host, err)

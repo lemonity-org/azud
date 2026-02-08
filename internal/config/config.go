@@ -231,6 +231,9 @@ type ProxyConfig struct {
 	// HTTPS port for proxy (default 443)
 	HTTPSPort int `yaml:"https_port"`
 
+	// Run proxy container with rootful Podman (uses sudo when ssh.user is non-root)
+	Rootful bool `yaml:"rootful"`
+
 	// Health check configuration
 	Healthcheck HealthcheckConfig `yaml:"healthcheck"`
 
@@ -248,6 +251,35 @@ type ProxyConfig struct {
 
 	// Logging configuration
 	Logging LoggingConfig `yaml:"logging"`
+}
+
+const (
+	// DefaultHTTPPort is the default host HTTP port for the proxy.
+	DefaultHTTPPort = 80
+	// DefaultHTTPSPort is the default host HTTPS port for the proxy.
+	DefaultHTTPSPort = 443
+)
+
+// EffectiveHTTPPort returns the configured HTTP port, falling back to default.
+func (p ProxyConfig) EffectiveHTTPPort() int {
+	if p.HTTPPort > 0 {
+		return p.HTTPPort
+	}
+	return DefaultHTTPPort
+}
+
+// EffectiveHTTPSPort returns the configured HTTPS port, falling back to default.
+func (p ProxyConfig) EffectiveHTTPSPort() int {
+	if p.HTTPSPort > 0 {
+		return p.HTTPSPort
+	}
+	return DefaultHTTPSPort
+}
+
+// UseHostPortUpstreams reports whether app containers should be registered in
+// Caddy using host loopback ports instead of Podman network DNS names.
+func (c *Config) UseHostPortUpstreams() bool {
+	return c != nil && c.Podman.Rootless && c.Proxy.Rootful
 }
 
 // PrimaryHost returns the first configured proxy host.

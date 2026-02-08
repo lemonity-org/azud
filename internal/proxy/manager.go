@@ -52,15 +52,22 @@ type Manager struct {
 	podman      *podman.ContainerManager
 	log         *output.Logger
 	user        string // SSH user for state directory paths
+	rootful     bool
+	hostPorts   bool
 }
 
 // NewManager creates a new proxy manager. Defaults to root user for state paths.
 func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
-	return NewManagerWithUser(sshClient, log, "root")
+	return NewManagerWithOptions(sshClient, log, "root", false, false)
 }
 
 // NewManagerWithUser creates a new proxy manager with a specific SSH user.
 func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) *Manager {
+	return NewManagerWithOptions(sshClient, log, user, false, false)
+}
+
+// NewManagerWithOptions creates a proxy manager with explicit runtime options.
+func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user string, rootful bool, hostPortUpstreams bool) *Manager {
 	if log == nil {
 		log = output.DefaultLogger
 	}
@@ -68,7 +75,11 @@ func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) 
 		user = "root"
 	}
 
-	podmanClient := podman.NewClient(sshClient)
+	podmanCmd := "podman"
+	if rootful && user != "root" {
+		podmanCmd = "sudo -n podman"
+	}
+	podmanClient := podman.NewClientWithCommand(sshClient, podmanCmd)
 
 	return &Manager{
 		sshClient:   sshClient,
@@ -76,6 +87,8 @@ func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) 
 		podman:      podman.NewContainerManager(podmanClient),
 		log:         log,
 		user:        user,
+		rootful:     rootful,
+		hostPorts:   hostPortUpstreams,
 	}
 }
 
@@ -83,6 +96,60 @@ func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) 
 // then releases. This serializes mutating Caddy admin API operations.
 func (m *Manager) withCaddyLock(host string, fn func() error) error {
 	return m.sshClient.WithRemoteLock(host, CaddyLockFile(m.user), CaddyLockTimeout, fn)
+}
+
+func (m *Manager) ensureRootfulAccess(host string) error {
+	if !m.rootful || m.user == "root" {
+		return nil
+	}
+
+	// Verify the exact command family we need for rootful proxy operations.
+	// This avoids requiring broad sudo privileges such as `sudo -n true`.
+	result, err := m.sshClient.Execute(host, "sudo -n podman version --format '{{.Client.Version}}'")
+	if err != nil {
+		return fmt.Errorf("proxy.rootful requires passwordless sudo for podman: %w", err)
+	}
+	if result.ExitCode != 0 {
+		msg := strings.TrimSpace(result.Stderr)
+		if msg == "" {
+			msg = strings.TrimSpace(result.Stdout)
+		}
+		if msg == "" {
+			msg = "sudo -n podman version failed"
+		}
+		return fmt.Errorf("proxy.rootful requires passwordless sudo for podman on %s: %s", host, msg)
+	}
+	return nil
+}
+
+func (m *Manager) containerUsesHostNetwork(host, container string) (bool, error) {
+	raw, err := m.podman.Inspect(host, container)
+	if err != nil {
+		return false, err
+	}
+
+	var payload []struct {
+		HostConfig struct {
+			NetworkMode string `json:"NetworkMode"`
+		} `json:"HostConfig"`
+		NetworkSettings struct {
+			Networks map[string]json.RawMessage `json:"Networks"`
+		} `json:"NetworkSettings"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return false, err
+	}
+	if len(payload) == 0 {
+		return false, fmt.Errorf("empty inspect result")
+	}
+
+	if payload[0].HostConfig.NetworkMode == "host" {
+		return true, nil
+	}
+	if _, ok := payload[0].NetworkSettings.Networks["host"]; ok {
+		return true, nil
+	}
+	return false, nil
 }
 
 // persistConfig fetches the current Caddy config from the admin API and
@@ -196,19 +263,42 @@ type ProxyConfig struct {
 // Boot starts the Caddy proxy on a host
 func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	m.log.Host(host, "Starting proxy...")
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
 
 	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy status: %w", err)
 	}
-	if running {
-		m.log.Host(host, "Proxy already running")
-		return nil
-	}
-
 	exists, err := m.podman.Exists(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy container: %w", err)
+	}
+
+	// Mixed mode requires host networking so Caddy can reach app host ports
+	// on 127.0.0.1. Recreate existing proxy containers that use bridge mode.
+	if m.hostPorts && exists {
+		hostNet, inspectErr := m.containerUsesHostNetwork(host, CaddyContainerName)
+		if inspectErr != nil {
+			m.log.Debug("Failed to inspect proxy network mode on %s: %v", host, inspectErr)
+		}
+		if !hostNet {
+			m.log.Host(host, "Recreating proxy container for mixed rootful/rootless mode...")
+			if running {
+				_ = m.podman.Stop(host, CaddyContainerName, 30)
+			}
+			if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
+				return fmt.Errorf("failed to recreate proxy container: %w", err)
+			}
+			running = false
+			exists = false
+		}
+	}
+
+	if running {
+		m.log.Host(host, "Proxy already running")
+		return nil
 	}
 
 	if exists {
@@ -240,16 +330,10 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		Image:   CaddyImage,
 		Detach:  true,
 		Restart: "unless-stopped",
-		Ports: []string{
-			fmt.Sprintf("%d:%d", httpPort, 80),
-			fmt.Sprintf("%d:%d", httpsPort, 443),
-			fmt.Sprintf("127.0.0.1:%d:%d", CaddyAdminPort, CaddyAdminPort),
-		},
 		Volumes: []string{
 			"caddy_data:/data",
 			"caddy_config:/config",
 		},
-		Network: "azud",
 		Labels: map[string]string{
 			"azud.managed": "true",
 			"azud.type":    "proxy",
@@ -258,6 +342,16 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		Env: map[string]string{
 			"CADDY_ADMIN": "127.0.0.1:2019",
 		},
+	}
+	if m.hostPorts {
+		containerConfig.Network = "host"
+	} else {
+		containerConfig.Network = "azud"
+		containerConfig.Ports = []string{
+			fmt.Sprintf("%d:%d", httpPort, 80),
+			fmt.Sprintf("%d:%d", httpsPort, 443),
+			fmt.Sprintf("127.0.0.1:%d:%d", CaddyAdminPort, CaddyAdminPort),
+		}
 	}
 
 	_, err = m.podman.Run(host, containerConfig)
@@ -268,12 +362,14 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	// Wait for Caddy to be ready
 	time.Sleep(2 * time.Second)
 
-	// Load initial configuration under the Caddy lock
+	// Load configuration under the Caddy lock.
 	if err := m.withCaddyLock(host, func() error {
-		if err := m.loadInitialConfig(host, config); err != nil {
-			return err
+		if err := m.restoreConfig(host); err != nil {
+			if initErr := m.loadInitialConfig(host, config); initErr != nil {
+				return initErr
+			}
+			m.persistConfigWithWarning(host)
 		}
-		m.persistConfigWithWarning(host)
 		return nil
 	}); err != nil {
 		m.log.Warn("Failed to load initial config: %v", err)
@@ -392,6 +488,9 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 // Stop stops the Caddy proxy on a host
 func (m *Manager) Stop(host string) error {
 	m.log.Host(host, "Stopping proxy...")
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
 
 	if err := m.podman.Stop(host, CaddyContainerName, 30); err != nil {
 		return fmt.Errorf("failed to stop proxy: %w", err)
@@ -404,6 +503,9 @@ func (m *Manager) Stop(host string) error {
 // Reboot restarts the Caddy proxy
 func (m *Manager) Reboot(host string) error {
 	m.log.Host(host, "Rebooting proxy...")
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
 
 	if err := m.podman.Restart(host, CaddyContainerName, 30); err != nil {
 		return fmt.Errorf("failed to restart proxy: %w", err)
@@ -424,6 +526,9 @@ func (m *Manager) Reboot(host string) error {
 // Remove removes the Caddy proxy container
 func (m *Manager) Remove(host string) error {
 	m.log.Host(host, "Removing proxy...")
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
 
 	if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
 		return fmt.Errorf("failed to remove proxy: %w", err)
@@ -442,6 +547,9 @@ func (m *Manager) Remove(host string) error {
 // Status returns the proxy status on a host
 func (m *Manager) Status(host string) (*ProxyStatus, error) {
 	status := &ProxyStatus{Host: host}
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return nil, err
+	}
 
 	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
@@ -477,6 +585,9 @@ type ProxyStatus struct {
 
 // Logs retrieves proxy logs
 func (m *Manager) Logs(host string, follow bool, tail string) (*ssh.Result, error) {
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return nil, err
+	}
 	logsConfig := &podman.LogsConfig{
 		Container: CaddyContainerName,
 		Follow:    follow,

@@ -15,20 +15,29 @@ type QuadletDeployer struct {
 	log  *output.Logger
 	path string // e.g., /etc/containers/systemd/
 	user bool
+	sudo bool
 }
 
 func NewQuadletDeployer(sshClient *ssh.Client, log *output.Logger, path string, userMode bool) *QuadletDeployer {
+	return NewQuadletDeployerWithOptions(sshClient, log, path, userMode, false)
+}
+
+func NewQuadletDeployerWithOptions(sshClient *ssh.Client, log *output.Logger, path string, userMode bool, useSudo bool) *QuadletDeployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}
 	if path == "" {
 		path = "/etc/containers/systemd/"
 	}
+	if userMode {
+		useSudo = false
+	}
 	return &QuadletDeployer{
 		ssh:  sshClient,
 		log:  log,
 		path: path,
 		user: userMode,
+		sudo: useSudo,
 	}
 }
 
@@ -37,9 +46,15 @@ func (q *QuadletDeployer) Deploy(host, filename, content string) error {
 	q.log.Host(host, "Deploying quadlet %s...", filename)
 
 	filePath := q.path + filename
-	// Use shell.Quote for paths to prevent command injection
-	cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'QUADLET_EOF'\n%sQUADLET_EOF",
-		shell.Quote(q.path), shell.Quote(filePath), content)
+	var cmd string
+	if q.sudo {
+		cmd = fmt.Sprintf("%smkdir -p %s && %stee %s >/dev/null << 'QUADLET_EOF'\n%sQUADLET_EOF",
+			q.sudoPrefix(), shell.Quote(q.path), q.sudoPrefix(), shell.Quote(filePath), content)
+	} else {
+		// Use shell.Quote for paths to prevent command injection.
+		cmd = fmt.Sprintf("mkdir -p %s && cat > %s << 'QUADLET_EOF'\n%sQUADLET_EOF",
+			shell.Quote(q.path), shell.Quote(filePath), content)
+	}
 
 	result, err := q.ssh.Execute(host, cmd)
 	if err != nil {
@@ -61,7 +76,7 @@ func (q *QuadletDeployer) Remove(host, filename string) error {
 	q.log.Host(host, "Removing quadlet %s...", filename)
 
 	filePath := q.path + filename
-	cmd := fmt.Sprintf("rm -f %s", shell.Quote(filePath))
+	cmd := fmt.Sprintf("%srm -f %s", q.sudoPrefix(), shell.Quote(filePath))
 
 	result, err := q.ssh.Execute(host, cmd)
 	if err != nil {
@@ -135,6 +150,8 @@ func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*s
 	cmd := fmt.Sprintf("journalctl -u %s --no-pager", shell.Quote(service))
 	if q.user {
 		cmd = "journalctl --user-unit " + shell.Quote(service) + " --no-pager"
+	} else if q.sudo {
+		cmd = q.sudoPrefix() + cmd
 	}
 	if follow {
 		cmd += " -f"
@@ -146,8 +163,19 @@ func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*s
 }
 
 func (q *QuadletDeployer) systemctlCmd(action string) string {
+	base := "systemctl"
 	if q.user {
-		return "systemctl --user " + action
+		base = "systemctl --user"
 	}
-	return "systemctl " + action
+	if q.sudo {
+		base = q.sudoPrefix() + base
+	}
+	return base + " " + action
+}
+
+func (q *QuadletDeployer) sudoPrefix() string {
+	if q.sudo {
+		return "sudo -n "
+	}
+	return ""
 }

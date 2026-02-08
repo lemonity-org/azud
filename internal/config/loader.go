@@ -388,6 +388,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("proxy", "https_port") || destNode == nil && dest.Proxy.HTTPSPort != 0 {
 		merged.Proxy.HTTPSPort = dest.Proxy.HTTPSPort
 	}
+	if has("proxy", "rootful") || destNode == nil && dest.Proxy.Rootful {
+		merged.Proxy.Rootful = dest.Proxy.Rootful
+	}
 	if has("proxy", "ssl") || destNode == nil && dest.Proxy.SSL {
 		merged.Proxy.SSL = dest.Proxy.SSL
 	}

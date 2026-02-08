@@ -57,6 +57,18 @@ Fixes:
 - Ensure ports 80/443 are open
 - Check proxy logs: `azud proxy logs -f`
 
+## Rootless proxy cannot bind 80/443
+
+Symptoms:
+- Proxy startup fails with port bind errors
+- Config validation fails for `proxy.http_port` / `proxy.https_port` with `podman.rootless: true`
+
+Fixes:
+- For rootless Podman, use unprivileged ports (for example `8080` / `8443`) and front with LB/NAT
+- Or set `proxy.rootful: true` to run the proxy with rootful Podman while keeping app containers rootless
+- In mixed mode (`podman.rootless: true` + `proxy.rootful: true`), keep proxy ports at `80/443`
+- If `ssh.user` is non-root and `proxy.rootful: true`, ensure passwordless `sudo` is available for Podman commands
+
 ## App serves old version
 
 Symptoms:

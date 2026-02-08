@@ -87,7 +87,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 	imageManager := podman.NewImageManager(podmanClient)
-	proxyManager := proxy.NewManager(sshClient, log)
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
 	log.Header("Scaling Application")
 
@@ -262,6 +262,9 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 				},
 				Env: make(map[string]string),
 			}
+			if cfg.UseHostPortUpstreams() {
+				containerConfig.Ports = append(containerConfig.Ports, fmt.Sprintf("127.0.0.1::%d", cfg.Proxy.AppPort))
+			}
 
 			// Add environment variables
 			for key, value := range cfg.Env.Clear {
@@ -325,7 +328,11 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 
 			// Register with proxy
 			if proxyHost != "" {
-				upstream := fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
+				upstream, upstreamErr := scaleUpstreamForContainer(cm, host, containerName)
+				if upstreamErr != nil {
+					log.Warn("Failed to resolve upstream for %s: %v", containerName, upstreamErr)
+					upstream = fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
+				}
 				if err := pm.AddUpstream(host, proxyHost, upstream); err != nil {
 					log.Warn("Failed to register %s with proxy: %v", containerName, err)
 				}
@@ -365,7 +372,11 @@ func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string
 
 			// Remove from proxy first
 			if proxyHost != "" {
-				upstream := fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
+				upstream, upstreamErr := scaleUpstreamForContainer(cm, host, containerName)
+				if upstreamErr != nil {
+					log.Debug("Failed to resolve upstream for %s: %v", containerName, upstreamErr)
+					upstream = fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
+				}
 				if err := pm.RemoveUpstream(host, proxyHost, upstream); err != nil {
 					log.Debug("Failed to remove %s from proxy: %v", containerName, err)
 				}
@@ -405,4 +416,15 @@ func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string
 	}
 
 	return nil
+}
+
+func scaleUpstreamForContainer(cm *podman.ContainerManager, host, container string) (string, error) {
+	if !cfg.UseHostPortUpstreams() {
+		return fmt.Sprintf("%s:%d", container, cfg.Proxy.AppPort), nil
+	}
+	port, err := cm.HostPort(host, container, cfg.Proxy.AppPort)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port), nil
 }

@@ -10,23 +10,55 @@ import (
 
 // Client executes Podman commands on remote hosts via SSH.
 type Client struct {
-	ssh *ssh.Client
+	ssh     *ssh.Client
+	command string
 }
 
 func NewClient(sshClient *ssh.Client) *Client {
+	return NewClientWithCommand(sshClient, "podman")
+}
+
+// NewClientWithCommand creates a Podman client with a custom command prefix.
+// Example: "sudo -n podman" for rootful operations via passwordless sudo.
+func NewClientWithCommand(sshClient *ssh.Client, command string) *Client {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "podman"
+	}
 	return &Client{
-		ssh: sshClient,
+		ssh:     sshClient,
+		command: command,
 	}
 }
 
 func (c *Client) Execute(host string, args ...string) (*ssh.Result, error) {
-	cmd := "podman " + strings.Join(shell.QuoteAll(args), " ")
+	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.Execute(host, cmd)
 }
 
 func (c *Client) ExecuteAll(hosts []string, args ...string) []*ssh.Result {
-	cmd := "podman " + strings.Join(shell.QuoteAll(args), " ")
+	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.ExecuteParallel(hosts, cmd)
+}
+
+// RewriteCommand rewrites shell commands generated with "podman" to use this
+// client's configured command prefix (e.g. "sudo -n podman").
+func (c *Client) RewriteCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" || c.command == "podman" {
+		return cmd
+	}
+	cmd = strings.ReplaceAll(cmd, " podman ", " "+c.command+" ")
+	cmd = strings.ReplaceAll(cmd, "; podman ", "; "+c.command+" ")
+	cmd = strings.ReplaceAll(cmd, "then podman ", "then "+c.command+" ")
+	cmd = strings.ReplaceAll(cmd, "else podman ", "else "+c.command+" ")
+	if strings.HasPrefix(cmd, "podman ") {
+		cmd = c.command + cmd[len("podman"):]
+	}
+	if cmd == "podman" {
+		cmd = c.command
+	}
+	return cmd
 }
 
 // deniedContainerOptions lists podman run flags that could escalate container

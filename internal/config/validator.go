@@ -488,6 +488,34 @@ func Validate(cfg *Config) error {
 			Message: "rootless Podman required (set podman.rootless: true)",
 		})
 	}
+	if cfg.Podman.Rootless && !cfg.Proxy.Rootful {
+		if cfg.Proxy.EffectiveHTTPPort() < 1024 {
+			errs = append(errs, ValidationError{
+				Field:   "proxy.http_port",
+				Message: "rootless Podman cannot bind privileged HTTP ports (<1024); use http_port >= 1024, enable proxy.rootful, or disable podman.rootless",
+			})
+		}
+		if cfg.Proxy.EffectiveHTTPSPort() < 1024 {
+			errs = append(errs, ValidationError{
+				Field:   "proxy.https_port",
+				Message: "rootless Podman cannot bind privileged HTTPS ports (<1024); use https_port >= 1024, enable proxy.rootful, or disable podman.rootless",
+			})
+		}
+	}
+	if cfg.UseHostPortUpstreams() {
+		if cfg.Proxy.EffectiveHTTPPort() != DefaultHTTPPort {
+			errs = append(errs, ValidationError{
+				Field:   "proxy.http_port",
+				Message: "proxy.rootful with podman.rootless currently requires http_port=80",
+			})
+		}
+		if cfg.Proxy.EffectiveHTTPSPort() != DefaultHTTPSPort {
+			errs = append(errs, ValidationError{
+				Field:   "proxy.https_port",
+				Message: "proxy.rootful with podman.rootless currently requires https_port=443",
+			})
+		}
+	}
 
 	// Validate healthcheck helper settings
 	if cfg.Proxy.Healthcheck.HelperPull != "" {
@@ -623,11 +651,11 @@ func isValidCronSchedule(schedule string) bool {
 		min, max int
 	}
 	ranges := []fieldRange{
-		{0, 59},  // minute
-		{0, 23},  // hour
-		{1, 31},  // day of month
-		{1, 12},  // month
-		{0, 7},   // day of week (0 and 7 are both Sunday)
+		{0, 59}, // minute
+		{0, 23}, // hour
+		{1, 31}, // day of month
+		{1, 12}, // month
+		{0, 7},  // day of week (0 and 7 are both Sunday)
 	}
 
 	for i, field := range fields {

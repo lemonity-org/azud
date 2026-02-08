@@ -2,6 +2,8 @@ package podman
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,7 @@ func (m *ContainerManager) Run(host string, config *ContainerConfig) (string, er
 		return "", err
 	}
 	cmd := config.BuildRunCommand()
+	cmd = m.client.RewriteCommand(cmd)
 	result, err := m.client.ssh.Execute(host, cmd)
 	if err != nil {
 		return "", err
@@ -136,11 +139,13 @@ func (m *ContainerManager) Kill(host, container, signal string) error {
 
 func (m *ContainerManager) Exec(host string, config *ExecConfig) (*ssh.Result, error) {
 	cmd := config.BuildExecCommand()
+	cmd = m.client.RewriteCommand(cmd)
 	return m.client.ssh.Execute(host, cmd)
 }
 
 func (m *ContainerManager) Logs(host string, config *LogsConfig) (*ssh.Result, error) {
 	cmd := config.BuildLogsCommand()
+	cmd = m.client.RewriteCommand(cmd)
 	return m.client.ssh.Execute(host, cmd)
 }
 
@@ -324,6 +329,51 @@ func (m *ContainerManager) Stats(host, container string) (string, error) {
 	}
 
 	return strings.Trim(result.Stdout, "'\n"), nil
+}
+
+// HostPort resolves the published host port for containerPort/tcp.
+func (m *ContainerManager) HostPort(host, container string, containerPort int) (int, error) {
+	if containerPort <= 0 {
+		return 0, fmt.Errorf("invalid container port: %d", containerPort)
+	}
+	portSpec := fmt.Sprintf("%d/tcp", containerPort)
+	result, err := m.client.Execute(host, "port", container, portSpec)
+	if err != nil {
+		return 0, err
+	}
+	if result.ExitCode != 0 {
+		return 0, fmt.Errorf("failed to inspect container port: %s", result.Stderr)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		_, port, parseErr := parseHostPort(line)
+		if parseErr == nil {
+			return port, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no published host port found for %s", portSpec)
+}
+
+func parseHostPort(value string) (string, int, error) {
+	host, portStr, err := net.SplitHostPort(value)
+	if err != nil {
+		sep := strings.LastIndex(value, ":")
+		if sep < 0 || sep == len(value)-1 {
+			return "", 0, err
+		}
+		host = value[:sep]
+		portStr = value[sep+1:]
+	}
+	port, convErr := strconv.Atoi(portStr)
+	if convErr != nil {
+		return "", 0, convErr
+	}
+	return host, port, nil
 }
 
 func (m *ContainerManager) ConnectNetwork(host, container, network string) error {

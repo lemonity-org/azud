@@ -421,6 +421,87 @@ func TestValidate_PodmanConfig(t *testing.T) {
 	}
 }
 
+func TestValidate_RootlessProxyPortRules(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Service: "test",
+			Image:   "test:latest",
+			Servers: map[string]RoleConfig{
+				"web": {Hosts: []string{"localhost"}},
+			},
+			Proxy: ProxyConfig{
+				Host: "test.example.com",
+			},
+			SSH: SSHConfig{Port: 22},
+		}
+	}
+
+	t.Run("rootless with default privileged ports is invalid", func(t *testing.T) {
+		cfg := base()
+		cfg.Podman.Rootless = true
+
+		err := Validate(cfg)
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "proxy.http_port") {
+			t.Fatalf("expected proxy.http_port error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "proxy.https_port") {
+			t.Fatalf("expected proxy.https_port error, got %v", err)
+		}
+	})
+
+	t.Run("rootless with unprivileged ports is valid", func(t *testing.T) {
+		cfg := base()
+		cfg.Podman.Rootless = true
+		cfg.Proxy.HTTPPort = 8080
+		cfg.Proxy.HTTPSPort = 8443
+
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("expected no validation error, got %v", err)
+		}
+	})
+
+	t.Run("rootless with rootful proxy allows privileged ports", func(t *testing.T) {
+		cfg := base()
+		cfg.Podman.Rootless = true
+		cfg.Proxy.Rootful = true
+
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("expected no validation error, got %v", err)
+		}
+	})
+
+	t.Run("rootless with rootful proxy rejects custom proxy ports", func(t *testing.T) {
+		cfg := base()
+		cfg.Podman.Rootless = true
+		cfg.Proxy.Rootful = true
+		cfg.Proxy.HTTPPort = 8080
+		cfg.Proxy.HTTPSPort = 8443
+
+		err := Validate(cfg)
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "proxy.http_port") {
+			t.Fatalf("expected proxy.http_port error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "proxy.https_port") {
+			t.Fatalf("expected proxy.https_port error, got %v", err)
+		}
+	})
+
+	t.Run("rootful with default ports is valid", func(t *testing.T) {
+		cfg := base()
+		cfg.Podman.Rootless = false
+
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("expected no validation error, got %v", err)
+		}
+	})
+}
+
 func TestValidate_TrustedFingerprintsIncludeAllSSHHosts(t *testing.T) {
 	cfg := &Config{
 		Service: "test",
@@ -655,15 +736,15 @@ func TestIsValidCronSchedule(t *testing.T) {
 		// Invalid
 		{"", false},
 		{"bad", false},
-		{"0 * *", false},               // too few fields
-		{"0 * * * * *", false},          // too many fields
-		{"60 * * * *", false},           // minute out of range
-		{"0 24 * * *", false},           // hour out of range
-		{"0 0 0 * *", false},            // day-of-month out of range
-		{"0 0 * 13 *", false},           // month out of range
-		{"0 0 * * 8", false},            // day-of-week out of range
-		{"0 0 * * abc", false},          // non-numeric
-		{"0 0 5-3 * *", false},          // reversed range
+		{"0 * *", false},       // too few fields
+		{"0 * * * * *", false}, // too many fields
+		{"60 * * * *", false},  // minute out of range
+		{"0 24 * * *", false},  // hour out of range
+		{"0 0 0 * *", false},   // day-of-month out of range
+		{"0 0 * 13 *", false},  // month out of range
+		{"0 0 * * 8", false},   // day-of-week out of range
+		{"0 0 * * abc", false}, // non-numeric
+		{"0 0 5-3 * *", false}, // reversed range
 	}
 
 	for _, tt := range tests {
@@ -849,8 +930,8 @@ func TestIsValidBuilderSecret(t *testing.T) {
 
 		{"", false},
 		{"bad secret name!", false},
-		{"id=mysecret", false},          // missing src or env
-		{"src=/path", false},            // missing id
+		{"id=mysecret", false}, // missing src or env
+		{"src=/path", false},   // missing id
 	}
 
 	for _, tt := range tests {

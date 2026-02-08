@@ -18,6 +18,9 @@ Practical security recommendations for Azud deployments.
 ## Rootless Containers
 
 Podman supports rootless mode. Use it where possible for a smaller blast radius.
+Rootless mode cannot bind privileged proxy ports (`80`/`443`) directly. Use
+unprivileged ports behind a load balancer/NAT, or set `proxy.rootful: true`
+to run only the proxy as rootful Podman.
 
 You can enforce security policies in `config/deploy.yml`:
 
