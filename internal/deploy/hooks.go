@@ -2,13 +2,11 @@ package deploy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/lemonity-org/azud/internal/output"
@@ -125,13 +123,13 @@ func (h *HookRunner) resolveHook(name string) (string, error) {
 	// O_NOFOLLOW prevents following symlinks on the final path component.
 	// If the file was swapped for a symlink after insideHooksDir, this fails
 	// with ELOOP instead of silently following the link.
-	f, err := os.OpenFile(hookPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(hookPath, os.O_RDONLY|oNofollow, 0)
 	if os.IsNotExist(err) {
 		h.log.Debug("Hook %s not found, skipping", name)
 		return "", nil
 	}
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
+		if isSymlinkError(err) {
 			h.log.Warn("Hook %s is a symlink, skipping", name)
 			return "", nil
 		}
@@ -258,7 +256,7 @@ func (h *HookRunner) Exists(name string) bool {
 		return false
 	}
 	hookPath := filepath.Join(h.hooksPath, name)
-	f, err := os.OpenFile(hookPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(hookPath, os.O_RDONLY|oNofollow, 0)
 	if err != nil {
 		return false
 	}
