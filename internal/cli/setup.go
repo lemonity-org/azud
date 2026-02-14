@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -251,6 +252,12 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 			continue
 		}
 
+		// Upload files and add as volume mounts
+		if err := uploadAccessoryFiles(sshClient, host, name, &accessory, log); err != nil {
+			log.HostError(host, "Failed to provision files for %s: %v", name, err)
+			continue
+		}
+
 		// Build container config
 		containerConfig := &podman.ContainerConfig{
 			Name:    containerName,
@@ -305,5 +312,30 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		log.HostSuccess(host, "Accessory %s deployed", name)
 	}
 
+	return nil
+}
+
+func uploadAccessoryFiles(sshClient *ssh.Client, host, name string, accessory *config.AccessoryConfig, log *output.Logger) error {
+	for _, f := range accessory.Files {
+		dir := filepath.Dir(f.Remote)
+		if _, err := sshClient.Execute(host, fmt.Sprintf("mkdir -p %s", dir)); err != nil {
+			return fmt.Errorf("creating directory %s: %w", dir, err)
+		}
+		if err := sshClient.Upload(host, f.Local, f.Remote); err != nil {
+			return fmt.Errorf("uploading %s to %s: %w", f.Local, f.Remote, err)
+		}
+		if f.Mode != "" {
+			if _, err := sshClient.Execute(host, fmt.Sprintf("chmod %s %s", f.Mode, f.Remote)); err != nil {
+				log.Warn("Failed to set mode %s on %s: %v", f.Mode, f.Remote, err)
+			}
+		}
+		if f.Owner != "" {
+			if _, err := sshClient.Execute(host, fmt.Sprintf("chown %s %s", f.Owner, f.Remote)); err != nil {
+				log.Warn("Failed to set owner %s on %s: %v", f.Owner, f.Remote, err)
+			}
+		}
+		accessory.Volumes = append(accessory.Volumes, fmt.Sprintf("%s:%s:ro", f.Remote, f.Remote))
+		log.HostSuccess(host, "Uploaded %s for %s", f.Remote, name)
+	}
 	return nil
 }
