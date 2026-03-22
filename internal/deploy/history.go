@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lemonity-org/azud/internal/output"
@@ -75,6 +76,8 @@ type HistoryStore struct {
 	mu         sync.RWMutex
 	log        *output.Logger
 }
+
+var deploymentIDCounter uint64
 
 // NewHistoryStore creates a new history store
 func NewHistoryStore(basePath string, retainCount int, log *output.Logger) *HistoryStore {
@@ -260,7 +263,8 @@ func (h *HistoryStore) cleanup(service string) {
 
 // GenerateID creates a unique deployment ID
 func GenerateDeploymentID() string {
-	return fmt.Sprintf("deploy_%d", time.Now().UnixNano())
+	count := atomic.AddUint64(&deploymentIDCounter, 1)
+	return fmt.Sprintf("deploy_%d_%d", time.Now().UnixNano(), count)
 }
 
 // NewDeploymentRecord creates a new deployment record with initial values

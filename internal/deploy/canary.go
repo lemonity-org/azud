@@ -65,6 +65,8 @@ func NewCanaryDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Lo
 	}
 
 	podmanClient := podman.NewClient(sshClient)
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyManager.SetProxyConfig(newProxyConfigFromCfg(cfg))
 
 	deployer := &CanaryDeployer{
 		cfg:        cfg,
@@ -72,7 +74,7 @@ func NewCanaryDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Lo
 		podman:     podmanClient,
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
-		proxy:      proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams()),
+		proxy:      proxyManager,
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
 		statePath:  statePath,
@@ -260,6 +262,11 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 
 		c.log.Host(host, "Registering canary with proxy (weight=%d%%, stable=%d%%)", initialWeight, stableWeight)
 
+		// Ensure the proxy container is running before admin API calls.
+		if err := c.proxy.Boot(host, newProxyConfigFromCfg(c.cfg)); err != nil {
+			c.log.Warn("Failed to boot proxy: %v", err)
+		}
+
 		// Update stable container weight first
 		stableUpstream, err := c.upstreamAddr(host, c.cfg.Service)
 		if err != nil {
@@ -365,6 +372,16 @@ func (c *CanaryDeployer) Promote() error {
 			c.log.Warn("Failed to rename container (proxy still points to canary name): %v", err)
 			c.log.HostSuccess(host, "Canary promoted (kept canary container name)")
 			continue
+		}
+
+		// Ensure the proxy container is running before admin API calls.
+		if err := c.proxy.Boot(host, newProxyConfigFromCfg(c.cfg)); err != nil {
+			c.log.Warn("Failed to boot proxy: %v", err)
+		}
+
+		// Ensure TLS/ACME config is applied before registering.
+		if err := c.proxy.EnsureConfig(host); err != nil {
+			c.log.Warn("Failed to ensure proxy config: %v", err)
 		}
 
 		// Atomically update proxy to point to the renamed container using

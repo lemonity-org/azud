@@ -242,6 +242,39 @@ func BuildImageRef(registry, repository, tag string) string {
 	return registry + "/" + repository + ":" + tag
 }
 
+// QualifyImage ensures an image reference is fully qualified with a registry
+// prefix so that Podman can pull it without unqualified-search registries.
+// Short names like "postgres:18" become "docker.io/library/postgres:18",
+// and "myuser/myimage:v1" becomes "docker.io/myuser/myimage:v1".
+// Already-qualified references (containing a dot or colon in the first
+// path component, e.g. "ghcr.io/org/img:tag") are returned unchanged.
+func QualifyImage(image string) string {
+	// Split off tag/digest so we only inspect the name part.
+	ref := image
+	suffix := ""
+	if idx := strings.LastIndex(ref, "@"); idx != -1 {
+		suffix = ref[idx:]
+		ref = ref[:idx]
+	} else if idx := strings.LastIndex(ref, ":"); idx != -1 && !strings.Contains(ref[idx:], "/") {
+		suffix = ref[idx:]
+		ref = ref[:idx]
+	}
+
+	parts := strings.SplitN(ref, "/", 2)
+	// If the first component contains a dot or colon it's already a registry.
+	if len(parts) == 2 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":")) {
+		return image // already qualified
+	}
+
+	// Bare name (e.g. "postgres") → docker.io/library/postgres
+	if len(parts) == 1 {
+		return "docker.io/library/" + ref + suffix
+	}
+
+	// user/image (e.g. "myuser/myimage") → docker.io/myuser/myimage
+	return "docker.io/" + ref + suffix
+}
+
 // ECRLogin handles AWS ECR login via the AWS CLI.
 func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 	// Validate inputs to prevent injection

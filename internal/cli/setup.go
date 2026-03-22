@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -227,7 +228,9 @@ func getRegistryPassword() string {
 func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
+	imageManager := podman.NewImageManager(podmanClient)
 
+	var errs []string
 	for name, accessory := range cfg.Accessories {
 		log.Info("Deploying accessory: %s", name)
 
@@ -240,6 +243,7 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		if len(accessory.Env.Secret) > 0 {
 			if err := ensureRemoteSecretsFile(sshClient, []string{host}, accessory.Env.Secret); err != nil {
 				log.HostError(host, "Missing secrets for accessory %s: %v", name, err)
+				errs = append(errs, fmt.Sprintf("%s: missing secrets: %v", name, err))
 				continue
 			}
 		}
@@ -255,6 +259,7 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		// Upload files and add as volume mounts
 		if err := uploadAccessoryFiles(sshClient, host, name, &accessory, log); err != nil {
 			log.HostError(host, "Failed to provision files for %s: %v", name, err)
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 
@@ -296,9 +301,9 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		}
 
 		// Pull image
-		imageManager := podman.NewImageManager(podmanClient)
 		if err := imageManager.Pull(host, accessory.Image); err != nil {
 			log.HostError(host, "Failed to pull image for %s: %v", name, err)
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 
@@ -306,10 +311,65 @@ func deployAccessories(sshClient *ssh.Client, log *output.Logger) error {
 		_, err := containerManager.Run(host, containerConfig)
 		if err != nil {
 			log.HostError(host, "Failed to start %s: %v", name, err)
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 
+		// Verify accessory is running and healthy
+		bootTimeout := accessory.GetBootTimeout()
+		if bootTimeout > 0 {
+			if err := verifyAccessoryHealth(containerManager, host, containerName, name, bootTimeout, log); err != nil {
+				log.HostError(host, "%v", err)
+				errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+				continue
+			}
+		}
+
 		log.HostSuccess(host, "Accessory %s deployed", name)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%d accessory(ies) failed: %s", len(errs), strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// verifyAccessoryHealth checks that an accessory container is running and healthy.
+// It first waits for a brief stabilization period to catch immediate crashes,
+// then checks for a Podman HEALTHCHECK and waits for it if present.
+func verifyAccessoryHealth(
+	containerManager *podman.ContainerManager,
+	host, containerName, accessoryName string,
+	timeout time.Duration,
+	log *output.Logger,
+) error {
+	// Phase 1: Stabilization check
+	stabilize := 5 * time.Second
+	if timeout < stabilize {
+		stabilize = timeout
+	}
+	log.Host(host, "Waiting for %s to stabilize...", accessoryName)
+	if err := containerManager.WaitRunning(host, containerName, stabilize); err != nil {
+		return fmt.Errorf("accessory %s failed to start: %w", accessoryName, err)
+	}
+
+	// Phase 2: HEALTHCHECK polling (if the image defines one)
+	hasHC, err := containerManager.HasHealthcheck(host, containerName)
+	if err != nil {
+		log.Warn("Could not determine healthcheck status for %s: %v", accessoryName, err)
+		return nil
+	}
+	if !hasHC {
+		return nil
+	}
+
+	remaining := timeout - stabilize
+	if remaining <= 0 {
+		remaining = 1 * time.Second
+	}
+	log.Host(host, "Waiting for %s healthcheck (timeout: %s)...", accessoryName, remaining)
+	if err := containerManager.WaitHealthy(host, containerName, remaining); err != nil {
+		return fmt.Errorf("accessory %s health check failed: %w", accessoryName, err)
 	}
 
 	return nil

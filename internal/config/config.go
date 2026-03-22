@@ -448,6 +448,23 @@ type AccessoryConfig struct {
 
 	// Roles that need access to this accessory
 	Roles []string `yaml:"roles"`
+
+	// Maximum time to wait for the accessory to become healthy after start.
+	// Defaults to 30s if nil. Set to 0s to skip health monitoring.
+	BootTimeout *time.Duration `yaml:"boot_timeout"`
+}
+
+// DefaultAccessoryBootTimeout is the default time to wait for an accessory
+// container to stabilize and pass health checks after starting.
+const DefaultAccessoryBootTimeout = 30 * time.Second
+
+// GetBootTimeout returns the configured boot timeout, or the default (30s)
+// if not set. An explicit 0s disables health monitoring.
+func (a *AccessoryConfig) GetBootTimeout() time.Duration {
+	if a.BootTimeout != nil {
+		return *a.BootTimeout
+	}
+	return DefaultAccessoryBootTimeout
 }
 
 // FileMapping represents a file to upload and mount
