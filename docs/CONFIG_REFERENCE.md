@@ -136,7 +136,10 @@ accessories:
         POSTGRES_DB: app_prod
       secret:
         - POSTGRES_PASSWORD
+    boot_timeout: 60s  # Max time to wait for healthy (default: 30s, 0s to skip)
 ```
+
+After starting each accessory, azud waits for it to stabilize (verifies it hasn't crashed) and, if the image defines a Podman HEALTHCHECK, waits for it to report healthy. The `boot_timeout` field controls the maximum wait time. Set to `0s` to skip health monitoring entirely.
 
 ## Cron Jobs
 

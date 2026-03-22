@@ -257,6 +257,43 @@ func (m *ContainerManager) WaitHealthy(host, container string, timeout time.Dura
 	return fmt.Errorf("timeout waiting for container to become healthy")
 }
 
+// HasHealthcheck checks whether the container has a Podman HEALTHCHECK defined.
+func (m *ContainerManager) HasHealthcheck(host, container string) (bool, error) {
+	result, err := m.client.Execute(host, "inspect", container, "--format", "{{len .Config.Healthcheck.Test}}")
+	if err != nil {
+		return false, err
+	}
+	if result.ExitCode != 0 {
+		return false, nil
+	}
+	count := strings.TrimSpace(result.Stdout)
+	return count != "" && count != "0", nil
+}
+
+// WaitRunning waits for a brief stabilization period and then verifies the
+// container is still running. This catches containers that crash immediately
+// on start (e.g., bad config, missing env vars).
+func (m *ContainerManager) WaitRunning(host, container string, stabilize time.Duration) error {
+	if stabilize <= 0 {
+		stabilize = 5 * time.Second
+	}
+	time.Sleep(stabilize)
+
+	running, err := m.IsRunning(host, container)
+	if err != nil {
+		return fmt.Errorf("failed to check container status: %w", err)
+	}
+	if !running {
+		result, inspectErr := m.client.Execute(host, "inspect", container, "--format", "{{.State.ExitCode}}")
+		exitCode := "unknown"
+		if inspectErr == nil && result.ExitCode == 0 {
+			exitCode = strings.TrimSpace(result.Stdout)
+		}
+		return fmt.Errorf("container exited shortly after start (exit code: %s)", exitCode)
+	}
+	return nil
+}
+
 func (m *ContainerManager) Rename(host, oldName, newName string) error {
 	result, err := m.client.Execute(host, "rename", oldName, newName)
 	if err != nil {

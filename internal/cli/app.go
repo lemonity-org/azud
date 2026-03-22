@@ -355,14 +355,34 @@ var accessoryExecCmd = &cobra.Command{
 	RunE:  runAccessoryExec,
 }
 
+var accessoryRemoveCmd = &cobra.Command{
+	Use:   "remove [name]",
+	Short: "Stop and remove an accessory container",
+	Long: `Stop and remove an accessory container from the remote host.
+
+This will stop the running container and remove it. Use --yes to skip
+the confirmation prompt.
+
+Example:
+  azud accessory remove mysql
+  azud accessory remove redis --yes`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAccessoryRemove,
+}
+
+var accessoryRemoveYes bool
+
 func init() {
 	accessoryLogsCmd.Flags().BoolVarP(&appFollow, "follow", "f", false, "Follow logs")
 	accessoryLogsCmd.Flags().StringVar(&appTail, "tail", "100", "Number of lines")
+
+	accessoryRemoveCmd.Flags().BoolVar(&accessoryRemoveYes, "yes", false, "Skip confirmation prompt")
 
 	accessoryCmd.AddCommand(accessoryBootCmd)
 	accessoryCmd.AddCommand(accessoryStopCmd)
 	accessoryCmd.AddCommand(accessoryLogsCmd)
 	accessoryCmd.AddCommand(accessoryExecCmd)
+	accessoryCmd.AddCommand(accessoryRemoveCmd)
 
 	rootCmd.AddCommand(accessoryCmd)
 }
@@ -419,6 +439,56 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Success("Accessory %s stopped", name)
+	return nil
+}
+
+func runAccessoryRemove(cmd *cobra.Command, args []string) error {
+	output.SetVerbose(verbose)
+	log := output.DefaultLogger
+
+	name := args[0]
+
+	accessory, ok := cfg.Accessories[name]
+	if !ok {
+		return fmt.Errorf("accessory %s not found", name)
+	}
+
+	host := accessory.PrimaryHost()
+	if host == "" {
+		return fmt.Errorf("no host configured for accessory %s", name)
+	}
+
+	containerName := fmt.Sprintf("%s-%s", cfg.Service, name)
+
+	if !accessoryRemoveYes {
+		fmt.Printf("This will stop and remove the accessory %q (%s) on %s.\n", name, containerName, host)
+		fmt.Print("Are you sure? [y/N] ")
+
+		var answer string
+		fmt.Scanln(&answer)
+		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+			log.Info("Aborted")
+			return nil
+		}
+	}
+
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+
+	podmanClient := podman.NewClient(sshClient)
+	containerManager := podman.NewContainerManager(podmanClient)
+
+	log.Info("Stopping accessory %s on %s...", name, host)
+	if err := containerManager.Stop(host, containerName, 30); err != nil {
+		log.Warn("Stop returned an error (container may already be stopped): %v", err)
+	}
+
+	log.Info("Removing accessory %s on %s...", name, host)
+	if err := containerManager.Remove(host, containerName, true); err != nil {
+		return fmt.Errorf("failed to remove accessory container: %w", err)
+	}
+
+	log.Success("Accessory %s removed from %s", name, host)
 	return nil
 }
 

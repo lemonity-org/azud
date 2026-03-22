@@ -241,6 +241,13 @@ func buildRemote(imageTag, latestTag, version string, multiarch bool) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
+	// Sync build context to remote builder
+	remoteContext, err := syncBuildContext(sshClient, cfg.Builder.Remote.Host, cfg.Builder.Context)
+	if err != nil {
+		return fmt.Errorf("failed to sync build context: %w", err)
+	}
+	defer cleanupBuildContext(sshClient, cfg.Builder.Remote.Host, remoteContext)
+
 	podmanClient := podman.NewClient(sshClient)
 	imageManager := podman.NewImageManager(podmanClient)
 
@@ -259,7 +266,7 @@ func buildRemote(imageTag, latestTag, version string, multiarch bool) error {
 
 	if !multiarch {
 		buildConfig := &podman.BuildConfig{
-			Context:    cfg.Builder.Context,
+			Context:    remoteContext,
 			Dockerfile: cfg.Builder.Dockerfile,
 			Tag:        imageTag,
 			Tags:       []string{latestTag},
@@ -269,12 +276,12 @@ func buildRemote(imageTag, latestTag, version string, multiarch bool) error {
 			Secrets:    cfg.Builder.Secrets,
 			CacheFrom:  cacheFrom,
 			CacheTo:    cacheTo,
+			Target:     cfg.Builder.Target,
+			SSH:        cfg.Builder.SSH,
 		}
 		if arch := effectiveBuildArch(true); arch != "" {
 			buildConfig.Platform = fmt.Sprintf("linux/%s", arch)
 		}
-		buildConfig.Target = cfg.Builder.Target
-		buildConfig.SSH = cfg.Builder.SSH
 
 		if err := imageManager.Build(cfg.Builder.Remote.Host, buildConfig); err != nil {
 			return fmt.Errorf("remote build failed: %w", err)
@@ -290,10 +297,9 @@ func buildRemote(imageTag, latestTag, version string, multiarch bool) error {
 		return nil
 	}
 
-	// Prepare multi-platform manifest build config
 	buildConfig := &podman.ManifestBuildConfig{
 		BuildConfig: podman.BuildConfig{
-			Context:    cfg.Builder.Context,
+			Context:    remoteContext,
 			Dockerfile: cfg.Builder.Dockerfile,
 			Tag:        imageTag,
 			Tags:       []string{latestTag},
@@ -303,17 +309,12 @@ func buildRemote(imageTag, latestTag, version string, multiarch bool) error {
 			Secrets:    cfg.Builder.Secrets,
 			CacheFrom:  cacheFrom,
 			CacheTo:    cacheTo,
+			Target:     cfg.Builder.Target,
+			SSH:        cfg.Builder.SSH,
 		},
 		Platforms: platforms,
 		Push:      !buildNoPush,
 	}
-
-	buildConfig.Target = cfg.Builder.Target
-	buildConfig.SSH = cfg.Builder.SSH
-
-	// First, we need to sync the build context to the remote builder
-	// For now, we'll assume the code is already on the remote builder
-	// In a production implementation, you'd sync the context first
 
 	if err := imageManager.ManifestBuild(cfg.Builder.Remote.Host, buildConfig); err != nil {
 		return fmt.Errorf("remote build failed: %w", err)
@@ -335,9 +336,9 @@ func pushImage(imageTag, latestTag string, multiarch bool) error {
 
 	// Push version tag
 	log.Info("Pushing %s...", imageTag)
-	pushArgs := []string{"push", imageTag}
+	pushArgs := []string{"push", "--retry", "3", "--retry-delay", "30s", imageTag}
 	if multiarch {
-		pushArgs = []string{"manifest", "push", imageTag, imageTag}
+		pushArgs = []string{"manifest", "push", "--retry", "3", "--retry-delay", "30s", imageTag, imageTag}
 	}
 	pushCmd := exec.Command("podman", pushArgs...)
 	pushCmd.Stdout = os.Stdout
@@ -346,26 +347,23 @@ func pushImage(imageTag, latestTag string, multiarch bool) error {
 		return fmt.Errorf("failed to push %s: %w", imageTag, err)
 	}
 
-	// Push latest tag
-	log.Info("Pushing %s...", latestTag)
-	if multiarch {
-		pushCmd = exec.Command("podman", "manifest", "push", imageTag, latestTag)
-	} else {
-		pushCmd = exec.Command("podman", "push", latestTag)
-	}
-	pushCmd.Stdout = os.Stdout
-	pushCmd.Stderr = os.Stderr
-	if err := pushCmd.Run(); err != nil {
-		return fmt.Errorf("failed to push %s: %w", latestTag, err)
+	// Tag latest via skopeo copy (manifest-only, no blob re-upload)
+	log.Info("Tagging %s...", latestTag)
+	copyCmd := exec.Command("skopeo", "copy", "--retry-times", "3",
+		"docker://"+imageTag, "docker://"+latestTag)
+	copyCmd.Stdout = os.Stdout
+	copyCmd.Stderr = os.Stderr
+	if err := copyCmd.Run(); err != nil {
+		return fmt.Errorf("failed to tag %s: %w", latestTag, err)
 	}
 
 	return nil
 }
 
 func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, multiarch bool) error {
-	pushCmd := fmt.Sprintf("podman push %s", shell.Quote(imageTag))
+	pushCmd := fmt.Sprintf("podman push --retry 3 --retry-delay 30s %s", shell.Quote(imageTag))
 	if multiarch {
-		pushCmd = fmt.Sprintf("podman manifest push %s %s", shell.Quote(imageTag), shell.Quote(imageTag))
+		pushCmd = fmt.Sprintf("podman manifest push --retry 3 --retry-delay 30s %s %s", shell.Quote(imageTag), shell.Quote(imageTag))
 	}
 	if result, err := sshClient.Execute(host, pushCmd); err != nil {
 		return err
@@ -373,16 +371,13 @@ func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, mu
 		return fmt.Errorf("failed to push %s: %s", imageTag, result.Stderr)
 	}
 
-	var latestCmd string
-	if multiarch {
-		latestCmd = fmt.Sprintf("podman manifest push %s %s", shell.Quote(imageTag), shell.Quote(latestTag))
-	} else {
-		latestCmd = fmt.Sprintf("podman push %s", shell.Quote(latestTag))
-	}
-	if result, err := sshClient.Execute(host, latestCmd); err != nil {
+	// Tag latest via skopeo copy (manifest-only, no blob re-upload)
+	copyCmd := fmt.Sprintf("skopeo copy --retry-times 3 %s %s",
+		shell.Quote("docker://"+imageTag), shell.Quote("docker://"+latestTag))
+	if result, err := sshClient.Execute(host, copyCmd); err != nil {
 		return err
 	} else if result.ExitCode != 0 {
-		return fmt.Errorf("failed to push %s: %s", latestTag, result.Stderr)
+		return fmt.Errorf("failed to tag %s: %s", latestTag, result.Stderr)
 	}
 
 	return nil
@@ -409,7 +404,7 @@ func loginToRegistryRemote(sshClient *ssh.Client, host string) error {
 		return fmt.Errorf("registry password not found")
 	}
 
-	cmd := fmt.Sprintf("podman login --username %s --password-stdin %s", shellQuote(cfg.Registry.Username), shellQuote(server))
+	cmd := fmt.Sprintf("podman login --username %s --password-stdin %s", shell.Quote(cfg.Registry.Username), shell.Quote(server))
 	result, err := sshClient.ExecuteWithStdin(host, cmd, strings.NewReader(password+"\n"))
 	if err != nil {
 		return err
