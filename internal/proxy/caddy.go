@@ -250,7 +250,7 @@ func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([
 	// errors, preventing silent failures when Caddy rejects a config change.
 	// Body is piped via stdin (-d @-) to avoid single-quote breakout issues
 	// when JSON values contain quote characters.
-	curlCmd := fmt.Sprintf("curl -sf -X %s", method)
+	curlCmd := fmt.Sprintf("curl -sSf -X %s", method)
 	if len(bodyJSON) > 0 {
 		curlCmd += " -H 'Content-Type: application/json' -d @-"
 	}

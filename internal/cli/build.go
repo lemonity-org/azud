@@ -336,9 +336,9 @@ func pushImage(imageTag, latestTag string, multiarch bool) error {
 
 	// Push version tag
 	log.Info("Pushing %s...", imageTag)
-	pushArgs := []string{"push", "--retry", "3", "--retry-delay", "30s", imageTag}
+	pushArgs := []string{"push", imageTag}
 	if multiarch {
-		pushArgs = []string{"manifest", "push", "--retry", "3", "--retry-delay", "30s", imageTag, imageTag}
+		pushArgs = []string{"manifest", "push", imageTag, imageTag}
 	}
 	pushCmd := exec.Command("podman", pushArgs...)
 	pushCmd.Stdout = os.Stdout
@@ -361,9 +361,9 @@ func pushImage(imageTag, latestTag string, multiarch bool) error {
 }
 
 func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, multiarch bool) error {
-	pushCmd := fmt.Sprintf("podman push --retry 3 --retry-delay 30s %s", shell.Quote(imageTag))
+	pushCmd := fmt.Sprintf("podman push %s", shell.Quote(imageTag))
 	if multiarch {
-		pushCmd = fmt.Sprintf("podman manifest push --retry 3 --retry-delay 30s %s %s", shell.Quote(imageTag), shell.Quote(imageTag))
+		pushCmd = fmt.Sprintf("podman manifest push %s %s", shell.Quote(imageTag), shell.Quote(imageTag))
 	}
 	if result, err := sshClient.Execute(host, pushCmd); err != nil {
 		return err
@@ -371,13 +371,19 @@ func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, mu
 		return fmt.Errorf("failed to push %s: %s", imageTag, result.Stderr)
 	}
 
-	// Tag latest via skopeo copy (manifest-only, no blob re-upload)
-	copyCmd := fmt.Sprintf("skopeo copy --retry-times 3 %s %s",
-		shell.Quote("docker://"+imageTag), shell.Quote("docker://"+latestTag))
-	if result, err := sshClient.Execute(host, copyCmd); err != nil {
+	// Tag and push latest
+	tagCmd := fmt.Sprintf("podman tag %s %s", shell.Quote(imageTag), shell.Quote(latestTag))
+	if result, err := sshClient.Execute(host, tagCmd); err != nil {
 		return err
 	} else if result.ExitCode != 0 {
 		return fmt.Errorf("failed to tag %s: %s", latestTag, result.Stderr)
+	}
+
+	pushLatestCmd := fmt.Sprintf("podman push %s", shell.Quote(latestTag))
+	if result, err := sshClient.Execute(host, pushLatestCmd); err != nil {
+		return err
+	} else if result.ExitCode != 0 {
+		return fmt.Errorf("failed to push %s: %s", latestTag, result.Stderr)
 	}
 
 	return nil

@@ -30,12 +30,32 @@ type Deployer struct {
 	log        *output.Logger
 }
 
+// newProxyConfigFromCfg builds a proxy.ProxyConfig from the deploy
+// configuration. Used by both Deployer and CanaryDeployer to avoid
+// duplicating the field mapping.
+func newProxyConfigFromCfg(cfg *config.Config) *proxy.ProxyConfig {
+	return &proxy.ProxyConfig{
+		Hosts:                 cfg.Proxy.AllHosts(),
+		AutoHTTPS:             cfg.Proxy.SSL,
+		Email:                 cfg.Proxy.ACMEEmail,
+		Staging:               cfg.Proxy.ACMEStaging,
+		SSLRedirect:           cfg.Proxy.SSLRedirect,
+		HTTPPort:              cfg.Proxy.HTTPPort,
+		HTTPSPort:             cfg.Proxy.HTTPSPort,
+		LoggingEnabled:        cfg.Proxy.Logging.Enabled,
+		RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
+		RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
+	}
+}
+
 func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) *Deployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}
 
 	podmanClient := podman.NewClient(sshClient)
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyManager.SetProxyConfig(newProxyConfigFromCfg(cfg))
 
 	return &Deployer{
 		cfg:        cfg,
@@ -44,7 +64,7 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
 		registry:   podman.NewRegistryManagerWithUser(podmanClient, cfg.SSH.User),
-		proxy:      proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams()),
+		proxy:      proxyManager,
 		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
 		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
 		log:        log,
@@ -334,6 +354,21 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 	// Run post-app-boot hook
 	if err := d.hooks.Run(ctx, "post-app-boot", bootCtx); err != nil {
 		d.log.Warn("post-app-boot hook failed: %v", err)
+	}
+
+	// Ensure the proxy container is running before attempting any admin
+	// API calls. Boot is idempotent: if the container is already running
+	// it applies config and returns quickly; if it was stopped or removed
+	// it will (re)start it and wait for the admin API to be ready.
+	if err := d.proxy.Boot(host, newProxyConfigFromCfg(d.cfg)); err != nil {
+		d.log.Warn("Failed to boot proxy: %v", err)
+	}
+
+	// Ensure the proxy has TLS/ACME config applied before registering.
+	// This handles the case where the proxy was rebooted or recreated
+	// between deploys and lost its config.
+	if err := d.proxy.EnsureConfig(host); err != nil {
+		d.log.Warn("Failed to ensure proxy config: %v", err)
 	}
 
 	// Register new container with proxy

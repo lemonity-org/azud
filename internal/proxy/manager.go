@@ -54,6 +54,7 @@ type Manager struct {
 	user        string // SSH user for state directory paths
 	rootful     bool
 	hostPorts   bool
+	proxyConfig *ProxyConfig // cached proxy config for fallback rebuilds
 }
 
 // NewManager creates a new proxy manager. Defaults to root user for state paths.
@@ -90,6 +91,42 @@ func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user strin
 		rootful:     rootful,
 		hostPorts:   hostPortUpstreams,
 	}
+}
+
+// SetProxyConfig stores the proxy configuration for use when rebuilding
+// the full Caddy config during service registration fallback.
+func (m *Manager) SetProxyConfig(config *ProxyConfig) {
+	m.proxyConfig = config
+}
+
+// EnsureConfig ensures the proxy has TLS/ACME and logging settings applied.
+// Safe to call on every deploy — it reads the running config and updates
+// only the settings layer (TLS, AutoHTTPS, logging) without touching routes.
+func (m *Manager) EnsureConfig(host string) error {
+	if m.proxyConfig == nil {
+		return nil
+	}
+	return m.withCaddyLock(host, func() error {
+		if err := m.applyConfigPreservingRoutes(host, m.proxyConfig); err != nil {
+			return err
+		}
+		m.persistConfigWithWarning(host)
+		return nil
+	})
+}
+
+// waitForAdminAPI polls the Caddy admin API until it responds or the
+// timeout is reached. This replaces fixed sleeps after container starts.
+func (m *Manager) waitForAdminAPI(host string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	interval := 500 * time.Millisecond
+	for time.Now().Before(deadline) {
+		if _, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil); err == nil {
+			return nil
+		}
+		time.Sleep(interval)
+	}
+	return fmt.Errorf("caddy admin API not ready after %s", timeout)
 }
 
 // withCaddyLock acquires the remote Caddy lock on the given host, runs fn,
@@ -262,6 +299,7 @@ type ProxyConfig struct {
 
 // Boot starts the Caddy proxy on a host
 func (m *Manager) Boot(host string, config *ProxyConfig) error {
+	m.proxyConfig = config
 	m.log.Host(host, "Starting proxy...")
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
@@ -298,6 +336,20 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 
 	if running {
 		m.log.Host(host, "Proxy already running")
+		// Apply TLS/ACME and logging settings from deploy.yml while
+		// preserving existing routes so that registered services are
+		// not wiped out.
+		if config != nil {
+			if err := m.withCaddyLock(host, func() error {
+				if initErr := m.applyConfigPreservingRoutes(host, config); initErr != nil {
+					return initErr
+				}
+				m.persistConfigWithWarning(host)
+				return nil
+			}); err != nil {
+				m.log.Warn("Failed to apply proxy config: %v", err)
+			}
+		}
 		return nil
 	}
 
@@ -305,8 +357,10 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		if err := m.podman.Start(host, CaddyContainerName); err != nil {
 			return fmt.Errorf("failed to start proxy: %w", err)
 		}
-		// Wait for Caddy to be ready, then restore persisted config
-		time.Sleep(2 * time.Second)
+		// Wait for Caddy admin API to be ready, then restore persisted config
+		if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
+			m.log.Warn("Caddy admin API not ready: %v", err)
+		}
 		if err := m.withCaddyLock(host, func() error {
 			return m.restoreConfig(host)
 		}); err != nil {
@@ -359,8 +413,10 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		return fmt.Errorf("failed to start proxy container: %w", err)
 	}
 
-	// Wait for Caddy to be ready
-	time.Sleep(2 * time.Second)
+	// Wait for Caddy admin API to be ready
+	if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
+		m.log.Warn("Caddy admin API not ready: %v", err)
+	}
 
 	// Load configuration under the Caddy lock.
 	if err := m.withCaddyLock(host, func() error {
@@ -380,7 +436,55 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 }
 
 func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
-	caddyConfig := &CaddyConfig{
+	caddyConfig := m.buildBaseConfig()
+	m.applyProxySettings(caddyConfig)
+
+	if config != nil && config.SSLCertificate != "" {
+		m.log.Host(host, "Configuring custom SSL certificates...")
+	}
+
+	return m.caddyClient.LoadConfig(host, caddyConfig)
+}
+
+// ensureHTTPServer ensures the Caddy config has a valid Apps.HTTP.Servers["srv0"]
+// structure, creating it if missing.
+func ensureHTTPServer(caddyConfig *CaddyConfig) {
+	if caddyConfig.Apps == nil {
+		caddyConfig.Apps = &AppsConfig{}
+	}
+	if caddyConfig.Apps.HTTP == nil {
+		caddyConfig.Apps.HTTP = &HTTPApp{Servers: make(map[string]*HTTPServer)}
+	}
+	if caddyConfig.Apps.HTTP.Servers["srv0"] == nil {
+		caddyConfig.Apps.HTTP.Servers["srv0"] = &HTTPServer{
+			Listen: []string{":80", ":443"},
+			Routes: []*Route{},
+		}
+	}
+}
+
+// applyConfigPreservingRoutes fetches the current Caddy config, applies
+// TLS/ACME and logging settings from the given ProxyConfig, and reloads
+// it. Existing routes (registered services) are preserved.
+func (m *Manager) applyConfigPreservingRoutes(host string, config *ProxyConfig) error {
+	caddyConfig, err := m.caddyClient.GetConfig(host)
+	if err != nil {
+		return m.loadInitialConfig(host, config)
+	}
+
+	ensureHTTPServer(caddyConfig)
+	m.applyProxySettingsFrom(caddyConfig, config)
+
+	if config.SSLCertificate != "" {
+		m.log.Host(host, "Configuring custom SSL certificates...")
+	}
+
+	return m.caddyClient.LoadConfig(host, caddyConfig)
+}
+
+// buildBaseConfig creates a minimal Caddy config with admin and HTTP server.
+func (m *Manager) buildBaseConfig() *CaddyConfig {
+	return &CaddyConfig{
 		Admin: &AdminConfig{
 			Listen: "127.0.0.1:2019",
 		},
@@ -395,15 +499,32 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 			},
 		},
 	}
+}
+
+// applyProxySettings applies TLS, AutoHTTPS, and logging settings from the
+// cached proxy config onto the given Caddy config. This is used both during
+// initial bootstrap and when registerServiceFull needs to rebuild the config.
+func (m *Manager) applyProxySettings(caddyConfig *CaddyConfig) {
+	m.applyProxySettingsFrom(caddyConfig, m.proxyConfig)
+}
+
+// applyProxySettingsFrom applies TLS, AutoHTTPS, and logging settings from the
+// given ProxyConfig onto a Caddy config. Accepts an explicit config to avoid
+// temporary field swaps on the Manager.
+func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *ProxyConfig) {
+	if config == nil {
+		return
+	}
+
 	server := caddyConfig.Apps.HTTP.Servers["srv0"]
 
-	if config != nil && config.AutoHTTPS && !config.SSLRedirect {
+	if config.AutoHTTPS && !config.SSLRedirect {
 		server.AutoHTTPS = &AutoHTTPSConfig{
 			DisableRedirects: true,
 		}
 	}
 
-	if config != nil && (config.LoggingEnabled || len(config.RedactRequestHeaders) > 0 || len(config.RedactResponseHeaders) > 0) {
+	if config.LoggingEnabled || len(config.RedactRequestHeaders) > 0 || len(config.RedactResponseHeaders) > 0 {
 		loggerName := "access"
 		encoder := &Encoder{Format: "json"}
 
@@ -441,9 +562,7 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 		server.Logs = &ServerLogs{DefaultLoggerName: loggerName}
 	}
 
-	if config != nil && config.SSLCertificate != "" && config.SSLPrivateKey != "" {
-		m.log.Host(host, "Configuring custom SSL certificates...")
-
+	if config.SSLCertificate != "" && config.SSLPrivateKey != "" {
 		caddyConfig.Apps.TLS = &TLSApp{
 			Certificates: &CertificatesConfig{
 				LoadPEM: []LoadedCertificate{
@@ -462,7 +581,7 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 				},
 			},
 		}
-	} else if config != nil && config.AutoHTTPS && config.Email != "" {
+	} else if config.AutoHTTPS && config.Email != "" {
 		issuer := &Issuer{
 			Module: "acme",
 			Email:  config.Email,
@@ -481,8 +600,6 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 			},
 		}
 	}
-
-	return m.caddyClient.LoadConfig(host, caddyConfig)
 }
 
 // Stop stops the Caddy proxy on a host
@@ -500,8 +617,9 @@ func (m *Manager) Stop(host string) error {
 	return nil
 }
 
-// Reboot restarts the Caddy proxy
-func (m *Manager) Reboot(host string) error {
+// Reboot restarts the Caddy proxy. If config is provided, it is applied
+// after restart so that TLS/ACME changes take effect immediately.
+func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 	m.log.Host(host, "Rebooting proxy...")
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
@@ -511,12 +629,24 @@ func (m *Manager) Reboot(host string) error {
 		return fmt.Errorf("failed to restart proxy: %w", err)
 	}
 
-	// Wait for Caddy to be ready, then restore persisted config
-	time.Sleep(2 * time.Second)
+	// Wait for Caddy admin API to be ready, then restore config and apply settings
+	if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
+		m.log.Warn("Caddy admin API not ready: %v", err)
+	}
 	if err := m.withCaddyLock(host, func() error {
-		return m.restoreConfig(host)
+		// Try to restore persisted config first (preserves routes)
+		restoreErr := m.restoreConfig(host)
+		if config != nil {
+			// Apply TLS/ACME settings on top of restored config
+			if applyErr := m.applyConfigPreservingRoutes(host, config); applyErr != nil {
+				return applyErr
+			}
+			m.persistConfigWithWarning(host)
+			return nil
+		}
+		return restoreErr
 	}); err != nil {
-		m.log.Warn("Failed to restore proxy config after reboot: %v", err)
+		m.log.Warn("Failed to apply proxy config after reboot: %v", err)
 	}
 
 	m.log.HostSuccess(host, "Proxy rebooted")
@@ -675,32 +805,11 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 func (m *Manager) registerServiceFull(host string, service *ServiceConfig, route *Route) error {
 	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
-		config = &CaddyConfig{
-			Apps: &AppsConfig{
-				HTTP: &HTTPApp{
-					Servers: map[string]*HTTPServer{
-						"srv0": {
-							Listen: []string{":80", ":443"},
-							Routes: []*Route{},
-						},
-					},
-				},
-			},
-		}
+		config = m.buildBaseConfig()
 	}
 
-	if config.Apps == nil {
-		config.Apps = &AppsConfig{}
-	}
-	if config.Apps.HTTP == nil {
-		config.Apps.HTTP = &HTTPApp{Servers: make(map[string]*HTTPServer)}
-	}
-	if config.Apps.HTTP.Servers["srv0"] == nil {
-		config.Apps.HTTP.Servers["srv0"] = &HTTPServer{
-			Listen: []string{":80", ":443"},
-			Routes: []*Route{},
-		}
-	}
+	ensureHTTPServer(config)
+	m.applyProxySettings(config)
 
 	server := config.Apps.HTTP.Servers["srv0"]
 	found := false
@@ -795,12 +904,20 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		if timeout == "" {
 			timeout = "5s"
 		}
+		activeCheck := &ActiveHealthCheck{
+			Path:     service.HealthPath,
+			Interval: interval,
+			Timeout:  timeout,
+		}
+		// When HTTPS is enabled, send X-Forwarded-Proto so apps with
+		// force_ssl / HSTS don't redirect the health check to HTTPS.
+		if service.HTTPS {
+			activeCheck.Headers = map[string][]string{
+				"X-Forwarded-Proto": {"https"},
+			}
+		}
 		handler.HealthChecks = &HealthChecks{
-			Active: &ActiveHealthCheck{
-				Path:     service.HealthPath,
-				Interval: interval,
-				Timeout:  timeout,
-			},
+			Active: activeCheck,
 			Passive: &PassiveHealthCheck{
 				FailDuration: "30s",
 				MaxFails:     3,
@@ -816,7 +933,7 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		}
 	}
 
-	if service.ForwardHeaders {
+	if service.ForwardHeaders || service.HTTPS {
 		handler.ProxyHeaders = &HeadersConfig{
 			Request: &HeaderOps{
 				Set: map[string][]string{
