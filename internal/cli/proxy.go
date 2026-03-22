@@ -128,6 +128,40 @@ func init() {
 	rootCmd.AddCommand(proxyCmd)
 }
 
+// buildProxyConfig constructs a ProxyConfig from the global cfg, including
+// optional custom SSL certificates resolved from secrets.
+func buildProxyConfig(log *output.Logger) *proxy.ProxyConfig {
+	pc := &proxy.ProxyConfig{
+		AutoHTTPS:             cfg.Proxy.SSL,
+		Email:                 cfg.Proxy.ACMEEmail,
+		Staging:               cfg.Proxy.ACMEStaging,
+		SSLRedirect:           cfg.Proxy.SSLRedirect,
+		HTTPPort:              cfg.Proxy.HTTPPort,
+		HTTPSPort:             cfg.Proxy.HTTPSPort,
+		LoggingEnabled:        cfg.Proxy.Logging.Enabled,
+		RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
+		RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
+	}
+
+	if hosts := cfg.Proxy.AllHosts(); len(hosts) > 0 {
+		pc.Hosts = hosts
+	}
+
+	if cfg.Proxy.SSLCertificate != "" && cfg.Proxy.SSLPrivateKey != "" {
+		certPEM, certOK := config.GetSecret(cfg.Proxy.SSLCertificate)
+		keyPEM, keyOK := config.GetSecret(cfg.Proxy.SSLPrivateKey)
+		if certOK && keyOK {
+			pc.SSLCertificate = certPEM
+			pc.SSLPrivateKey = keyPEM
+			log.Info("Using custom SSL certificates")
+		} else {
+			log.Warn("SSL certificate secrets not found: %s, %s", cfg.Proxy.SSLCertificate, cfg.Proxy.SSLPrivateKey)
+		}
+	}
+
+	return pc
+}
+
 func runProxyBoot(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
@@ -145,43 +179,12 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pre-proxy-reboot hook failed: %w", err)
 	}
 
-	// Create proxy manager
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyConfig := buildProxyConfig(log)
 
-	// Build proxy config
-	proxyConfig := &proxy.ProxyConfig{
-		AutoHTTPS:             cfg.Proxy.SSL,
-		Email:                 cfg.Proxy.ACMEEmail,
-		Staging:               cfg.Proxy.ACMEStaging,
-		SSLRedirect:           cfg.Proxy.SSLRedirect,
-		HTTPPort:              cfg.Proxy.HTTPPort,
-		HTTPSPort:             cfg.Proxy.HTTPSPort,
-		LoggingEnabled:        cfg.Proxy.Logging.Enabled,
-		RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
-		RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
-	}
-
-	if hosts := cfg.Proxy.AllHosts(); len(hosts) > 0 {
-		proxyConfig.Hosts = hosts
-	}
-
-	// Load custom SSL certificates if configured
-	if cfg.Proxy.SSLCertificate != "" && cfg.Proxy.SSLPrivateKey != "" {
-		certPEM, certOK := config.GetSecret(cfg.Proxy.SSLCertificate)
-		keyPEM, keyOK := config.GetSecret(cfg.Proxy.SSLPrivateKey)
-		if certOK && keyOK {
-			proxyConfig.SSLCertificate = certPEM
-			proxyConfig.SSLPrivateKey = keyPEM
-			log.Info("Using custom SSL certificates")
-		} else {
-			log.Warn("SSL certificate secrets not found: %s, %s", cfg.Proxy.SSLCertificate, cfg.Proxy.SSLPrivateKey)
-		}
-	}
-
-	// Boot on all hosts
 	var bootErrors []string
 	var succeededHosts []string
 	for _, host := range hosts {
@@ -257,11 +260,12 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyConfig := buildProxyConfig(log)
 
 	var rebootErrors []string
 	var succeededHosts []string
 	for _, host := range hosts {
-		if err := manager.Reboot(host); err != nil {
+		if err := manager.Reboot(host, proxyConfig); err != nil {
 			log.HostError(host, "failed to reboot proxy: %v", err)
 			rebootErrors = append(rebootErrors, fmt.Sprintf("%s: %v", host, err))
 			continue

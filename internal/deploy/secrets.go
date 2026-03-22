@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/lemonity-org/azud/internal/shell"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
 
@@ -17,7 +16,9 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return nil
 	}
 
-	existsCmd := fmt.Sprintf("test -f %s", shell.Quote(secretsPath))
+	quotedPath := shellExpandableQuote(secretsPath)
+
+	existsCmd := fmt.Sprintf("test -f %s", quotedPath)
 	results := sshClient.ExecuteParallel(hosts, existsCmd)
 
 	var missingFiles []string
@@ -36,7 +37,7 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return err
 	}
 
-	readCmd := fmt.Sprintf("cat %s", shell.Quote(secretsPath))
+	readCmd := fmt.Sprintf("cat %s", quotedPath)
 	readResults := sshClient.ExecuteParallel(hosts, readCmd)
 
 	unreadable := make([]string, 0)
@@ -145,7 +146,7 @@ func validateSecretsPermissions(sshClient *ssh.Client, hosts []string, secretsPa
 		return nil
 	}
 
-	quotedPath := shell.Quote(secretsPath)
+	quotedPath := shellExpandableQuote(secretsPath)
 	cmd := fmt.Sprintf(`path=%s; dir="$(dirname "$path")"; uid=$(id -u); if stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(stat -c '%%u %%a' "$path"); dstat=$(stat -c '%%u %%a' "$dir"); elif stat -f '%%u %%Lp' "$path" >/dev/null 2>&1; then fstat=$(stat -f '%%u %%Lp' "$path"); dstat=$(stat -f '%%u %%Lp' "$dir"); elif busybox stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(busybox stat -c '%%u %%a' "$path"); dstat=$(busybox stat -c '%%u %%a' "$dir"); else echo "stat unsupported" >&2; exit 2; fi; echo "$uid $fstat $dstat"`, quotedPath)
 	results := sshClient.ExecuteParallel(hosts, cmd)
 
@@ -240,6 +241,13 @@ func normalizeSecretKeys(keys []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// shellExpandableQuote wraps path in double quotes so that shell variables
+// like $HOME are expanded by the remote shell, unlike shell.Quote which
+// uses single quotes and prevents expansion.
+func shellExpandableQuote(path string) string {
+	return fmt.Sprintf(`"%s"`, path)
 }
 
 func parseSecretsContent(content string) map[string]string {
