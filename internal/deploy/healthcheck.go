@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/shell"
 )
 
 const (
@@ -69,10 +70,11 @@ func BuildHTTPCheckExecCandidates(container string, port int, path string) []str
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
 	quotedURL := strconv.Quote(url)
 
+	qc := shell.Quote(container)
 	return []string{
-		fmt.Sprintf("podman exec %s curl -fsS %s", container, quotedURL),
-		fmt.Sprintf("podman exec %s wget -qO- %s", container, quotedURL),
-		fmt.Sprintf("podman exec %s busybox wget -qO- %s", container, quotedURL),
+		fmt.Sprintf("podman exec %s curl -fsS %s", qc, quotedURL),
+		fmt.Sprintf("podman exec %s wget -qO- %s", qc, quotedURL),
+		fmt.Sprintf("podman exec %s busybox wget -qO- %s", qc, quotedURL),
 	}
 }
 
@@ -103,10 +105,10 @@ func BuildHTTPCheckHelperCommand(container string, port int, path, image, pullPo
 
 	return fmt.Sprintf(
 		"podman run --rm --pull=%s --network container:%s --name %s %s -fsS -o /dev/null %s",
-		pullPolicy,
-		container,
-		name,
-		image,
+		shell.Quote(pullPolicy),
+		shell.Quote(container),
+		shell.Quote(name),
+		shell.Quote(image),
 		quotedURL,
 	)
 }

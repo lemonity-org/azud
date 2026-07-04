@@ -14,10 +14,10 @@ import (
 type ColorProfile int
 
 const (
-	ProfileNone     ColorProfile = iota // No color (NO_COLOR, non-TTY, dumb terminal)
-	ProfileBasic                        // 16 basic ANSI colors
-	ProfileANSI256                      // 256-color palette
-	ProfileTrueColor                    // 24-bit RGB true color
+	ProfileNone      ColorProfile = iota // No color (NO_COLOR, non-TTY, dumb terminal)
+	ProfileBasic                         // 16 basic ANSI colors
+	ProfileANSI256                       // 256-color palette
+	ProfileTrueColor                     // 24-bit RGB true color
 )
 
 // Symbols used throughout the CLI output.

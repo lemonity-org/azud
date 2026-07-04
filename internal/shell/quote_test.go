@@ -204,13 +204,13 @@ func TestValidateName(t *testing.T) {
 		{"MyApp", true},
 		{"my.app", true},
 		{"app123", true},
-		{"123app", false},         // must start with letter
-		{"-app", false},           // must start with letter
-		{"_app", false},           // must start with letter
-		{"my app", false},         // no spaces
-		{"my/app", false},         // no slashes
-		{"my:app", false},         // no colons
-		{"app@host", false},       // no at signs
+		{"123app", false},                 // must start with letter
+		{"-app", false},                   // must start with letter
+		{"_app", false},                   // must start with letter
+		{"my app", false},                 // no spaces
+		{"my/app", false},                 // no slashes
+		{"my:app", false},                 // no colons
+		{"app@host", false},               // no at signs
 		{string(make([]byte, 64)), false}, // too long
 	}
 

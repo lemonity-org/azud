@@ -1287,3 +1287,89 @@ func TestValidate_CronHostResolution(t *testing.T) {
 		t.Fatalf("expected cron host to resolve via web role, got %v", err)
 	}
 }
+
+func TestIsValidHealthPath(t *testing.T) {
+	tests := []struct {
+		path  string
+		valid bool
+	}{
+		{"/up", true},
+		{"/health/ready", true},
+		{"/healthz?verbose=1", true},
+		{"/healthz?a=1&b=2", true}, // query string with ampersand
+		{"/api/v1/status", true},
+		{"/", true},
+
+		{"up", false},             // must start with /
+		{"/up with space", false}, // space
+		{"/up$(reboot)", false},   // command substitution
+		{"/up`id`", false},        // backticks
+		{"/up;rm", false},         // semicolon
+		{"/up|cat", false},        // pipe
+		{"/up(x)", false},         // parentheses
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isValidHealthPath(tt.path); got != tt.valid {
+				t.Errorf("isValidHealthPath(%q) = %v, want %v", tt.path, got, tt.valid)
+			}
+		})
+	}
+}
+
+func baseValidConfig() *Config {
+	return &Config{
+		Service: "test",
+		Image:   "test:latest",
+		Servers: map[string]RoleConfig{
+			"web": {Hosts: []string{"localhost"}},
+		},
+		Proxy: ProxyConfig{Host: "test.example.com"},
+		SSH:   SSHConfig{Port: 22},
+	}
+}
+
+func TestValidate_HealthcheckPathInjection(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Proxy.Healthcheck.ReadinessPath = "/up$(reboot)"
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "proxy.healthcheck.readiness_path") {
+		t.Fatalf("expected readiness_path validation error, got %v", err)
+	}
+}
+
+func TestValidate_HelperImageInjection(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Proxy.Healthcheck.HelperImage = "img; rm -rf /"
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "proxy.healthcheck.helper_image") {
+		t.Fatalf("expected helper_image validation error, got %v", err)
+	}
+}
+
+func TestValidate_CronNameInjection(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Cron = map[string]CronConfig{
+		"job$(touch pwned)": {Schedule: "0 0 * * *", Command: "echo hi"},
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "cron.job$(touch pwned)") {
+		t.Fatalf("expected cron name validation error, got %v", err)
+	}
+}
+
+func TestValidate_AccessoryNameInjection(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Accessories = map[string]AccessoryConfig{
+		"db`whoami`": {Image: "mysql:8", Host: "localhost"},
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "accessories.db`whoami`") {
+		t.Fatalf("expected accessory name validation error, got %v", err)
+	}
+}

@@ -310,6 +310,13 @@ func (m *RegistryManager) ECRLogin(host, region, accountID string) error {
 
 // GCRLogin handles Google Container Registry login via a JSON key file.
 func (m *RegistryManager) GCRLogin(host, keyFile string) error {
+	// keyFile is embedded inside an `sh -c '...'` wrapper below, so a value
+	// containing a single quote would break out of the inner quoting. Reject
+	// anything with shell metacharacters (paths are expected to be simple).
+	if !shell.Validate(keyFile) {
+		return fmt.Errorf("invalid key file path: %s", keyFile)
+	}
+
 	stateDir := state.DirQuoted(m.user)
 	lockFile := state.LockFileQuoted(m.user, "podman-auth")
 

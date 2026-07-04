@@ -125,22 +125,20 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	// Determine the image to deploy
 	image := d.cfg.Image
 	version := opts.Version
-	if version != "" {
-		// If explicit version provided, use it
-		// Strip existing tag if present
-		if idx := strings.LastIndex(image, ":"); idx > 0 && !strings.Contains(image[idx:], "/") {
-			image = image[:idx]
-		}
-		image = fmt.Sprintf("%s:%s", image, version)
-	} else if !strings.Contains(image, ":") {
-		// No tag in config and no version specified, use latest
+	switch {
+	case version != "":
+		// Explicit version: replace any existing tag or digest.
+		image = fmt.Sprintf("%s:%s", stripImageTag(image), version)
+	case strings.Contains(image, "@"):
+		// Digest-pinned image (no explicit version): use the digest as version.
+		version = image[strings.Index(image, "@")+1:]
+	case hasImageTag(image):
+		// Tagged image: extract the tag as the version.
+		version = image[strings.LastIndex(image, ":")+1:]
+	default:
+		// No tag and no version: default to latest.
 		version = "latest"
 		image = fmt.Sprintf("%s:latest", image)
-	} else {
-		// Extract version from image tag
-		if idx := strings.LastIndex(image, ":"); idx > 0 {
-			version = image[idx+1:]
-		}
 	}
 	d.log.Header("Deploying %s", image)
 
@@ -390,28 +388,32 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 	}
 	proxyHost := d.cfg.Proxy.PrimaryHost()
 
-	if oldExists {
+	// Registering the new container with the proxy MUST succeed before we
+	// touch the old container. Otherwise a transient proxy failure could
+	// remove the only healthy upstream and leave the service unreachable
+	// while the deploy still reports success (masking the outage from
+	// rollback_on_failure).
+	var regErr error
+	if oldExists && proxyHost != "" {
 		// Add new upstream alongside the old one so both receive traffic
 		// during the transition. Using AddUpstream (not RegisterService)
 		// preserves the old upstream in the route, which is required for
 		// connection-aware draining to work.
-		if proxyHost != "" {
-			if err := d.proxy.AddUpstream(host, proxyHost, newUpstream); err != nil {
-				// AddUpstream may fail if there's no existing route (e.g., proxy
-				// was rebooted). Fall back to a full RegisterService.
-				d.log.Debug("Failed to add upstream alongside old: %v", err)
-				if regErr := d.registerWithProxy(host, newUpstream); regErr != nil {
-					d.log.Warn("Failed to register with proxy: %v", regErr)
-				}
-			}
-		} else if regErr := d.registerWithProxy(host, newUpstream); regErr != nil {
-			d.log.Warn("Failed to register with proxy: %v", regErr)
+		if err := d.proxy.AddUpstream(host, proxyHost, newUpstream); err != nil {
+			// AddUpstream may fail if there's no existing route (e.g., proxy
+			// was rebooted). Fall back to a full RegisterService.
+			d.log.Debug("Failed to add upstream alongside old: %v", err)
+			regErr = d.registerWithProxy(host, newUpstream)
 		}
 	} else {
-		// First deployment — no existing route to add to.
-		if err := d.registerWithProxy(host, newUpstream); err != nil {
-			d.log.Warn("Failed to register with proxy: %v", err)
-		}
+		// First deployment, or no primary proxy host — register the service.
+		regErr = d.registerWithProxy(host, newUpstream)
+	}
+	if regErr != nil {
+		// Roll back the new container and leave the old one serving so an
+		// automatic rollback or the next deploy can recover cleanly.
+		_ = d.containers.Remove(host, newContainerName, true)
+		return fmt.Errorf("failed to register new container with proxy: %w", regErr)
 	}
 
 	// If old container exists, drain and remove it
@@ -456,12 +458,23 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 	// is always present (no gap = no dropped requests).
 	d.log.Host(host, "Finalizing deployment...")
 	if err := d.containers.Rename(host, newContainerName, oldContainerName); err != nil {
-		// Rename failed — the container is still running under newContainerName
-		// and the proxy is already pointing to it. This is an acceptable state;
-		// the next deployment will need to handle this container name.
-		d.log.Warn("Failed to rename container (proxy still points to %s): %v", newContainerName, err)
-		return nil
+		// The most common cause is a leftover container still occupying the
+		// service name (its earlier removal failed). Clear it and retry once.
+		d.log.Debug("Rename failed, clearing %s and retrying: %v", oldContainerName, err)
+		_ = d.containers.Remove(host, oldContainerName, true)
+		if retryErr := d.containers.Rename(host, newContainerName, oldContainerName); retryErr != nil {
+			// Still failed — the container is running under newContainerName and
+			// the proxy points to it, so the service is up. Leave it; the next
+			// deploy's orphan reap will clean it up.
+			d.log.Warn("Failed to rename container (proxy still points to %s): %v", newContainerName, retryErr)
+			return nil
+		}
 	}
+
+	// The current container is now named oldContainerName (the service name),
+	// so any remaining "<service>-new-*" container is an orphan from a prior
+	// failed rename. Reap them now that we're holding the deploy lock.
+	d.reapStaleTempContainers(host)
 
 	// In mixed rootless/rootful mode, upstreams are host loopback ports.
 	// Renaming a container does not change its published host port, so the
@@ -629,6 +642,50 @@ func (d *Deployer) generateContainerName(suffix string) string {
 	return fmt.Sprintf("%s-%s-%d", d.cfg.Service, suffix, time.Now().Unix())
 }
 
+// reapStaleTempContainers removes leftover temporary deploy containers named
+// "<service>-new-*" that can linger after a failed rename. It is best-effort
+// and safe to call under the deploy lock once the current container has been
+// renamed to the service name (so the active container is never matched).
+func (d *Deployer) reapStaleTempContainers(host string) {
+	prefix := d.cfg.Service + "-new-"
+	// The podman name filter is substring-based; enforce an exact prefix match
+	// client-side to avoid touching similarly named services.
+	containers, err := d.containers.List(host, true, map[string]string{"name": prefix})
+	if err != nil {
+		d.log.Debug("Orphan cleanup: failed to list containers on %s: %v", host, err)
+		return
+	}
+	for _, c := range containers {
+		if !strings.HasPrefix(c.Name, prefix) {
+			continue
+		}
+		d.log.Debug("Orphan cleanup: removing stale temp container %s", c.Name)
+		if err := d.containers.Remove(host, c.Name, true); err != nil {
+			d.log.Debug("Orphan cleanup: failed to remove %s: %v", c.Name, err)
+		}
+	}
+}
+
+// stripImageTag removes a trailing :tag or @digest from an image reference,
+// returning the bare name (registry/repository). It is digest-aware and does
+// not mistake a registry port (e.g., localhost:5000/img) for a tag.
+func stripImageTag(image string) string {
+	if at := strings.Index(image, "@"); at >= 0 {
+		image = image[:at]
+	}
+	if idx := strings.LastIndex(image, ":"); idx > 0 && !strings.Contains(image[idx:], "/") {
+		image = image[:idx]
+	}
+	return image
+}
+
+// hasImageTag reports whether an image reference carries an explicit :tag
+// (ignoring a registry port such as localhost:5000/img).
+func hasImageTag(image string) bool {
+	idx := strings.LastIndex(image, ":")
+	return idx > 0 && !strings.Contains(image[idx:], "/")
+}
+
 // Rollback re-deploys a previous version.
 func (d *Deployer) Rollback(ctx context.Context, version, destination string, hosts []string) error {
 	d.log.Header("Rolling back to %s", version)
@@ -676,42 +733,19 @@ func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVe
 		return
 	}
 
-	prevImage := d.cfg.Image
-	if idx := strings.LastIndex(prevImage, ":"); idx > 0 && !strings.Contains(prevImage[idx:], "/") {
-		prevImage = prevImage[:idx]
-	}
-	prevImage = fmt.Sprintf("%s:%s", prevImage, previousVersion)
+	prevImage := fmt.Sprintf("%s:%s", stripImageTag(d.cfg.Image), previousVersion)
 
 	for _, host := range hosts {
 		d.log.Host(host, "Rolling back to %s...", previousVersion)
-		proxyHost := d.cfg.Proxy.PrimaryHost()
 
-		// The current container (just deployed) is named d.cfg.Service.
-		// Stop and remove it, then re-deploy the previous version.
-		serviceName := d.cfg.Service
-		stopTimeout := d.cfg.Deploy.GetStopTimeout()
-
-		// Remove the newly deployed container from the proxy
-		upstream, upstreamErr := d.upstreamAddr(host, serviceName)
-		if upstreamErr != nil {
-			d.log.Debug("Rollback: failed to resolve upstream for %s on %s: %v", serviceName, host, upstreamErr)
-			upstream = fmt.Sprintf("%s:%d", serviceName, d.cfg.Proxy.AppPort)
-		}
-		if proxyHost != "" {
-			if err := d.proxy.RemoveUpstream(host, proxyHost, upstream); err != nil {
-				d.log.Warn("Rollback: failed to remove upstream on %s: %v", host, err)
-			}
-		}
-
-		// Stop and remove the new container
-		if err := d.containers.Stop(host, serviceName, stopTimeout); err != nil {
-			d.log.Warn("Rollback: failed to stop container on %s: %v", host, err)
-		}
-		if err := d.containers.Remove(host, serviceName, true); err != nil {
-			d.log.Warn("Rollback: failed to remove container on %s: %v", host, err)
-		}
-
-		// Re-deploy the previous version
+		// Re-deploy the previous version. deployToHostLocked performs a full
+		// blue-green swap: it starts the previous-version container alongside
+		// the current (just-deployed) one, health-checks it, moves the proxy
+		// over, and only then drains and removes the current container. This
+		// keeps the rollback zero-downtime and — crucially — if the previous
+		// image is no longer cached, the new container fails to start *before*
+		// the current one is touched, leaving the host on a working version
+		// instead of stranded with nothing.
 		rollbackOpts := &DeployOptions{
 			Version:     previousVersion,
 			SkipPull:    true, // Image should still be cached from last deployment

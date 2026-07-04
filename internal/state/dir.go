@@ -102,4 +102,3 @@ func ConfigFileQuoted(user, name string) string {
 	}
 	return "\"${HOME}/" + UserStateDirName + "/" + name + "\""
 }
-

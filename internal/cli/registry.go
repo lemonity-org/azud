@@ -174,4 +174,3 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 	log.Success("Logged out on %d host(s)", successCount)
 	return nil
 }
-

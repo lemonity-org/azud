@@ -362,15 +362,11 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	if secs < 1 {
 		secs = 1
 	}
-	// Quote paths safely. Paths containing ${HOME} (non-root users) must use
-	// double quotes to allow variable expansion. All other paths use
-	// shell.Quote() (single-quote based) which is immune to injection.
-	quotedDir := shell.Quote(dir)
-	quotedLockFile := shell.Quote(lockFile)
-	if strings.Contains(lockFile, "${") {
-		quotedDir = fmt.Sprintf(`"%s"`, dir)
-		quotedLockFile = fmt.Sprintf(`"%s"`, lockFile)
-	}
+	// Quote paths safely. A leading ${HOME}/ (non-root users) is preserved
+	// unquoted so the shell expands it, while the remainder is single-quoted
+	// and thus immune to injection. All other paths are fully single-quoted.
+	quotedDir := quoteRemotePath(dir)
+	quotedLockFile := quoteRemotePath(lockFile)
 	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'",
 		quotedDir, secs, quotedLockFile)
 
@@ -412,6 +408,18 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	_ = session.Wait()
 
 	return fnErr
+}
+
+// quoteRemotePath quotes a remote path for safe use in a shell command. A
+// leading ${HOME}/ is preserved unquoted so the shell expands it (non-root
+// users), while the rest of the path is single-quoted and therefore immune to
+// injection. All other paths are fully single-quoted.
+func quoteRemotePath(path string) string {
+	const homePrefix = "${HOME}/"
+	if strings.HasPrefix(path, homePrefix) {
+		return `"${HOME}/"` + shell.Quote(strings.TrimPrefix(path, homePrefix))
+	}
+	return shell.Quote(path)
 }
 
 // Close closes the SSH connection and any underlying proxy connection.

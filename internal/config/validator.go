@@ -38,6 +38,23 @@ func (e ValidationErrors) Error() string {
 // Must start with a letter, contain only alphanumeric, underscore, hyphen, and dot.
 var serviceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 
+// resourceNameRegex validates cron and accessory names. These map keys are used
+// to build container names and remote lock-file paths that are interpolated into
+// shell commands, so they must not contain shell metacharacters.
+var resourceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
+
+// healthPathRegex validates HTTP healthcheck paths. Paths are embedded into
+// curl/wget commands (inside shell double quotes), so the character set is
+// restricted to safe URL path/query characters and deliberately excludes shell
+// metacharacters such as '$', backtick, ';', '(', ')', '|', spaces, and quotes.
+var healthPathRegex = regexp.MustCompile(`^/[a-zA-Z0-9._~/?=&%:@+,-]*$`)
+
+// isValidHealthPath reports whether an HTTP healthcheck path is safe to embed in
+// a shell command. It must start with '/' and contain only URL path characters.
+func isValidHealthPath(path string) bool {
+	return healthPathRegex.MatchString(path)
+}
+
 // Validate checks the configuration for errors
 func Validate(cfg *Config) error {
 	var errs ValidationErrors
@@ -171,6 +188,29 @@ func Validate(cfg *Config) error {
 			})
 		}
 	}
+	// Healthcheck probe paths are embedded in shell commands (curl/wget) that
+	// run on the host and inside containers, so they must not contain shell
+	// metacharacters.
+	for field, path := range map[string]string{
+		"proxy.healthcheck.path":           cfg.Proxy.Healthcheck.Path,
+		"proxy.healthcheck.readiness_path": cfg.Proxy.Healthcheck.ReadinessPath,
+		"proxy.healthcheck.liveness_path":  cfg.Proxy.Healthcheck.LivenessPath,
+	} {
+		if path != "" && !isValidHealthPath(path) {
+			errs = append(errs, ValidationError{
+				Field:   field,
+				Message: "path must start with '/' and contain only URL path characters (no spaces or shell metacharacters)",
+			})
+		}
+	}
+	// The helper image is interpolated into a `podman run` command, so it must
+	// be a valid image reference.
+	if cfg.Proxy.Healthcheck.HelperImage != "" && !isValidImageRef(cfg.Proxy.Healthcheck.HelperImage) {
+		errs = append(errs, ValidationError{
+			Field:   "proxy.healthcheck.helper_image",
+			Message: fmt.Sprintf("invalid image reference: %s", cfg.Proxy.Healthcheck.HelperImage),
+		})
+	}
 	if cfg.Proxy.Buffering.MaxRequestBody < 0 {
 		errs = append(errs, ValidationError{
 			Field:   "proxy.buffering.max_request_body",
@@ -238,6 +278,12 @@ func Validate(cfg *Config) error {
 
 	// Validate accessories
 	for name, acc := range cfg.Accessories {
+		if !resourceNameRegex.MatchString(name) {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("accessories.%s", name),
+				Message: "accessory name must start with a letter and contain only alphanumeric characters, underscores, hyphens, and dots (max 63 chars)",
+			})
+		}
 		if acc.Image == "" {
 			errs = append(errs, ValidationError{
 				Field:   fmt.Sprintf("accessories.%s.image", name),
@@ -275,6 +321,12 @@ func Validate(cfg *Config) error {
 
 	// Validate cron jobs
 	for name, cron := range cfg.Cron {
+		if !resourceNameRegex.MatchString(name) {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("cron.%s", name),
+				Message: "cron name must start with a letter and contain only alphanumeric characters, underscores, hyphens, and dots (max 63 chars)",
+			})
+		}
 		if strings.TrimSpace(cron.Schedule) == "" {
 			errs = append(errs, ValidationError{
 				Field:   fmt.Sprintf("cron.%s.schedule", name),

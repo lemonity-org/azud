@@ -15,6 +15,7 @@ import (
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/proxy"
 	"github.com/lemonity-org/azud/internal/server"
+	"github.com/lemonity-org/azud/internal/shell"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
 
@@ -378,19 +379,19 @@ func verifyAccessoryHealth(
 func uploadAccessoryFiles(sshClient *ssh.Client, host, name string, accessory *config.AccessoryConfig, log *output.Logger) error {
 	for _, f := range accessory.Files {
 		dir := filepath.Dir(f.Remote)
-		if _, err := sshClient.Execute(host, fmt.Sprintf("mkdir -p %s", dir)); err != nil {
+		if _, err := sshClient.Execute(host, fmt.Sprintf("mkdir -p %s", shell.Quote(dir))); err != nil {
 			return fmt.Errorf("creating directory %s: %w", dir, err)
 		}
 		if err := sshClient.Upload(host, f.Local, f.Remote); err != nil {
 			return fmt.Errorf("uploading %s to %s: %w", f.Local, f.Remote, err)
 		}
 		if f.Mode != "" {
-			if _, err := sshClient.Execute(host, fmt.Sprintf("chmod %s %s", f.Mode, f.Remote)); err != nil {
+			if _, err := sshClient.Execute(host, fmt.Sprintf("chmod %s %s", shell.Quote(f.Mode), shell.Quote(f.Remote))); err != nil {
 				log.Warn("Failed to set mode %s on %s: %v", f.Mode, f.Remote, err)
 			}
 		}
 		if f.Owner != "" {
-			if _, err := sshClient.Execute(host, fmt.Sprintf("chown %s %s", f.Owner, f.Remote)); err != nil {
+			if _, err := sshClient.Execute(host, fmt.Sprintf("chown %s %s", shell.Quote(f.Owner), shell.Quote(f.Remote))); err != nil {
 				log.Warn("Failed to set owner %s on %s: %v", f.Owner, f.Remote, err)
 			}
 		}

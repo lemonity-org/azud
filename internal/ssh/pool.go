@@ -11,6 +11,7 @@ type Pool struct {
 	mu          sync.RWMutex
 	maxIdle     time.Duration
 	cleanupDone chan struct{}
+	closeOnce   sync.Once
 }
 
 // NewPool creates a new connection pool
@@ -78,8 +79,10 @@ func (p *Pool) CloseAll() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Signal cleanup goroutine to stop
-	close(p.cleanupDone)
+	// Signal cleanup goroutine to stop. Guard with Once so repeated calls
+	// (e.g. Client.Close() invoked more than once) don't panic on a
+	// closed channel.
+	p.closeOnce.Do(func() { close(p.cleanupDone) })
 
 	var lastErr error
 	for host, conn := range p.connections {

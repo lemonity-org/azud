@@ -9,9 +9,9 @@ import (
 func TestDetectProfile_NoColor(t *testing.T) {
 	// Save and restore env
 	restoreEnv := setEnvVars(map[string]string{
-		"NO_COLOR":   "1",
-		"COLORTERM":  "",
-		"TERM":       "xterm-256color",
+		"NO_COLOR":  "1",
+		"COLORTERM": "",
+		"TERM":      "xterm-256color",
 	})
 	defer restoreEnv()
 
