@@ -6,10 +6,10 @@ import (
 
 func TestFormatSecretErrors(t *testing.T) {
 	tests := []struct {
-		name         string
+		name          string
 		missingByHost map[string][]string
 		emptyByHost   map[string][]string
-		wantMsg      string
+		wantMsg       string
 	}{
 		{
 			name: "only missing keys on one host",
@@ -126,6 +126,58 @@ func TestParseSecretsContent(t *testing.T) {
 				} else if gotV != wantV {
 					t.Errorf("key %q: got %q, want %q", k, gotV, wantV)
 				}
+			}
+		})
+	}
+}
+
+func TestRemotePathShellArg(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "plain absolute path",
+			path: "/var/lib/azud/secrets",
+			want: "/var/lib/azud/secrets",
+		},
+		{
+			name: "documented HOME path",
+			path: "$HOME/.azud/secrets",
+			want: "${HOME}/.azud/secrets",
+		},
+		{
+			name: "braced HOME path",
+			path: "${HOME}/.azud/secrets",
+			want: "${HOME}/.azud/secrets",
+		},
+		{
+			name: "tilde path",
+			path: "~/.azud/secrets",
+			want: "${HOME}/.azud/secrets",
+		},
+		{
+			name: "HOME path with spaces",
+			path: "$HOME/.azud/my secrets",
+			want: "${HOME}/'.azud/my secrets'",
+		},
+		{
+			name: "command substitution after HOME is quoted",
+			path: "$HOME/$(touch /tmp/pwned)",
+			want: "${HOME}/'$(touch /tmp/pwned)'",
+		},
+		{
+			name: "command substitution outside HOME is quoted",
+			path: `/tmp/"$(touch /tmp/pwned)"`,
+			want: `'/tmp/"$(touch /tmp/pwned)"'`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := remotePathShellArg(tt.path); got != tt.want {
+				t.Fatalf("remotePathShellArg(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
 	}

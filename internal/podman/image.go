@@ -26,6 +26,7 @@ func NewImageManager(client *Client) *ImageManager {
 }
 
 func (m *ImageManager) Pull(host, image string) error {
+	image = QualifyImage(image)
 	result, err := m.client.Execute(host, "pull", image)
 	if err != nil {
 		return err
@@ -39,6 +40,7 @@ func (m *ImageManager) Pull(host, image string) error {
 }
 
 func (m *ImageManager) PullAll(hosts []string, image string) map[string]error {
+	image = QualifyImage(image)
 	results := m.client.ExecuteAll(hosts, "pull", image)
 	errors := make(map[string]error)
 

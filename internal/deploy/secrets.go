@@ -17,7 +17,9 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return nil
 	}
 
-	existsCmd := fmt.Sprintf("test -f %s", shell.Quote(secretsPath))
+	quotedPath := remotePathShellArg(secretsPath)
+
+	existsCmd := fmt.Sprintf("test -f %s", quotedPath)
 	results := sshClient.ExecuteParallel(hosts, existsCmd)
 
 	var missingFiles []string
@@ -36,7 +38,7 @@ func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath st
 		return err
 	}
 
-	readCmd := fmt.Sprintf("cat %s", shell.Quote(secretsPath))
+	readCmd := fmt.Sprintf("cat %s", quotedPath)
 	readResults := sshClient.ExecuteParallel(hosts, readCmd)
 
 	unreadable := make([]string, 0)
@@ -145,7 +147,7 @@ func validateSecretsPermissions(sshClient *ssh.Client, hosts []string, secretsPa
 		return nil
 	}
 
-	quotedPath := shell.Quote(secretsPath)
+	quotedPath := remotePathShellArg(secretsPath)
 	cmd := fmt.Sprintf(`path=%s; dir="$(dirname "$path")"; uid=$(id -u); if stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(stat -c '%%u %%a' "$path"); dstat=$(stat -c '%%u %%a' "$dir"); elif stat -f '%%u %%Lp' "$path" >/dev/null 2>&1; then fstat=$(stat -f '%%u %%Lp' "$path"); dstat=$(stat -f '%%u %%Lp' "$dir"); elif busybox stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(busybox stat -c '%%u %%a' "$path"); dstat=$(busybox stat -c '%%u %%a' "$dir"); else echo "stat unsupported" >&2; exit 2; fi; echo "$uid $fstat $dstat"`, quotedPath)
 	results := sshClient.ExecuteParallel(hosts, cmd)
 
@@ -240,6 +242,31 @@ func normalizeSecretKeys(keys []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// remotePathShellArg safely quotes a remote path while supporting the documented
+// home-directory shortcuts. Only a leading $HOME, ${HOME}, or ~/ is expanded;
+// the rest of the path is single-quoted to prevent arbitrary shell expansion.
+func remotePathShellArg(path string) string {
+	switch {
+	case path == "$HOME" || path == "${HOME}" || path == "~":
+		return "${HOME}"
+	case strings.HasPrefix(path, "$HOME/"):
+		return homeRelativeShellArg(strings.TrimPrefix(path, "$HOME/"))
+	case strings.HasPrefix(path, "${HOME}/"):
+		return homeRelativeShellArg(strings.TrimPrefix(path, "${HOME}/"))
+	case strings.HasPrefix(path, "~/"):
+		return homeRelativeShellArg(strings.TrimPrefix(path, "~/"))
+	default:
+		return shell.Quote(path)
+	}
+}
+
+func homeRelativeShellArg(path string) string {
+	if path == "" {
+		return "${HOME}/"
+	}
+	return "${HOME}/" + shell.Quote(path)
 }
 
 func parseSecretsContent(content string) map[string]string {
