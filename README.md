@@ -18,7 +18,8 @@ Azud solves these with:
 - **Multi-server support** from day one
 - **Zero-downtime deployments** by default using blue-green pattern
 - **Configuration as code** with simple YAML files
-- **Stateless CLI** with version-controlled configuration
+- **Configuration-led CLI** with version-controlled desired state and a small,
+  durable deployment/canary journal for safe rollback and CI handoff
 - **Clean, structured output** that's easy to read and parse
 
 ## Features
@@ -52,8 +53,13 @@ Azud solves these with:
 ## Installation
 
 ```bash
-go install github.com/lemonity-org/azud@latest
+curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/v1/scripts/install.sh | sh
 ```
+
+The installer requires the [GitHub CLI](https://cli.github.com/) and verifies both the
+release checksum and its GitHub/Sigstore build provenance. A source install with
+`go install github.com/lemonity-org/azud@latest` is supported for development, but
+cannot contain the release metadata injected into official binaries.
 
 ## Prerequisites
 
@@ -80,37 +86,37 @@ go install github.com/lemonity-org/azud@latest
        hosts:
          - 192.168.1.1
 
-  proxy:
-    hosts:
-      - example.com
-      - www.example.com
-    ssl: true
-    # ssl_redirect: true
-    app_port: 3000
-    # response_timeout: 30s
-    # forward_headers: true
-    # buffering:
-    #   requests: true
-    #   responses: true
-    #   max_request_body: 10485760
-    #   memory: 1048576
-    # logging:
-    #   request_headers: [Authorization, Cookie] # redacted from logs
-    #   response_headers: [Set-Cookie] # redacted from logs
-    healthcheck:
-      path: /up
-      # readiness_path: /ready
-      # liveness_path: /live
-      # disable_liveness: true
-      # liveness_cmd: "curl -fsS http://localhost:3000/up"
-      # helper_image: "curlimages/curl:8.5.0"
-      # helper_pull: "missing"
+   proxy:
+     hosts:
+       - example.com
+       - www.example.com
+     ssl: false
+     # ssl_redirect: true
+     app_port: 3000
+     # response_timeout: 30s
+     # forward_headers: true
+     # buffering:
+     #   requests: true
+     #   responses: true
+     #   max_request_body: 10485760
+     #   memory: 1048576
+     # logging:
+     #   request_headers: [Authorization, Cookie] # redacted from logs
+     #   response_headers: [Set-Cookie] # redacted from logs
+     healthcheck:
+       path: /up
+       # readiness_path: /ready
+       # liveness_path: /live
+       # disable_liveness: true
+       # liveness_cmd: "curl -fsS http://localhost:3000/up"
+       # helper_image: "docker.io/curlimages/curl:8.5.0@sha256:08e466006f0860e54fc299378de998935333e0e130a15f6f98482e9f8dab3058"
+       # helper_pull: "missing"
 
-  env:
-    clear:
-      RAILS_ENV: production
-    secret:
-      - DATABASE_URL
+   env:
+     clear:
+       RAILS_ENV: production
+     secret:
+       - DATABASE_URL
    ```
 
 3. **Setup** your servers:
@@ -254,6 +260,7 @@ proxy:
     - example.com
     - www.example.com
   ssl: true
+  acme_email: ops@example.com
   # ssl_redirect: true
   app_port: 3000
   # response_timeout: 30s

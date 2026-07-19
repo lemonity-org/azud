@@ -22,12 +22,13 @@ func TestRunHistoryList(t *testing.T) {
 	})
 
 	tempDir := t.TempDir()
+	t.Setenv("AZUD_STATE_DIR", tempDir)
 	if err := os.Chdir(tempDir); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
 
 	buf := setupHistoryTestState(t)
-	history := deploy.NewHistoryStore(".", 20, output.DefaultLogger)
+	history := deploy.NewDurableHistoryStore(20, output.DefaultLogger)
 
 	base := time.Date(2026, 2, 8, 12, 0, 0, 0, time.UTC)
 	if err := history.Record(newHistoryRecord(
@@ -74,12 +75,13 @@ func TestRunHistoryShow(t *testing.T) {
 	})
 
 	tempDir := t.TempDir()
+	t.Setenv("AZUD_STATE_DIR", tempDir)
 	if err := os.Chdir(tempDir); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
 
 	buf := setupHistoryTestState(t)
-	history := deploy.NewHistoryStore(".", 20, output.DefaultLogger)
+	history := deploy.NewDurableHistoryStore(20, output.DefaultLogger)
 
 	base := time.Date(2026, 2, 8, 12, 0, 0, 0, time.UTC)
 	record := newHistoryRecord(
@@ -128,6 +130,7 @@ func TestRunHistoryShowNotFound(t *testing.T) {
 	})
 
 	tempDir := t.TempDir()
+	t.Setenv("AZUD_STATE_DIR", tempDir)
 	if err := os.Chdir(tempDir); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}

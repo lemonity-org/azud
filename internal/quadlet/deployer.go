@@ -2,6 +2,7 @@ package quadlet
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/shell"
@@ -45,15 +46,16 @@ func NewQuadletDeployerWithOptions(sshClient *ssh.Client, log *output.Logger, pa
 func (q *QuadletDeployer) Deploy(host, filename, content string) error {
 	q.log.Host(host, "Deploying quadlet %s...", filename)
 
-	filePath := q.path + filename
+	filePath := strings.TrimSuffix(q.path, "/") + "/" + filename
 	var cmd string
 	if q.sudo {
-		cmd = fmt.Sprintf("%smkdir -p %s && %stee %s >/dev/null << 'QUADLET_EOF'\n%sQUADLET_EOF",
-			q.sudoPrefix(), shell.Quote(q.path), q.sudoPrefix(), shell.Quote(filePath), content)
+		cmd = fmt.Sprintf("%smkdir -p %s && %stee %s >/dev/null << 'QUADLET_EOF'\n%sQUADLET_EOF", // safe: prefixes are fixed and paths use quoteRemotePath
+			q.sudoPrefix(), quoteRemotePath(q.path), q.sudoPrefix(), quoteRemotePath(filePath), content)
 	} else {
-		// Use shell.Quote for paths to prevent command injection.
-		cmd = fmt.Sprintf("mkdir -p %s && cat > %s << 'QUADLET_EOF'\n%sQUADLET_EOF",
-			shell.Quote(q.path), shell.Quote(filePath), content)
+		// Preserve remote-home expansion for rootless paths while still quoting
+		// every user-controlled suffix as a single shell word.
+		cmd = fmt.Sprintf("mkdir -p %s && cat > %s << 'QUADLET_EOF'\n%sQUADLET_EOF", // safe: paths use quoteRemotePath and delimiter is fixed
+			quoteRemotePath(q.path), quoteRemotePath(filePath), content)
 	}
 
 	result, err := q.ssh.Execute(host, cmd)
@@ -75,8 +77,8 @@ func (q *QuadletDeployer) Deploy(host, filename, content string) error {
 func (q *QuadletDeployer) Remove(host, filename string) error {
 	q.log.Host(host, "Removing quadlet %s...", filename)
 
-	filePath := q.path + filename
-	cmd := fmt.Sprintf("%srm -f %s", q.sudoPrefix(), shell.Quote(filePath))
+	filePath := strings.TrimSuffix(q.path, "/") + "/" + filename
+	cmd := fmt.Sprintf("%srm -f %s", q.sudoPrefix(), quoteRemotePath(filePath)) // safe: prefix is fixed and path is quoted
 
 	result, err := q.ssh.Execute(host, cmd)
 	if err != nil {
@@ -178,4 +180,19 @@ func (q *QuadletDeployer) sudoPrefix() string {
 		return "sudo -n "
 	}
 	return ""
+}
+
+// quoteRemotePath quotes a remote path without freezing a deliberate home
+// prefix. A plain shell.Quote("~/.config") would create a directory literally
+// named "~" instead of the rootless user's systemd directory.
+func quoteRemotePath(value string) string {
+	for _, prefix := range []string{"${HOME}", "$HOME", "~"} {
+		if value == prefix {
+			return `"${HOME}"`
+		}
+		if strings.HasPrefix(value, prefix+"/") {
+			return `"${HOME}"` + shell.Quote(strings.TrimPrefix(value, prefix))
+		}
+	}
+	return shell.Quote(value)
 }

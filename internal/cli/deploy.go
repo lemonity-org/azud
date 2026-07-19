@@ -87,8 +87,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	log.Header("Azud Deploy")
 
-	// Build if not skipped
-	if !deploySkipBuild {
+	// An explicit version refers to an already tagged image. Building the
+	// current checkout under a different generated tag would be misleading.
+	if deployVersion != "" && !deploySkipBuild {
+		log.Info("Explicit version %s selected; skipping local build", deployVersion)
+	} else if !deploySkipBuild {
 		log.Info("Building image...")
 		if err := runBuild(cmd, args); err != nil {
 			return fmt.Errorf("build failed: %w", err)

@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // Config represents the main deployment configuration
 type Config struct {
@@ -311,6 +314,10 @@ func (p ProxyConfig) AllHosts() []string {
 	return hosts
 }
 
+// DefaultHealthcheckHelperImage is pinned to the multi-platform index for
+// curlimages/curl 8.5.0. Update the tag and digest together after review.
+const DefaultHealthcheckHelperImage = "docker.io/curlimages/curl:8.5.0@sha256:08e466006f0860e54fc299378de998935333e0e130a15f6f98482e9f8dab3058"
+
 // HealthcheckConfig holds health check settings
 type HealthcheckConfig struct {
 	// Health check path (used as fallback for both readiness and liveness if they are not set)
@@ -337,7 +344,7 @@ type HealthcheckConfig struct {
 	Timeout string `yaml:"timeout"`
 
 	// Helper image for readiness checks when the app container lacks HTTP clients.
-	// Defaults to "curlimages/curl:8.5.0" if empty.
+	// Defaults to DefaultHealthcheckHelperImage if empty.
 	HelperImage string `yaml:"helper_image"`
 
 	// Helper image pull policy: "missing", "always", or "never".
@@ -512,6 +519,11 @@ type DeployConfig struct {
 	// Aborts deploy on non-zero exit.
 	PreDeployCommand string `yaml:"pre_deploy_command"`
 
+	// AllowUnverifiedImage explicitly permits deployment when Podman cannot
+	// report an image digest. This weakens mutable-tag protection and defaults
+	// to false.
+	AllowUnverifiedImage bool `yaml:"allow_unverified_image"`
+
 	// Canary deployment configuration
 	Canary CanaryConfig `yaml:"canary"`
 }
@@ -564,6 +576,9 @@ type SSHConfig struct {
 
 	// Connection timeout
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+
+	// Maximum duration for one remote command. Defaults to deploy_timeout.
+	CommandTimeout time.Duration `yaml:"command_timeout"`
 
 	// Skip host key verification (not recommended for production)
 	InsecureIgnoreHostKey bool `yaml:"insecure_ignore_host_key"`
@@ -644,7 +659,8 @@ func (c *Config) GetAllHosts() []string {
 	hostSet := make(map[string]bool)
 	var hosts []string
 
-	for _, role := range c.Servers {
+	for _, roleName := range c.GetRoles() {
+		role := c.Servers[roleName]
 		for _, host := range role.Hosts {
 			if !hostSet[host] {
 				hostSet[host] = true
@@ -669,7 +685,8 @@ func (c *Config) GetAccessoryHosts() []string {
 	hostSet := make(map[string]bool)
 	var hosts []string
 
-	for _, acc := range c.Accessories {
+	for _, name := range c.GetAccessoryNames() {
+		acc := c.Accessories[name]
 		if acc.Host != "" && !hostSet[acc.Host] {
 			hostSet[acc.Host] = true
 			hosts = append(hosts, acc.Host)
@@ -703,6 +720,7 @@ func (c *Config) GetRoles() []string {
 	for role := range c.Servers {
 		roles = append(roles, role)
 	}
+	sort.Strings(roles)
 	return roles
 }
 
@@ -712,6 +730,7 @@ func (c *Config) GetAccessoryNames() []string {
 	for name := range c.Accessories {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -721,6 +740,7 @@ func (c *Config) GetCronNames() []string {
 	for name := range c.Cron {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -762,7 +782,7 @@ func (c *Config) GetAllCronHosts() []string {
 	hostSet := make(map[string]bool)
 	var hosts []string
 
-	for name := range c.Cron {
+	for _, name := range c.GetCronNames() {
 		for _, host := range c.GetCronHosts(name) {
 			if host == "" || hostSet[host] {
 				continue

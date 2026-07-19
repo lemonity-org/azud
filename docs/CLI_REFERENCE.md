@@ -561,6 +561,7 @@ proxy:
   host: example.com             # Single host
   # hosts: [example.com, www.example.com] # Multiple hosts
   ssl: true                     # Auto HTTPS
+  acme_email: ops@example.com   # Required when SSL is enabled
   # rootful: true               # Run proxy with rootful Podman (supports 80/443 with rootless app mode)
   app_port: 3000                # Container port
   healthcheck:

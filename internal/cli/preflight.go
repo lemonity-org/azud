@@ -75,9 +75,11 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	// DNS check for proxy host
 	proxyHosts := cfg.Proxy.AllHosts()
+	var blockers []string
 	for _, host := range proxyHosts {
 		if _, err := net.LookupHost(host); err != nil {
-			log.Warn("DNS lookup failed for %s: %v", host, err)
+			log.Error("DNS lookup failed for %s: %v", host, err)
+			blockers = append(blockers, fmt.Sprintf("dns/%s", host))
 		} else {
 			log.Success("DNS OK for %s", host)
 		}
@@ -106,7 +108,29 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	wg.Wait()
 
-	log.Table([]string{"Host", "SSH", "Trust", "Podman", "Rootless", "Secrets", "Proxy", "Helper", "Curl", "SSHD", "Firewall", "Cron"}, rows)
+	headings := []string{"Host", "SSH", "Trust", "Podman", "Rootless", "Secrets", "Proxy", "Helper", "Curl", "SSHD", "Firewall", "Cron"}
+	log.Table(headings, rows)
+	var warnings []string
+	for _, row := range rows {
+		for column := 1; column < len(row); column++ {
+			status := strings.ToLower(strings.TrimSpace(row[column]))
+			switch status {
+			case "ok", "n/a":
+			case "warn", "unknown":
+				warnings = append(warnings, fmt.Sprintf("%s/%s=%s", row[0], strings.ToLower(headings[column]), status))
+			default:
+				blockers = append(blockers, fmt.Sprintf("%s/%s=%s", row[0], strings.ToLower(headings[column]), status))
+			}
+		}
+	}
+	if len(warnings) > 0 {
+		sort.Strings(warnings)
+		log.Warn("Preflight warnings (non-blocking): %s", strings.Join(warnings, ", "))
+	}
+	if len(blockers) > 0 {
+		sort.Strings(blockers)
+		return fmt.Errorf("preflight failed: %s", strings.Join(blockers, ", "))
+	}
 	return nil
 }
 
@@ -129,7 +153,8 @@ func validateLocalSecretRefs() error {
 	}
 
 	// Accessory env secrets references
-	for name, accessory := range cfg.Accessories {
+	for _, name := range cfg.GetAccessoryNames() {
+		accessory := cfg.Accessories[name]
 		for _, key := range accessory.Env.Secret {
 			if !secretAvailable(key) {
 				missing = append(missing, fmt.Sprintf("accessories.%s.env.secret:%s", name, key))
@@ -234,13 +259,13 @@ func remoteEnvAvailable(sshClient *ssh.Client, host, name string) bool {
 	if !validEnvName(name) {
 		return false
 	}
-	cmd := fmt.Sprintf("printenv %s >/dev/null 2>&1", name)
+	cmd := fmt.Sprintf("printenv %s >/dev/null 2>&1", name) // safe: validEnvName restricts shell syntax
 	result, err := sshClient.Execute(host, cmd)
 	return err == nil && result.ExitCode == 0
 }
 
 func remoteFileExists(sshClient *ssh.Client, host, path string) bool {
-	cmd := fmt.Sprintf("test -f %s", shellQuote(path))
+	cmd := fmt.Sprintf("test -f %s", shellQuote(path)) // safe: path is shell quoted
 	result, err := sshClient.Execute(host, cmd)
 	return err == nil && result.ExitCode == 0
 }
@@ -272,7 +297,10 @@ func shellQuote(value string) string {
 }
 func getPreflightHosts() []string {
 	if preflightHost != "" {
-		return []string{preflightHost}
+		if containsString(cfg.GetAllSSHHosts(), preflightHost) {
+			return []string{preflightHost}
+		}
+		return nil
 	}
 	if preflightRole != "" {
 		return cfg.GetRoleHosts(preflightRole)
@@ -381,10 +409,10 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 	}
 	helperImage := strings.TrimSpace(cfg.Proxy.Healthcheck.HelperImage)
 	if helperImage == "" {
-		helperImage = "curlimages/curl:8.5.0"
+		helperImage = config.DefaultHealthcheckHelperImage
 	}
 	if isProxyHost && readinessPath != "" && helperPull == "never" {
-		cmd := fmt.Sprintf("podman image exists %s", shellQuote(helperImage))
+		cmd := fmt.Sprintf("podman image exists %s", shellQuote(helperImage)) // safe: image is shell quoted
 		helperStatus = checkRemoteCommand(bootstrapper, host, cmd)
 	}
 
@@ -516,7 +544,29 @@ func checkFirewall(bootstrapper *server.Bootstrapper, host string) string {
 }
 
 func checkCronDeps(bootstrapper *server.Bootstrapper, host string) string {
-	cmd := "command -v crond >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1"
+	required := map[string]bool{"crond": true, "crontab": true}
+	for _, name := range cfg.GetCronNames() {
+		cronConfig := cfg.Cron[name]
+		if !containsString(cfg.GetCronHosts(name), host) {
+			continue
+		}
+		if cronConfig.Lock {
+			required["flock"] = true
+		}
+		if cronConfig.Timeout != "" {
+			required["timeout"] = true
+		}
+	}
+	commands := make([]string, 0, len(required))
+	for command := range required {
+		commands = append(commands, command)
+	}
+	sort.Strings(commands)
+	checks := make([]string, 0, len(commands))
+	for _, command := range commands {
+		checks = append(checks, fmt.Sprintf("command -v %s >/dev/null 2>&1", shellQuote(command)))
+	}
+	cmd := fmt.Sprintf("podman run --rm --pull=never --entrypoint /bin/sh %s -c %s", shellQuote(cfg.Image), shellQuote(strings.Join(checks, " && "))) // safe: both interpolations are shell quoted
 	results := bootstrapper.ExecuteOnAll([]string{host}, cmd)
 	if len(results) == 0 || !results[0].Success() {
 		return "missing"

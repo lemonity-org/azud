@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/pkg/version"
 )
 
 var (
@@ -67,6 +69,12 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
+// ExecuteContext runs the CLI with cancellation propagated to remote SSH
+// connections and commands.
+func ExecuteContext(ctx context.Context) error {
+	return rootCmd.ExecuteContext(ctx)
+}
+
 func loadConfig() (*config.Config, error) {
 	path := configPath
 	if path == "" {
@@ -78,7 +86,14 @@ func loadConfig() (*config.Config, error) {
 	}
 
 	loader := config.NewLoader(path, destination)
-	return loader.Load()
+	loaded, err := loader.Load()
+	if err != nil {
+		return nil, err
+	}
+	if err := config.ValidateMinimumVersion(loaded, version.Version); err != nil {
+		return nil, err
+	}
+	return loaded, nil
 }
 
 func findConfigFile() string {

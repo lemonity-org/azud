@@ -207,6 +207,26 @@ func TestBuildRunCommand_WithHealthcheck(t *testing.T) {
 	}
 }
 
+func TestBuildRunCommand_QuotesAdditionalOptions(t *testing.T) {
+	cfg := &ContainerConfig{
+		Image: "nginx:latest",
+		Options: []string{
+			"--annotation=value; touch /tmp/pwned",
+			"--label=$(touch /tmp/substitution)",
+		},
+	}
+
+	cmd := cfg.BuildRunCommand()
+	for _, want := range []string{
+		"'--annotation=value; touch /tmp/pwned'",
+		"'--label=$(touch /tmp/substitution)'",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("expected safely quoted option %q in %q", want, cmd)
+		}
+	}
+}
+
 func TestBuildExecCommand_Basic(t *testing.T) {
 	cfg := &ExecConfig{
 		Container: "myapp",

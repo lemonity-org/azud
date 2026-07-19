@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/state"
 )
 
 // DeploymentStatus represents the status of a deployment
@@ -75,6 +77,24 @@ type HistoryStore struct {
 	retainDays int
 	mu         sync.RWMutex
 	log        *output.Logger
+	initErr    error
+}
+
+// NewDurableHistoryStore stores history in the user's Azud state directory
+// (or AZUD_STATE_DIR), independently of the current checkout.
+func NewDurableHistoryStore(retainCount int, log *output.Logger) *HistoryStore {
+	if log == nil {
+		log = output.DefaultLogger
+	}
+	basePath, err := state.LocalDir()
+	if err != nil {
+		return &HistoryStore{retainDays: retainCount, log: log, initErr: err}
+	}
+	return &HistoryStore{
+		basePath:   filepath.Join(basePath, "history"),
+		retainDays: retainCount,
+		log:        log,
+	}
 }
 
 var deploymentIDCounter uint64
@@ -92,19 +112,48 @@ func NewHistoryStore(basePath string, retainCount int, log *output.Logger) *Hist
 	}
 }
 
+// EnsureAvailable validates and creates the durable history directory before
+// a command changes remote state. This avoids completing a deploy only to
+// discover afterward that its rollback record cannot be persisted.
+func (h *HistoryStore) EnsureAvailable() error {
+	if h.initErr != nil {
+		return fmt.Errorf("history state unavailable: %w", h.initErr)
+	}
+	if err := os.MkdirAll(h.basePath, 0700); err != nil {
+		return fmt.Errorf("failed to create history directory: %w", err)
+	}
+	lock, err := state.AcquireFileLock(filepath.Join(h.basePath, ".history.lock"))
+	if err != nil {
+		return fmt.Errorf("failed to verify history lock: %w", err)
+	}
+	if err := lock.Release(); err != nil {
+		return fmt.Errorf("failed to release history lock: %w", err)
+	}
+	return nil
+}
+
 // Record saves a deployment record to the store
 func (h *HistoryStore) Record(record *DeploymentRecord) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	// Ensure directory exists
-	if err := os.MkdirAll(h.basePath, 0755); err != nil {
-		return fmt.Errorf("failed to create history directory: %w", err)
+	if h.initErr != nil {
+		return fmt.Errorf("history state unavailable: %w", h.initErr)
 	}
 
-	// Generate filename based on service and timestamp
-	filename := fmt.Sprintf("%s_%s.json", record.Service, record.StartedAt.Format("20060102_150405"))
-	filepath := filepath.Join(h.basePath, filename)
+	// Ensure directory exists
+	if err := os.MkdirAll(h.basePath, 0700); err != nil {
+		return fmt.Errorf("failed to create history directory: %w", err)
+	}
+	lock, err := state.AcquireFileLock(filepath.Join(h.basePath, ".history.lock"))
+	if err != nil {
+		return fmt.Errorf("failed to lock history: %w", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	// Nanosecond precision plus the record ID prevents concurrent deployments
+	// of the same service from overwriting one another.
+	filename := fmt.Sprintf("%s_%s_%s.json", safeHistoryFilenamePart(record.Service), record.StartedAt.UTC().Format("20060102_150405.000000000"), safeHistoryFilenamePart(record.ID))
+	recordPath := filepath.Join(h.basePath, filename)
 
 	// Marshal record to JSON
 	data, err := json.MarshalIndent(record, "", "  ")
@@ -112,15 +161,48 @@ func (h *HistoryStore) Record(record *DeploymentRecord) error {
 		return fmt.Errorf("failed to marshal record: %w", err)
 	}
 
-	// Write to file
-	if err := os.WriteFile(filepath, data, 0644); err != nil {
+	file, err := os.CreateTemp(h.basePath, ".record-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create record temp file: %w", err)
+	}
+	tmpPath := file.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("failed to secure record temp file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
 		return fmt.Errorf("failed to write record: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("failed to sync record: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close record: %w", err)
+	}
+	if err := os.Rename(tmpPath, recordPath); err != nil {
+		return fmt.Errorf("failed to commit record: %w", err)
 	}
 
 	// Cleanup old records
 	go h.cleanup(record.Service)
 
 	return nil
+}
+
+func safeHistoryFilenamePart(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_.-", r) {
+			return r
+		}
+		return '-'
+	}, value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 // Update updates an existing deployment record
@@ -132,8 +214,11 @@ func (h *HistoryStore) Update(record *DeploymentRecord) error {
 func (h *HistoryStore) List(service string, limit int) ([]*DeploymentRecord, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if h.initErr != nil {
+		return nil, fmt.Errorf("history state unavailable: %w", h.initErr)
+	}
 
-	pattern := filepath.Join(h.basePath, fmt.Sprintf("%s_*.json", service))
+	pattern := filepath.Join(h.basePath, fmt.Sprintf("%s_*.json", safeHistoryFilenamePart(service)))
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list history files: %w", err)
@@ -166,6 +251,9 @@ func (h *HistoryStore) List(service string, limit int) ([]*DeploymentRecord, err
 func (h *HistoryStore) Get(id string) (*DeploymentRecord, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if h.initErr != nil {
+		return nil, fmt.Errorf("history state unavailable: %w", h.initErr)
+	}
 
 	// Search all files for matching ID
 	files, err := filepath.Glob(filepath.Join(h.basePath, "*.json"))
@@ -236,7 +324,7 @@ func (h *HistoryStore) cleanup(service string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	pattern := filepath.Join(h.basePath, fmt.Sprintf("%s_*.json", service))
+	pattern := filepath.Join(h.basePath, fmt.Sprintf("%s_*.json", safeHistoryFilenamePart(service)))
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return

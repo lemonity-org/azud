@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -312,6 +313,12 @@ func runProxyLogs(cmd *cobra.Command, args []string) error {
 	defer func() { _ = sshClient.Close() }()
 
 	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	if proxyFollow {
+		if err := manager.LogsStream(host, true, proxyTail, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("failed to follow logs: %w", err)
+		}
+		return nil
+	}
 
 	result, err := manager.Logs(host, proxyFollow, proxyTail)
 	if err != nil {
@@ -320,7 +327,10 @@ func runProxyLogs(cmd *cobra.Command, args []string) error {
 
 	fmt.Print(result.Stdout)
 	if result.Stderr != "" {
-		fmt.Print(result.Stderr)
+		fmt.Fprint(os.Stderr, result.Stderr)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("proxy logs exited with status %d", result.ExitCode)
 	}
 
 	return nil
@@ -343,10 +353,12 @@ func runProxyStatus(cmd *cobra.Command, args []string) error {
 	log.Header("Proxy Status")
 
 	var rows [][]string
+	var statusErrors []string
 	for _, host := range hosts {
 		status, err := manager.Status(host)
 		if err != nil {
 			rows = append(rows, []string{host, "error", err.Error()})
+			statusErrors = append(statusErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
 
@@ -360,6 +372,9 @@ func runProxyStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Table([]string{"Host", "Status", "Routes"}, rows)
+	if len(statusErrors) > 0 {
+		return fmt.Errorf("proxy status failed: %s", strings.Join(statusErrors, "; "))
+	}
 	return nil
 }
 
@@ -377,11 +392,16 @@ func runProxyRemove(cmd *cobra.Command, args []string) error {
 
 	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
+	var removeErrors []string
 	for _, host := range hosts {
 		if err := manager.Remove(host); err != nil {
 			log.HostError(host, "failed to remove proxy: %v", err)
+			removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
+	}
+	if len(removeErrors) > 0 {
+		return fmt.Errorf("proxy remove failed: %s", strings.Join(removeErrors, "; "))
 	}
 
 	log.Success("Proxy removed")
@@ -391,7 +411,10 @@ func runProxyRemove(cmd *cobra.Command, args []string) error {
 // getTargetHosts returns the hosts to operate on
 func getTargetHosts(specificHost string) []string {
 	if specificHost != "" {
-		return []string{specificHost}
+		if containsString(cfg.GetAllHosts(), specificHost) {
+			return []string{specificHost}
+		}
+		return nil
 	}
 	return cfg.GetAllHosts()
 }

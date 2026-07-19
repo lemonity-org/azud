@@ -1,11 +1,42 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestLoaderUnknownKeyIncludesPathLineAndSuggestion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deploy.yml")
+	content := `
+service: test
+image: test:latest
+servers:
+  web:
+    hosts: [localhost]
+proxy:
+  host: test.example.com
+deploy:
+  readyness_delay: 5s
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewLoader(path, "").Load()
+	if err == nil {
+		t.Fatal("expected unknown key error")
+	}
+	for _, want := range []string{"line 10", `"deploy.readyness_delay"`, `did you mean "deploy.readiness_delay"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
 
 func TestMergeConfigs_AllowsExplicitFalseAndZero(t *testing.T) {
 	base := &Config{

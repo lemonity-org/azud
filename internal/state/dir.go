@@ -48,6 +48,12 @@ func DirQuoted(user string) string {
 // LocalDir returns the state directory path for the current local user.
 // This is used for local state files (e.g., canary state).
 func LocalDir() (string, error) {
+	if configured := os.Getenv("AZUD_STATE_DIR"); configured != "" {
+		if !filepath.IsAbs(configured) {
+			return "", fmt.Errorf("AZUD_STATE_DIR must be an absolute path")
+		}
+		return filepath.Clean(configured), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)

@@ -43,6 +43,10 @@ var serviceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 // shell commands, so they must not contain shell metacharacters.
 var resourceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 
+var memoryLimitRegex = regexp.MustCompile(`^[1-9][0-9]*[bBkKmMgGtTpP]?$`)
+var sshUserRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+var remotePathRegex = regexp.MustCompile(`^[a-zA-Z0-9_./@+,: -]+$`)
+
 // healthPathRegex validates HTTP healthcheck paths. Paths are embedded into
 // curl/wget commands (inside shell double quotes), so the character set is
 // restricted to safe URL path/query characters and deliberately excludes shell
@@ -92,11 +96,20 @@ func Validate(cfg *Config) error {
 		})
 	} else {
 		for role, rc := range cfg.Servers {
+			if !resourceNameRegex.MatchString(role) {
+				errs = append(errs, ValidationError{
+					Field:   fmt.Sprintf("servers.%s", role),
+					Message: "role name must start with a letter and contain only alphanumeric characters, underscores, hyphens, and dots (max 63 chars)",
+				})
+			}
 			if len(rc.Hosts) == 0 {
 				errs = append(errs, ValidationError{
 					Field:   fmt.Sprintf("servers.%s.hosts", role),
 					Message: "at least one host is required",
 				})
+			}
+			if len(rc.Tags) > 0 {
+				errs = append(errs, ValidationError{Field: fmt.Sprintf("servers.%s.tags", role), Message: "role tags are not supported"})
 			}
 
 			// Validate host addresses
@@ -105,6 +118,31 @@ func Validate(cfg *Config) error {
 					errs = append(errs, ValidationError{
 						Field:   fmt.Sprintf("servers.%s.hosts[%d]", role, i),
 						Message: fmt.Sprintf("invalid host address: %s", host),
+					})
+				}
+			}
+
+			for option, value := range rc.Options {
+				switch option {
+				case "memory":
+					if !memoryLimitRegex.MatchString(strings.TrimSpace(value)) {
+						errs = append(errs, ValidationError{
+							Field:   fmt.Sprintf("servers.%s.options.memory", role),
+							Message: "memory must be a positive integer with an optional B, K, M, G, T, or P suffix",
+						})
+					}
+				case "cpus":
+					cpus, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+					if err != nil || cpus <= 0 {
+						errs = append(errs, ValidationError{
+							Field:   fmt.Sprintf("servers.%s.options.cpus", role),
+							Message: "cpus must be a positive number",
+						})
+					}
+				default:
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("servers.%s.options.%s", role, option),
+						Message: "unsupported container option (allowed: memory, cpus)",
 					})
 				}
 			}
@@ -223,6 +261,9 @@ func Validate(cfg *Config) error {
 			Message: "buffering.memory must be non-negative",
 		})
 	}
+	if len(cfg.Env.Tags) > 0 {
+		errs = append(errs, ValidationError{Field: "env.tags", Message: "tagged environments are not supported"})
+	}
 
 	// Validate ACME email when SSL is enabled (skip if custom certificates are provided)
 	if cfg.Proxy.SSL && cfg.Proxy.ACMEEmail == "" {
@@ -317,6 +358,27 @@ func Validate(cfg *Config) error {
 				})
 			}
 		}
+		for option, value := range acc.Options {
+			switch option {
+			case "memory":
+				if !memoryLimitRegex.MatchString(strings.TrimSpace(value)) {
+					errs = append(errs, ValidationError{Field: fmt.Sprintf("accessories.%s.options.memory", name), Message: "memory must be a positive integer with an optional B, K, M, G, T, or P suffix"})
+				}
+			case "cpus":
+				cpus, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+				if err != nil || cpus <= 0 {
+					errs = append(errs, ValidationError{Field: fmt.Sprintf("accessories.%s.options.cpus", name), Message: "cpus must be a positive number"})
+				}
+			default:
+				errs = append(errs, ValidationError{Field: fmt.Sprintf("accessories.%s.options.%s", name, option), Message: "unsupported container option (allowed: memory, cpus)"})
+			}
+		}
+		if len(acc.Roles) > 0 {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("accessories.%s.roles", name),
+				Message: "accessory role scoping is not supported; omit roles (Azud accessories use the shared azud network)",
+			})
+		}
 	}
 
 	// Validate cron jobs
@@ -371,11 +433,23 @@ func Validate(cfg *Config) error {
 	}
 
 	// Validate SSH configuration
+	if cfg.SSH.User != "" && !sshUserRegex.MatchString(cfg.SSH.User) {
+		errs = append(errs, ValidationError{
+			Field:   "ssh.user",
+			Message: "SSH user must be a valid POSIX account name",
+		})
+	}
 	if cfg.SSH.Port < 1 || cfg.SSH.Port > 65535 {
 		errs = append(errs, ValidationError{
 			Field:   "ssh.port",
 			Message: "SSH port must be between 1 and 65535",
 		})
+	}
+	if cfg.SSH.ConnectTimeout < 0 {
+		errs = append(errs, ValidationError{Field: "ssh.connect_timeout", Message: "must be non-negative"})
+	}
+	if cfg.SSH.CommandTimeout < 0 {
+		errs = append(errs, ValidationError{Field: "ssh.command_timeout", Message: "must be non-negative"})
 	}
 	if cfg.Security.RequireNonRootSSH && cfg.SSH.User == "root" {
 		errs = append(errs, ValidationError{
@@ -604,6 +678,12 @@ func Validate(cfg *Config) error {
 			Message: "secrets_provider must be file, env, or command",
 		})
 	}
+	if cfg.SecretsRemotePath != "" && !isValidRemoteSecretsPath(cfg.SecretsRemotePath) {
+		errs = append(errs, ValidationError{
+			Field:   "secrets_remote_path",
+			Message: "must be an absolute path or begin with $HOME, ${HOME}, or ~/ and contain no traversal or shell metacharacters",
+		})
+	}
 
 	// Validate deploy configuration
 	if cfg.Deploy.RetainContainers < 0 {
@@ -620,12 +700,43 @@ func Validate(cfg *Config) error {
 			Message: fmt.Sprintf("invalid semver format: %s (expected MAJOR.MINOR.PATCH)", cfg.MinimumVersion),
 		})
 	}
+	if cfg.AssetPath != "" {
+		errs = append(errs, ValidationError{Field: "asset_path", Message: "asset bridging is not supported"})
+	}
+	if len(cfg.Aliases) > 0 {
+		errs = append(errs, ValidationError{Field: "aliases", Message: "command aliases are not supported"})
+	}
 
 	if len(errs) > 0 {
 		return errs
 	}
 
 	return nil
+}
+
+func isValidRemoteSecretsPath(path string) bool {
+	var remainder string
+	switch {
+	case strings.HasPrefix(path, "/"):
+		remainder = path
+	case strings.HasPrefix(path, "$HOME/"):
+		remainder = strings.TrimPrefix(path, "$HOME/")
+	case strings.HasPrefix(path, "${HOME}/"):
+		remainder = strings.TrimPrefix(path, "${HOME}/")
+	case strings.HasPrefix(path, "~/"):
+		remainder = strings.TrimPrefix(path, "~/")
+	default:
+		return false
+	}
+	if remainder == "" || !remotePathRegex.MatchString(remainder) {
+		return false
+	}
+	for _, segment := range strings.Split(remainder, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // isValidHost checks if a string is a valid hostname or IP address

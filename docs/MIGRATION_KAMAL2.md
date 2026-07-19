@@ -60,7 +60,8 @@ This boots Caddy, registers domains, and deploys your app.
 
 - Azud manages Caddy instead of `kamal-proxy`
 - Azud uses blue-green by default, with health checks
-- CLI is stateless; config is the source of truth
+- Config is the declarative source of truth; deployment history and canary
+  progress live in the durable Azud state directory (`AZUD_STATE_DIR`)
 - Use `azud build` + `azud deploy` instead of push-based deploys
 
 ## 7) CI/CD update

@@ -5,8 +5,11 @@ This guide takes you from zero to a first successful deploy.
 ## 1) Install the CLI
 
 ```bash
-go install github.com/lemonity-org/azud@latest
+curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/v1/scripts/install.sh | sh
 ```
+
+Install the [GitHub CLI](https://cli.github.com/) first; the installer uses it to
+verify the release's signed build provenance.
 
 ## 2) Initialize your project
 
@@ -36,7 +39,7 @@ servers:
 proxy:
   hosts:
     - example.com
-  ssl: true
+  ssl: false
   app_port: 3000
   healthcheck:
     path: /up
@@ -70,7 +73,7 @@ This bootstraps servers, starts the proxy, builds/pushes the image, and deploys.
 
 ## 5) Verify
 
-- Visit `https://example.com`
+- Visit `http://example.com` (enable SSL with a valid `acme_email` for HTTPS)
 - Check logs: `azud app logs --tail 200`
 - Inspect containers: `azud app details`
 

@@ -1,14 +1,102 @@
 package ssh
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"net"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func startBlackholeSSHListener(t *testing.T) (port int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Skipf("local TCP listeners unavailable in this sandbox: %v", err)
+	}
+	stop := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		_ = listener.Close()
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				<-stop
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func TestConnectHonorsCancellationDuringSSHHandshake(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	port := startBlackholeSSHListener(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	client := NewClient(&Config{
+		Context:               ctx,
+		Port:                  port,
+		ConnectTimeout:        5 * time.Second,
+		InsecureIgnoreHostKey: true,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	time.AfterFunc(75*time.Millisecond, cancel)
+
+	started := time.Now()
+	_, err := client.Connect("127.0.0.1")
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("Connect error = %v, want context cancellation", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("canceled connect took %s", elapsed)
+	}
+}
+
+func TestDifferentHostConnectionsAreNotGloballySerialized(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	port := startBlackholeSSHListener(t)
+	client := NewClient(&Config{
+		Port:                  port,
+		ConnectTimeout:        250 * time.Millisecond,
+		InsecureIgnoreHostKey: true,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+
+	hosts := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3"}
+	errs := make(chan error, len(hosts))
+	var wg sync.WaitGroup
+	started := time.Now()
+	for _, host := range hosts {
+		wg.Add(1)
+		go func(host string) {
+			defer wg.Done()
+			_, err := client.Connect(host)
+			errs <- err
+		}(host)
+	}
+	wg.Wait()
+	elapsed := time.Since(started)
+	close(errs)
+	for err := range errs {
+		if err == nil {
+			t.Fatal("expected blackhole connection to time out")
+		}
+	}
+	if elapsed > 550*time.Millisecond {
+		t.Fatalf("three host connections took %s; expected one timeout window", elapsed)
+	}
+}
 
 // testPublicKey generates a fresh ed25519 SSH public key and returns it along
 // with its SHA256 fingerprint (the same format used in trusted_host_fingerprints).

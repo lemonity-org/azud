@@ -67,7 +67,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Create deploy.yml
 	configPath := filepath.Join("config", "deploy.yml")
-	if err := os.WriteFile(configPath, []byte(getConfigTemplate()), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(getConfigTemplate(initGitHubActions)), 0644); err != nil {
 		return fmt.Errorf("failed to create %s: %w", configPath, err)
 	}
 	fmt.Printf("Created %s\n", configPath)
@@ -110,9 +110,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Created %s\n", workflowPath)
 	}
 
-	// Add .azud/secrets to .gitignore if it exists
-	if _, err := os.Stat(".gitignore"); err == nil {
-		appendToGitignore()
+	// Protect the generated secrets file even in a brand-new repository.
+	if err := appendToGitignore(); err != nil {
+		return fmt.Errorf("failed to protect .azud/secrets in .gitignore: %w", err)
 	}
 
 	fmt.Println()
@@ -133,8 +133,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func getConfigTemplate() string {
-	return `# Azud Deployment Configuration
+func getConfigTemplate(githubActions bool) string {
+	template := `# Azud Deployment Configuration
 # Documentation: https://github.com/lemonity-org/azud
 
 # Service name (used as container name prefix)
@@ -175,8 +175,9 @@ servers:
 proxy:
   # Your application's hostname
   host: my-app.example.com
-  # Enable automatic SSL via Let's Encrypt
-  ssl: true
+  # Enable automatic SSL after setting a real ACME contact address.
+  ssl: false
+  # acme_email: ops@example.com
   # Run proxy with rootful Podman (useful when podman.rootless=true and binding 80/443)
   # rootful: true
   # Application port inside the container
@@ -190,7 +191,7 @@ proxy:
     # liveness_path: /live
     # disable_liveness: true
     # liveness_cmd: "curl -fsS http://localhost:3000/up"
-    # helper_image: "curlimages/curl:8.5.0"
+    # helper_image: "docker.io/curlimages/curl:8.5.0@sha256:08e466006f0860e54fc299378de998935333e0e130a15f6f98482e9f8dab3058"
     # helper_pull: "missing"
 
 # Environment variables
@@ -242,9 +243,8 @@ ssh:
   #   host: bastion.example.com
   #   user: deploy
 
-# Secrets provider (optional)
-# secrets_provider: file # file | env | command
-# secrets_env_prefix: AZUD_SECRET_
+# Secrets provider
+{{AZUD_SECRETS_PROVIDER}}
 # secrets_command: "printenv | grep '^AZUD_SECRET_' | sed 's/^AZUD_SECRET_//'"
 # secrets_remote_path: $HOME/.azud/secrets
 
@@ -256,6 +256,10 @@ ssh:
 #   require_trusted_fingerprints: true
 # NOTE: rootless Podman cannot bind proxy ports 80/443 directly.
 # Set proxy.http_port/proxy.https_port >= 1024, or enable proxy.rootful.
+
+# Deployment safety. Digest verification fails closed by default.
+# deploy:
+#   allow_unverified_image: false
 
 # Builder configuration
 builder:
@@ -289,9 +293,6 @@ deploy:
 # volumes:
 #   - /app/storage:/app/storage
 
-# Asset path for bridging between versions
-# asset_path: /app/public/assets
-
 # Cron jobs (scheduled tasks)
 # cron:
 #   db_backup:
@@ -309,11 +310,12 @@ deploy:
 #     command: "bin/rails reports:send"
 #     host: 192.168.1.1          # Run on specific host
 
-# Command aliases
-# aliases:
-#   console: app exec --interactive -- bin/rails console
-#   logs: app logs -f
 `
+	provider := "# secrets_provider: file # file | env | command\n# secrets_env_prefix: AZUD_SECRET_"
+	if githubActions {
+		provider = "secrets_provider: env\nsecrets_env_prefix: AZUD_SECRET_"
+	}
+	return strings.Replace(template, "{{AZUD_SECRETS_PROVIDER}}", provider, 1)
 }
 
 func getSecretsTemplate() string {
@@ -526,25 +528,31 @@ echo "Running post-rollback hook..."
 `
 }
 
-func appendToGitignore() {
+func appendToGitignore() error {
 	content, err := os.ReadFile(".gitignore")
-	if err != nil {
-		return
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 
 	if strings.Contains(string(content), ".azud/secrets") {
-		return
+		return nil
 	}
 
-	// Append to .gitignore
-	f, err := os.OpenFile(".gitignore", os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(".gitignore", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return
+		return err
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = f.WriteString("\n# Azud secrets\n.azud/secrets\n")
+	prefix := ""
+	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
+		prefix = "\n"
+	}
+	if _, err := f.WriteString(prefix + "# Azud secrets\n.azud/secrets\n"); err != nil {
+		return err
+	}
 	fmt.Println("Added .azud/secrets to .gitignore")
+	return nil
 }
 
 func getGitHubActionsWorkflow() string {
@@ -568,6 +576,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: azud-deploy-${{ github.repository }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy Application
@@ -575,7 +591,18 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      # Deployment history and canary state must survive clean hosted runners.
+      # For stricter retention guarantees, mount a durable AZUD_STATE_DIR on a
+      # self-hosted runner instead of relying on the GitHub cache lifecycle.
+      - name: Restore Azud deployment state
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.local/share/azud
+          key: azud-state-${{ runner.os }}-${{ github.repository_id }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            azud-state-${{ runner.os }}-${{ github.repository_id }}-${{ github.ref_name }}-
 
       - name: Setup Azud
         uses: lemonity-org/azud@v1
@@ -597,7 +624,7 @@ jobs:
   #   name: Run Tests
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v6
+  #     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
   #     - name: Run tests
   #       run: |
   #         # Add your test commands here
@@ -610,7 +637,7 @@ jobs:
   #   environment: staging
   #   needs: [test]
   #   steps:
-  #     - uses: actions/checkout@v6
+  #     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
   #     - name: Setup Azud
   #       uses: lemonity-org/azud@v1
   #       with:

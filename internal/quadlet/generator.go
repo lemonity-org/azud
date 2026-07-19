@@ -2,6 +2,7 @@ package quadlet
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -25,6 +26,16 @@ type ContainerUnit struct {
 	Restart         string // systemd restart policy: always, on-failure
 	TimeoutStopSec  int
 	WantedBy        string
+}
+
+func quoteSystemdWord(s string, escapePercent bool) string {
+	s = sanitizeINIValue(s)
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	if escapePercent {
+		s = strings.ReplaceAll(s, "%", "%%")
+	}
+	return `"` + s + `"`
 }
 
 // sanitizeINIValue removes newlines and control characters from a string
@@ -66,11 +77,17 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	if unit.ContainerName != "" {
 		sb.WriteString(fmt.Sprintf("ContainerName=%s\n", sanitizeINIValue(unit.ContainerName)))
 	}
-	for key, value := range unit.Environment {
-		sb.WriteString(fmt.Sprintf("Environment=%s=%s\n", sanitizeINIValue(key), sanitizeINIValue(value)))
+	envKeys := make([]string, 0, len(unit.Environment))
+	for key := range unit.Environment {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	for _, key := range envKeys {
+		assignment := sanitizeINIValue(key) + "=" + unit.Environment[key]
+		sb.WriteString(fmt.Sprintf("Environment=%s\n", quoteSystemdWord(assignment, true)))
 	}
 	for _, file := range unit.EnvironmentFile {
-		sb.WriteString(fmt.Sprintf("EnvironmentFile=%s\n", sanitizeINIValue(file)))
+		sb.WriteString(fmt.Sprintf("EnvironmentFile=%s\n", quoteSystemdWord(file, false)))
 	}
 	for _, port := range unit.PublishPort {
 		sb.WriteString(fmt.Sprintf("PublishPort=%s\n", sanitizeINIValue(port)))
@@ -81,8 +98,14 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	for _, net := range unit.Network {
 		sb.WriteString(fmt.Sprintf("Network=%s\n", sanitizeINIValue(net)))
 	}
-	for key, value := range unit.Label {
-		sb.WriteString(fmt.Sprintf("Label=%s=%s\n", sanitizeINIValue(key), sanitizeINIValue(value)))
+	labelKeys := make([]string, 0, len(unit.Label))
+	for key := range unit.Label {
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	for _, key := range labelKeys {
+		assignment := sanitizeINIValue(key) + "=" + unit.Label[key]
+		sb.WriteString(fmt.Sprintf("Label=%s\n", quoteSystemdWord(assignment, true)))
 	}
 	if unit.HealthCmd != "" {
 		sb.WriteString(fmt.Sprintf("HealthCmd=%s\n", sanitizeINIValue(unit.HealthCmd)))

@@ -2,6 +2,7 @@ package podman
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/lemonity-org/azud/internal/shell"
@@ -89,12 +90,13 @@ func ValidateOptions(options []string) error {
 
 // ContainerConfig holds configuration for running a container.
 type ContainerConfig struct {
-	Name      string
-	Image     string
-	Command   []string
-	Env       map[string]string
-	SecretEnv []string // Secret env var names (resolved from secrets file)
-	EnvFile   string   // Path to env file on remote host
+	Name       string
+	Image      string
+	Command    []string
+	Entrypoint string
+	Env        map[string]string
+	SecretEnv  []string // Secret env var names (resolved from secrets file)
+	EnvFile    string   // Path to env file on remote host
 	// EnvFileOptional controls whether a missing env file is tolerated.
 	// When true, run command falls back to no env file if it's missing.
 	EnvFileOptional bool
@@ -136,7 +138,13 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		args = append(args, "--name", shell.Quote(c.Name))
 	}
 
-	for key, value := range c.Env {
+	envKeys := make([]string, 0, len(c.Env))
+	for key := range c.Env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	for _, key := range envKeys {
+		value := c.Env[key]
 		args = append(args, "-e", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 
@@ -155,10 +163,16 @@ func (c *ContainerConfig) BuildRunCommand() string {
 	}
 
 	for _, vol := range c.Volumes {
-		args = append(args, "-v", shell.Quote(vol))
+		args = append(args, "-v", shell.QuoteRemotePath(vol))
 	}
 
-	for key, value := range c.Labels {
+	labelKeys := make([]string, 0, len(c.Labels))
+	for key := range c.Labels {
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	for _, key := range labelKeys {
+		value := c.Labels[key]
 		args = append(args, "-l", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 
@@ -180,6 +194,9 @@ func (c *ContainerConfig) BuildRunCommand() string {
 	if c.Restart != "" {
 		args = append(args, "--restart", shell.Quote(c.Restart))
 	}
+	if c.Entrypoint != "" {
+		args = append(args, "--entrypoint", shell.Quote(c.Entrypoint))
+	}
 
 	if c.HealthCmd != "" {
 		args = append(args, "--health-cmd", shell.Quote(c.HealthCmd))
@@ -197,7 +214,11 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		}
 	}
 
-	args = append(args, c.Options...)
+	// Options are still individual argv values. Quote each one so a malformed
+	// configuration cannot escape into the remote host shell.
+	for _, option := range c.Options {
+		args = append(args, shell.Quote(option))
+	}
 
 	preImageArgs := make([]string, len(args))
 	copy(preImageArgs, args)
@@ -216,7 +237,7 @@ func (c *ContainerConfig) BuildRunCommand() string {
 
 	// EnvFile may contain $HOME for shell expansion; use double quotes
 	// to allow variable expansion while protecting against spaces.
-	quotedEnvFile := fmt.Sprintf("\"%s\"", c.EnvFile)
+	quotedEnvFile := shell.QuoteRemotePath(c.EnvFile)
 	withEnvArgs := append(preImageArgs, "--env-file", quotedEnvFile, shell.Quote(c.Image))
 	if len(c.Command) > 0 {
 		withEnvArgs = append(withEnvArgs, shell.QuoteAll(c.Command)...)
@@ -266,7 +287,13 @@ func (c *ExecConfig) BuildExecCommand() string {
 		args = append(args, "-w", shell.Quote(c.WorkDir))
 	}
 
-	for key, value := range c.Env {
+	envKeys := make([]string, 0, len(c.Env))
+	for key := range c.Env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	for _, key := range envKeys {
+		value := c.Env[key]
 		args = append(args, "-e", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 

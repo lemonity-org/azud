@@ -148,7 +148,7 @@ func validateSecretsPermissions(sshClient *ssh.Client, hosts []string, secretsPa
 	}
 
 	quotedPath := remotePathShellArg(secretsPath)
-	cmd := fmt.Sprintf(`path=%s; dir="$(dirname "$path")"; uid=$(id -u); if stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(stat -c '%%u %%a' "$path"); dstat=$(stat -c '%%u %%a' "$dir"); elif stat -f '%%u %%Lp' "$path" >/dev/null 2>&1; then fstat=$(stat -f '%%u %%Lp' "$path"); dstat=$(stat -f '%%u %%Lp' "$dir"); elif busybox stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(busybox stat -c '%%u %%a' "$path"); dstat=$(busybox stat -c '%%u %%a' "$dir"); else echo "stat unsupported" >&2; exit 2; fi; echo "$uid $fstat $dstat"`, quotedPath)
+	cmd := fmt.Sprintf(`path=%s; dir="$(dirname "$path")"; uid=$(id -u); if stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(stat -c '%%u %%a' "$path"); dstat=$(stat -c '%%u %%a' "$dir"); elif stat -f '%%u %%Lp' "$path" >/dev/null 2>&1; then fstat=$(stat -f '%%u %%Lp' "$path"); dstat=$(stat -f '%%u %%Lp' "$dir"); elif busybox stat -c '%%u %%a' "$path" >/dev/null 2>&1; then fstat=$(busybox stat -c '%%u %%a' "$path"); dstat=$(busybox stat -c '%%u %%a' "$dir"); else echo "stat unsupported" >&2; exit 2; fi; echo "$uid $fstat $dstat"`, quotedPath) // safe: quotedPath is produced by remotePathShellArg
 	results := sshClient.ExecuteParallel(hosts, cmd)
 
 	var insecure []string

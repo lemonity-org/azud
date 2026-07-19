@@ -97,7 +97,9 @@ GitHub issues show recurring problems:
 - Domain settings clearing when renaming apps
 - Deploy-branch getting incorrectly set during git sync
 
-**Azud's approach:** Stateless CLI design. All configuration lives in version-controlled YAML files. Server state is derived from configuration, not stored separately.
+**Azud's approach:** Desired state lives in version-controlled YAML. A small,
+access-controlled local journal records deployment and canary transitions so a
+clean CI checkout can roll back or continue an in-progress operation safely.
 
 ### 6. No Process Scaling Without Restart
 
@@ -140,7 +142,8 @@ No pre-validation of nginx configurations before deployment - failures happen at
 5. **CI/CD Native** - Designed for automation, not just local use
 6. **Battle-Tested Components** - Use proven tools (Caddy, Podman), don't reinvent
 7. **Clear Output** - Know what's happening without parsing logs
-8. **Stateless CLI** - Server state derived from config, not stored in CLI
+8. **Configuration-led state** - Desired state comes from config; the durable
+   operational journal exists only for safe history, rollback, and canary handoff
 
 ---
 

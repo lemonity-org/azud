@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -74,6 +75,11 @@ const maxConfigFileSize = 1 << 20 // 1 MiB
 // that might match patterns in the YAML file.
 func safeExpandEnv(s string) string {
 	return os.Expand(s, func(key string) string {
+		// $HOME in deployment configuration refers to the remote SSH user's
+		// home, not the workstation running Azud.
+		if key == "HOME" {
+			return "$HOME"
+		}
 		// Only expand variables that look like intentional config references:
 		// uppercase letters, digits, and underscores (e.g., APP_NAME, PORT).
 		for _, c := range key {
@@ -98,9 +104,18 @@ func (l *Loader) loadFile(path string) (*Config, error) {
 
 	// Expand only safe environment variables
 	data = []byte(safeExpandEnv(string(data)))
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+	if err := validateConfigSchema(&node); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
 
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
@@ -118,15 +133,19 @@ func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 	}
 
 	data = []byte(safeExpandEnv(string(data)))
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-
 	var node yaml.Node
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse YAML nodes: %w", err)
+	}
+	if err := validateConfigSchema(&node); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	var cfg Config
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
 	return &cfg, &node, nil
@@ -549,6 +568,12 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("deploy", "rollback_on_failure") || destNode == nil && dest.Deploy.RollbackOnFailure {
 		merged.Deploy.RollbackOnFailure = dest.Deploy.RollbackOnFailure
 	}
+	if has("deploy", "pre_deploy_command") || destNode == nil && dest.Deploy.PreDeployCommand != "" {
+		merged.Deploy.PreDeployCommand = dest.Deploy.PreDeployCommand
+	}
+	if has("deploy", "allow_unverified_image") || destNode == nil && dest.Deploy.AllowUnverifiedImage {
+		merged.Deploy.AllowUnverifiedImage = dest.Deploy.AllowUnverifiedImage
+	}
 	if has("deploy", "canary", "enabled") || destNode == nil && dest.Deploy.Canary.Enabled {
 		merged.Deploy.Canary.Enabled = dest.Deploy.Canary.Enabled
 	}
@@ -689,6 +714,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("ssh", "connect_timeout") || destNode == nil && dest.SSH.ConnectTimeout != 0 {
 		merged.SSH.ConnectTimeout = dest.SSH.ConnectTimeout
 	}
+	if has("ssh", "command_timeout") || destNode == nil && dest.SSH.CommandTimeout != 0 {
+		merged.SSH.CommandTimeout = dest.SSH.CommandTimeout
+	}
 	if has("ssh", "insecure_ignore_host_key") || destNode == nil && dest.SSH.InsecureIgnoreHostKey {
 		merged.SSH.InsecureIgnoreHostKey = dest.SSH.InsecureIgnoreHostKey
 	}
@@ -761,6 +789,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Deploy.DeployTimeout == 0 {
 		cfg.Deploy.DeployTimeout = 30 * time.Second
+	}
+	if cfg.SSH.CommandTimeout == 0 {
+		cfg.SSH.CommandTimeout = cfg.Deploy.DeployTimeout
 	}
 	if cfg.Deploy.DrainTimeout == 0 {
 		cfg.Deploy.DrainTimeout = 30 * time.Second

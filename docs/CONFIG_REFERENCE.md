@@ -30,7 +30,7 @@ Role options:
 
 - `cmd`: override container command
 - `options`: Podman options like `memory`, `cpus`
-- `labels`, `tags`, `env`: role-level metadata
+- `labels`, `env`: role-level metadata
 
 ## Proxy and Health Checks
 
@@ -39,6 +39,7 @@ proxy:
   hosts:
     - example.com
   ssl: true
+  acme_email: ops@example.com
   app_port: 3000
   healthcheck:
     path: /up
@@ -113,6 +114,7 @@ deploy:
   retain_containers: 3
   retain_history: 20
   rollback_on_failure: true
+  allow_unverified_image: false
   canary:
     enabled: true
     initial_weight: 10
@@ -122,6 +124,11 @@ deploy:
 after the image is pulled but before app containers are started. It shares the
 same network, environment variables, and secrets as the app. Runs on the first
 host only. If the command exits non-zero, the deploy aborts.
+
+Image digest verification fails closed. `allow_unverified_image: true` is an
+explicit local-image escape hatch: Azud prints a high-visibility warning and
+records the bypass in deployment history. Do not enable it for registry-backed
+production images.
 
 ## Accessories
 

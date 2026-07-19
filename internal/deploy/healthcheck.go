@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	defaultHealthcheckImage = "curlimages/curl:8.5.0"
-	defaultHealthcheckPull  = "missing"
+	defaultHealthcheckPull = "missing"
 )
 
 // BuildHTTPCheckCommand builds a shell command that performs an HTTP GET against
@@ -88,7 +87,7 @@ func BuildHTTPCheckHelperCommand(container string, port int, path, image, pullPo
 
 	image = strings.TrimSpace(image)
 	if image == "" {
-		image = defaultHealthcheckImage
+		image = config.DefaultHealthcheckHelperImage
 	}
 
 	pullPolicy = strings.TrimSpace(pullPolicy)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,16 +19,17 @@ import (
 
 // Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
-	cfg        *config.Config
-	sshClient  *ssh.Client
-	podman     *podman.Client
-	containers *podman.ContainerManager
-	images     *podman.ImageManager
-	registry   *podman.RegistryManager
-	proxy      *proxy.Manager
-	hooks      *HookRunner
-	history    *HistoryStore
-	log        *output.Logger
+	cfg         *config.Config
+	sshClient   *ssh.Client
+	podman      *podman.Client
+	containers  *podman.ContainerManager
+	images      *podman.ImageManager
+	imageDigest func(host, image string) (string, error)
+	registry    *podman.RegistryManager
+	proxy       *proxy.Manager
+	hooks       *HookRunner
+	history     *HistoryStore
+	log         *output.Logger
 }
 
 // newProxyConfigFromCfg builds a proxy.ProxyConfig from the deploy
@@ -77,7 +79,7 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 		registry:   podman.NewRegistryManagerWithUser(podmanClient, cfg.SSH.User),
 		proxy:      proxyManager,
 		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
-		history:    NewHistoryStore(".", cfg.Deploy.RetainHistory, log),
+		history:    NewDurableHistoryStore(cfg.Deploy.RetainHistory, log),
 		log:        log,
 	}
 }
@@ -115,6 +117,13 @@ type DeployOptions struct {
 	Destination string
 }
 
+// deploymentTarget identifies one role instance on one host. A host may
+// legitimately appear more than once when it runs multiple roles.
+type deploymentTarget struct {
+	Host string
+	Role string
+}
+
 // Deploy pulls the image, starts new containers, health-checks them,
 // registers them with the proxy, and drains old containers.
 func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
@@ -142,10 +151,18 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	}
 	d.log.Header("Deploying %s", image)
 
-	// Get target hosts
-	hosts := d.getTargetHosts(opts)
-	if len(hosts) == 0 {
-		return fmt.Errorf("no hosts to deploy to")
+	// Resolve role/host pairs before doing any remote work. A host can run
+	// multiple roles, and each pair needs its own container lifecycle.
+	targets, err := d.getTargets(opts)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no deployment targets")
+	}
+	hosts := targetHosts(targets)
+	if err := d.history.EnsureAvailable(); err != nil {
+		return fmt.Errorf("durable deployment history is unavailable: %w", err)
 	}
 
 	// Create deployment record for history
@@ -154,9 +171,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 
 	// Ensure required secrets are present on all hosts.
 	if err := d.ensureRemoteSecrets(hosts); err != nil {
-		record.Fail(err)
-		_ = d.history.Record(record)
-		return err
+		return d.failAndRecord(record, err)
 	}
 
 	// Try to get previous version for rollback reference
@@ -167,9 +182,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	// Run pre-deploy hook
 	hookCtx := d.hookContext(opts, image, version)
 	if err := d.hooks.Run(ctx, "pre-deploy", hookCtx); err != nil {
-		record.Fail(err)
-		_ = d.history.Record(record)
-		return fmt.Errorf("pre-deploy hook failed: %w", err)
+		return d.failAndRecord(record, fmt.Errorf("pre-deploy hook failed: %w", err))
 	}
 
 	d.log.Info("Deploying to %d host(s)", len(hosts))
@@ -177,9 +190,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	// Login to registry if configured
 	if !opts.SkipPull && d.cfg.Registry.Server != "" {
 		if err := d.loginToRegistry(hosts); err != nil {
-			record.Fail(err)
-			_ = d.history.Record(record)
-			return fmt.Errorf("failed to login to registry: %w", err)
+			return d.failAndRecord(record, fmt.Errorf("failed to login to registry: %w", err))
 		}
 	}
 
@@ -187,58 +198,46 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	if !opts.SkipPull {
 		d.log.Info("Pulling image on all hosts...")
 		if err := d.pullImageOnHosts(hosts, image); err != nil {
-			record.Fail(err)
-			_ = d.history.Record(record)
-			return fmt.Errorf("failed to pull image: %w", err)
+			return d.failAndRecord(record, fmt.Errorf("failed to pull image: %w", err))
 		}
 
 		// Verify image digest is consistent across all hosts to detect
 		// supply-chain attacks via mutable tag replacement.
 		if digest, err := d.verifyImageDigest(hosts, image); err != nil {
-			record.Fail(err)
-			_ = d.history.Record(record)
-			return fmt.Errorf("image digest verification failed: %w", err)
+			return d.failAndRecord(record, fmt.Errorf("image digest verification failed: %w", err))
 		} else if digest != "" {
 			record.Metadata["image_digest"] = digest
 			d.log.Info("Image digest: %s", digest)
+		} else {
+			record.Metadata["image_digest_verification"] = "explicitly_skipped"
 		}
+	} else {
+		d.log.Warn("Image pull and digest verification explicitly skipped")
+		record.Metadata["image_digest_verification"] = "skip_pull"
 	}
 
 	// Run pre-deploy command from new image (e.g., database migrations)
 	if d.cfg.Deploy.PreDeployCommand != "" {
 		if err := d.runPreDeployCommand(hosts[0], image); err != nil {
-			record.Fail(err)
-			_ = d.history.Record(record)
-			return fmt.Errorf("pre-deploy command failed: %w", err)
+			return d.failAndRecord(record, fmt.Errorf("pre-deploy command failed: %w", err))
 		}
 	}
 
-	// Deploy to each host, tracking successes for potential rollback
-	var deployErrors []string
-	var succeededHosts []string
-	for _, host := range hosts {
-		if err := d.deployToHost(ctx, host, image, version, opts); err != nil {
-			d.log.HostError(host, "deployment failed: %v", err)
-			deployErrors = append(deployErrors, fmt.Sprintf("%s: %v", host, err))
-
-			// If rollback_on_failure is enabled, roll back all successful
-			// hosts immediately to keep the fleet on a single version.
-			if d.cfg.Deploy.RollbackOnFailure && len(succeededHosts) > 0 {
-				d.log.Warn("Rolling back %d already-deployed host(s) due to failure on %s...", len(succeededHosts), host)
-				d.rollbackHosts(ctx, succeededHosts, record.PreviousVersion, opts.Roles)
-				succeededHosts = nil
-			}
-			continue
-		}
-		succeededHosts = append(succeededHosts, host)
-		d.log.HostSuccess(host, "deployed successfully")
-	}
+	// Deploy to each host, tracking successes for potential fleet rollback.
+	_, deployErrors := d.runFleetDeployment(
+		targets,
+		d.cfg.Deploy.RollbackOnFailure,
+		func(target deploymentTarget) error {
+			return d.deployToTarget(ctx, target, image, version, opts)
+		},
+		func(succeeded []deploymentTarget) error {
+			return d.rollbackTargets(ctx, succeeded, record.PreviousVersion)
+		},
+	)
 
 	if len(deployErrors) > 0 {
 		err := fmt.Errorf("deployment failed on %d host(s): %s", len(deployErrors), strings.Join(deployErrors, "; "))
-		record.Fail(err)
-		_ = d.history.Record(record)
-		return err
+		return d.failAndRecord(record, err)
 	}
 
 	// Run post-deploy hook
@@ -251,11 +250,51 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	// Record successful deployment
 	record.Complete()
 	if err := d.history.Record(record); err != nil {
-		d.log.Warn("Failed to record deployment history: %v", err)
+		return fmt.Errorf("deployment completed remotely but durable history persistence failed: %w", err)
 	}
 
 	d.log.Success("Deployment complete!")
 	return nil
+}
+
+// runFleetDeployment is the scheduling boundary for a multi-target deploy.
+// With rollback enabled, the first failure stops new work and every target
+// that already succeeded is handed to the rollback callback exactly once.
+func (d *Deployer) runFleetDeployment(
+	targets []deploymentTarget,
+	rollbackOnFailure bool,
+	deployTarget func(deploymentTarget) error,
+	rollbackTargets func([]deploymentTarget) error,
+) ([]deploymentTarget, []string) {
+	var deployErrors []string
+	var succeededTargets []deploymentTarget
+	for _, target := range targets {
+		if err := deployTarget(target); err != nil {
+			d.log.HostError(target.Host, "%s role deployment failed: %v", target.Role, err)
+			deployErrors = append(deployErrors, fmt.Sprintf("%s/%s: %v", target.Host, target.Role, err))
+			if rollbackOnFailure {
+				if len(succeededTargets) > 0 {
+					d.log.Warn("Rolling back %d already-deployed target(s) due to failure on %s/%s...", len(succeededTargets), target.Host, target.Role)
+					if rollbackErr := rollbackTargets(append([]deploymentTarget(nil), succeededTargets...)); rollbackErr != nil {
+						deployErrors = append(deployErrors, fmt.Sprintf("automatic rollback: %v", rollbackErr))
+					}
+				}
+				break
+			}
+			continue
+		}
+		succeededTargets = append(succeededTargets, target)
+		d.log.HostSuccess(target.Host, "%s role deployed successfully", target.Role)
+	}
+	return succeededTargets, deployErrors
+}
+
+func (d *Deployer) failAndRecord(record *DeploymentRecord, cause error) error {
+	record.Fail(cause)
+	if err := d.history.Record(record); err != nil {
+		return fmt.Errorf("%w (failed to persist deployment failure: %v)", cause, err)
+	}
+	return cause
 }
 
 func (d *Deployer) ensureRemoteSecrets(hosts []string) error {
@@ -297,13 +336,14 @@ func (d *Deployer) loginToRegistry(hosts []string) error {
 		for host, err := range errors {
 			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", host, err))
 		}
+		sort.Strings(errMsgs)
 		return fmt.Errorf("registry login failed on hosts: %s", strings.Join(errMsgs, "; "))
 	}
 
 	return nil
 }
 
-func (d *Deployer) deployToHost(ctx context.Context, host, image, version string, opts *DeployOptions) error {
+func (d *Deployer) deployToTarget(ctx context.Context, target deploymentTarget, image, version string, opts *DeployOptions) error {
 	// Acquire deployment lock to prevent concurrent deployments to the same host/service
 	lockFile := state.LockFile(d.cfg.SSH.User, d.cfg.Service+".deploy")
 	lockTimeout := d.cfg.Deploy.DeployTimeout * 2
@@ -312,8 +352,8 @@ func (d *Deployer) deployToHost(ctx context.Context, host, image, version string
 	}
 
 	var deployErr error
-	lockErr := d.sshClient.WithRemoteLock(host, lockFile, lockTimeout, func() error {
-		deployErr = d.deployToHostLocked(ctx, host, image, version, opts)
+	lockErr := d.sshClient.WithRemoteLock(target.Host, lockFile, lockTimeout, func() error {
+		deployErr = d.deployToTargetLocked(ctx, target, image, version, opts)
 		return nil
 	})
 	if lockErr != nil {
@@ -322,30 +362,41 @@ func (d *Deployer) deployToHost(ctx context.Context, host, image, version string
 	return deployErr
 }
 
-func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version string, opts *DeployOptions) error {
-	d.log.Host(host, "Starting deployment...")
+func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTarget, image, version string, opts *DeployOptions) error {
+	host, role := target.Host, target.Role
+	d.log.Host(host, "Starting %s role deployment...", role)
 
-	newContainerName := d.generateContainerName("new")
-	oldContainerName := d.cfg.Service
-	oldExists, _ := d.containers.Exists(host, oldContainerName)
-	containerConfig := d.buildContainerConfig(image, newContainerName)
+	oldContainerName := RoleContainerName(d.cfg, role)
+	newContainerName := d.generateContainerName(oldContainerName, "new")
+	oldExists, err := d.containers.Exists(host, oldContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to determine whether current container exists: %w", err)
+	}
+	containerConfig := d.buildContainerConfig(image, newContainerName, role)
 
 	// Run pre-app-boot hook
 	bootCtx := d.hookContext(opts, image, version)
 	bootCtx.Hosts = host
+	bootCtx.Role = role
 	if err := d.hooks.Run(ctx, "pre-app-boot", bootCtx); err != nil {
 		return fmt.Errorf("pre-app-boot hook failed: %w", err)
 	}
 
 	d.log.Host(host, "Starting new container...")
-	_, err := d.containers.Run(host, containerConfig)
+	_, err = d.containers.Run(host, containerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to start container: %w", err)
+	}
+	removeNewContainer := func(cause error) error {
+		if removeErr := d.containers.Remove(host, newContainerName, true); removeErr != nil {
+			return fmt.Errorf("%w (failed to remove new container %s: %v)", cause, newContainerName, removeErr)
+		}
+		return cause
 	}
 
 	// Wait for container to pass readiness check
 	readinessPath := d.cfg.Proxy.Healthcheck.GetReadinessPath()
-	if !opts.SkipHealthCheck && readinessPath != "" {
+	if IsProxyRole(role) && !opts.SkipHealthCheck && readinessPath != "" {
 		d.log.Host(host, "Waiting for readiness check...")
 
 		// Wait for readiness delay
@@ -354,9 +405,13 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 		}
 
 		if err := d.waitForHealthy(host, newContainerName); err != nil {
-			// Cleanup failed container
-			_ = d.containers.Remove(host, newContainerName, true)
-			return fmt.Errorf("readiness check failed: %w", err)
+			return removeNewContainer(fmt.Errorf("readiness check failed: %w", err))
+		}
+	}
+	if !IsProxyRole(role) && !opts.SkipHealthCheck {
+		d.log.Host(host, "Waiting for %s role to stabilize...", role)
+		if err := d.containers.WaitRunning(host, newContainerName, d.cfg.Deploy.ReadinessDelay); err != nil {
+			return removeNewContainer(fmt.Errorf("container startup check failed: %w", err))
 		}
 	}
 
@@ -365,28 +420,61 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 		d.log.Warn("post-app-boot hook failed: %v", err)
 	}
 
+	if !IsProxyRole(role) {
+		return d.finalizeStandaloneRole(host, oldContainerName, newContainerName, oldExists)
+	}
+
 	// Ensure the proxy container is running before attempting any admin
 	// API calls. Boot is idempotent: if the container is already running
 	// it applies config and returns quickly; if it was stopped or removed
 	// it will (re)start it and wait for the admin API to be ready.
 	if err := d.proxy.Boot(host, newProxyConfigFromCfg(d.cfg)); err != nil {
-		d.log.Warn("Failed to boot proxy: %v", err)
+		return removeNewContainer(fmt.Errorf("failed to boot proxy: %w", err))
 	}
 
 	// Ensure the proxy has TLS/ACME config applied before registering.
 	// This handles the case where the proxy was rebooted or recreated
 	// between deploys and lost its config.
 	if err := d.proxy.EnsureConfig(host); err != nil {
-		d.log.Warn("Failed to ensure proxy config: %v", err)
+		return removeNewContainer(fmt.Errorf("failed to ensure proxy config: %w", err))
 	}
 
 	// Register new container with proxy
 	d.log.Host(host, "Registering with proxy...")
 	newUpstream, err := d.upstreamAddr(host, newContainerName)
 	if err != nil {
-		return err
+		return removeNewContainer(fmt.Errorf("failed to resolve new upstream: %w", err))
 	}
 	proxyHost := d.cfg.Proxy.PrimaryHost()
+	oldUpstream := ""
+	if oldExists {
+		oldUpstream, err = d.upstreamAddr(host, oldContainerName)
+		if err != nil {
+			d.log.Debug("Failed to resolve old upstream: %v", err)
+			oldUpstream = fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
+		}
+	}
+
+	cleanupNewBeforePreserve := func(cause error, restoreOldRoute, removeNewRoute bool) error {
+		var cleanupErrors []string
+		if proxyHost != "" && restoreOldRoute && oldUpstream != "" {
+			if err := d.proxy.AddUpstream(host, proxyHost, oldUpstream); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("restore old route: %v", err))
+			}
+		}
+		if proxyHost != "" && removeNewRoute {
+			if err := d.proxy.RemoveUpstream(host, proxyHost, newUpstream); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("remove new route: %v", err))
+			}
+		}
+		if err := d.containers.Remove(host, newContainerName, true); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Sprintf("remove new container: %v", err))
+		}
+		if len(cleanupErrors) > 0 {
+			return fmt.Errorf("%w (cleanup incomplete: %s)", cause, strings.Join(cleanupErrors, "; "))
+		}
+		return cause
+	}
 
 	// Registering the new container with the proxy MUST succeed before we
 	// touch the old container. Otherwise a transient proxy failure could
@@ -412,25 +500,27 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 	if regErr != nil {
 		// Roll back the new container and leave the old one serving so an
 		// automatic rollback or the next deploy can recover cleanly.
-		_ = d.containers.Remove(host, newContainerName, true)
-		return fmt.Errorf("failed to register new container with proxy: %w", regErr)
+		return cleanupNewBeforePreserve(
+			fmt.Errorf("failed to register new container with proxy: %w", regErr),
+			oldExists,
+			oldExists,
+		)
 	}
 
-	// If old container exists, drain and remove it
+	var backupName string
+	oldPreserved := false
+	// If an old container exists, take it out of rotation but preserve it
+	// under a backup name until the new name and route are confirmed.
 	if oldExists {
-		oldUpstream, oldUpstreamErr := d.upstreamAddr(host, oldContainerName)
-		if oldUpstreamErr != nil {
-			d.log.Debug("Failed to resolve old upstream: %v", oldUpstreamErr)
-			oldUpstream = fmt.Sprintf("%s:%d", oldContainerName, d.cfg.Proxy.AppPort)
-		}
-
 		// Remove old container from proxy so no new requests are routed to it.
 		// The old upstream is still tracked by Caddy until its in-flight
 		// requests complete, allowing the drain step to poll accurately.
 		d.log.Host(host, "Removing old upstream from proxy...")
 		if proxyHost != "" {
 			if err := d.proxy.RemoveUpstream(host, proxyHost, oldUpstream); err != nil {
-				d.log.Debug("Failed to remove old upstream: %v", err)
+				return cleanupNewBeforePreserve(
+					fmt.Errorf("failed to remove old upstream before drain: %w", err), true, true,
+				)
 			}
 		}
 
@@ -438,19 +528,44 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 		// falling back to a sleep if the API is unavailable.
 		if d.cfg.Deploy.DrainTimeout > 0 {
 			if err := d.proxy.DrainUpstream(host, oldUpstream, d.cfg.Deploy.DrainTimeout); err != nil {
-				d.log.Warn("Drain did not complete cleanly (continuing anyway): %v", err)
+				return cleanupNewBeforePreserve(
+					fmt.Errorf("failed to drain old upstream: %w", err), true, true,
+				)
 			}
 		}
 
-		// Stop and remove old container
-		d.log.Host(host, "Removing old container...")
-		stopTimeout := d.cfg.Deploy.GetStopTimeout()
-		if err := d.containers.Stop(host, oldContainerName, stopTimeout); err != nil {
-			d.log.Debug("Failed to stop old container: %v", err)
+		backupName = d.generateContainerName(oldContainerName, "old")
+		if err := d.containers.Rename(host, oldContainerName, backupName); err != nil {
+			return cleanupNewBeforePreserve(
+				fmt.Errorf("failed to preserve old container: %w", err), true, true,
+			)
 		}
-		if err := d.containers.Remove(host, oldContainerName, true); err != nil {
-			d.log.Debug("Failed to remove old container: %v", err)
+		oldPreserved = true
+	}
+
+	rollbackSwap := func(cause error, newHasStableName bool) error {
+		var rollbackErrors []string
+		if newHasStableName {
+			if err := d.containers.Rename(host, oldContainerName, newContainerName); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("rename new container back: %v", err))
+			}
 		}
+		if oldPreserved {
+			if err := d.containers.Rename(host, backupName, oldContainerName); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restore old container name: %v", err))
+			}
+			if err := d.proxy.AddUpstream(host, proxyHost, oldUpstream); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restore old route: %v", err))
+			} else if err := d.proxy.RemoveUpstream(host, proxyHost, newUpstream); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("remove new route: %v", err))
+			} else if err := d.containers.Remove(host, newContainerName, true); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("remove new container: %v", err))
+			}
+		}
+		if len(rollbackErrors) > 0 {
+			return fmt.Errorf("%w (automatic restore incomplete: %s)", cause, strings.Join(rollbackErrors, "; "))
+		}
+		return cause
 	}
 
 	// Finalize: rename the new container to the service name and swap
@@ -458,28 +573,22 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 	// is always present (no gap = no dropped requests).
 	d.log.Host(host, "Finalizing deployment...")
 	if err := d.containers.Rename(host, newContainerName, oldContainerName); err != nil {
-		// The most common cause is a leftover container still occupying the
-		// service name (its earlier removal failed). Clear it and retry once.
-		d.log.Debug("Rename failed, clearing %s and retrying: %v", oldContainerName, err)
-		_ = d.containers.Remove(host, oldContainerName, true)
-		if retryErr := d.containers.Rename(host, newContainerName, oldContainerName); retryErr != nil {
-			// Still failed — the container is running under newContainerName and
-			// the proxy points to it, so the service is up. Leave it; the next
-			// deploy's orphan reap will clean it up.
-			d.log.Warn("Failed to rename container (proxy still points to %s): %v", newContainerName, retryErr)
-			return nil
-		}
+		return rollbackSwap(fmt.Errorf("failed to assign stable container name: %w", err), false)
 	}
 
 	// The current container is now named oldContainerName (the service name),
 	// so any remaining "<service>-new-*" container is an orphan from a prior
 	// failed rename. Reap them now that we're holding the deploy lock.
-	d.reapStaleTempContainers(host)
-
 	// In mixed rootless/rootful mode, upstreams are host loopback ports.
 	// Renaming a container does not change its published host port, so the
 	// upstream address stays the same and there is nothing to swap.
 	if d.cfg.UseHostPortUpstreams() {
+		if oldPreserved {
+			if err := d.containers.Remove(host, backupName, true); err != nil {
+				return rollbackSwap(fmt.Errorf("failed to remove preserved old container: %w", err), true)
+			}
+		}
+		d.reapStaleTempContainers(host, oldContainerName)
 		return nil
 	}
 
@@ -497,20 +606,74 @@ func (d *Deployer) deployToHostLocked(ctx context.Context, host, image, version 
 			// Fallback: if add fails, do a full route replacement
 			d.log.Debug("Failed to add final upstream, falling back to full replace: %v", err)
 			if regErr := d.registerWithProxy(host, finalUpstream); regErr != nil {
-				d.log.Warn("Failed to update proxy to final name: %v", regErr)
+				return rollbackSwap(fmt.Errorf("failed to update proxy to final container name: %w", regErr), true)
 			}
-			return nil
-		}
-		if err := d.proxy.RemoveUpstream(host, proxyHost, newUpstream); err != nil {
-			d.log.Debug("Failed to remove temp upstream: %v", err)
+		} else if err := d.proxy.RemoveUpstream(host, proxyHost, newUpstream); err != nil {
+			// The final upstream was added successfully, so traffic remains
+			// available. Treat cleanup failure as a deployment failure so it is
+			// visible and rollback policy can act on it.
+			return rollbackSwap(fmt.Errorf("failed to remove temporary proxy upstream: %w", err), true)
 		}
 	}
+	if oldPreserved {
+		if err := d.containers.Remove(host, backupName, true); err != nil {
+			return rollbackSwap(fmt.Errorf("failed to remove preserved old container: %w", err), true)
+		}
+	}
+	d.reapStaleTempContainers(host, oldContainerName)
 
 	return nil
 }
 
-func (d *Deployer) buildContainerConfig(image, name string) *podman.ContainerConfig {
-	return newAppContainerConfig(d.cfg, image, name, nil)
+// finalizeStandaloneRole swaps a non-HTTP role without involving Caddy. The
+// old container is renamed out of the way first so a failed second rename can
+// restore it. If old-container cleanup fails, the swap is reversed to avoid
+// running duplicate workers.
+func (d *Deployer) finalizeStandaloneRole(host, stableName, newName string, oldExists bool) error {
+	d.log.Host(host, "Finalizing %s container...", stableName)
+	removeNew := func(cause error) error {
+		if removeErr := d.containers.Remove(host, newName, true); removeErr != nil {
+			return fmt.Errorf("%w (failed to remove new container %s: %v)", cause, newName, removeErr)
+		}
+		return cause
+	}
+	if !oldExists {
+		if err := d.containers.Rename(host, newName, stableName); err != nil {
+			return removeNew(fmt.Errorf("failed to assign stable container name: %w", err))
+		}
+		d.reapStaleTempContainers(host, stableName)
+		return nil
+	}
+
+	backupName := d.generateContainerName(stableName, "old")
+	if err := d.containers.Rename(host, stableName, backupName); err != nil {
+		return removeNew(fmt.Errorf("failed to preserve current container: %w", err))
+	}
+	if err := d.containers.Rename(host, newName, stableName); err != nil {
+		restoreErr := d.containers.Rename(host, backupName, stableName)
+		cause := fmt.Errorf("failed to activate new container: %w", err)
+		if restoreErr != nil {
+			cause = fmt.Errorf("failed to activate new container: %v (also failed to restore current container: %v)", err, restoreErr)
+		}
+		return removeNew(cause)
+	}
+
+	if err := d.containers.Remove(host, backupName, true); err != nil {
+		rollbackRenameErr := d.containers.Rename(host, stableName, newName)
+		restoreErr := d.containers.Rename(host, backupName, stableName)
+		cause := fmt.Errorf("failed to remove previous container; restored old container: %w", err)
+		if rollbackRenameErr != nil || restoreErr != nil {
+			cause = fmt.Errorf("failed to remove previous container: %v (failed to restore cleanly: rename new=%v, restore old=%v)", err, rollbackRenameErr, restoreErr)
+		}
+		return removeNew(cause)
+	}
+
+	d.reapStaleTempContainers(host, stableName)
+	return nil
+}
+
+func (d *Deployer) buildContainerConfig(image, name, role string) *podman.ContainerConfig {
+	return NewAppContainerConfig(d.cfg, image, name, role, nil)
 }
 
 // runPreDeployCommand runs the configured pre_deploy_command in a one-off
@@ -589,17 +752,27 @@ func (d *Deployer) verifyImageDigest(hosts []string, image string) (string, erro
 	}
 
 	// Get digest from the first host as reference
-	refDigest, err := d.images.GetDigest(hosts[0], image)
+	getDigest := d.imageDigest
+	if getDigest == nil {
+		getDigest = d.images.GetDigest
+	}
+	refDigest, err := getDigest(hosts[0], image)
 	if err != nil {
-		// Digest retrieval may fail for local images without repo digests.
-		d.log.Debug("Could not retrieve image digest (non-registry image?): %v", err)
-		return "", nil
+		if d.cfg.Deploy.AllowUnverifiedImage {
+			d.log.Warn("IMAGE DIGEST VERIFICATION DISABLED: could not verify %s on %s: %v", image, hosts[0], err)
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get image digest on %s: %w (set deploy.allow_unverified_image only for a deliberate local-image exception)", hosts[0], err)
 	}
 
 	// Verify all other hosts have the same digest
 	for _, host := range hosts[1:] {
-		digest, err := d.images.GetDigest(host, image)
+		digest, err := getDigest(host, image)
 		if err != nil {
+			if d.cfg.Deploy.AllowUnverifiedImage {
+				d.log.Warn("IMAGE DIGEST VERIFICATION DISABLED: could not verify %s on %s: %v", image, host, err)
+				return "", nil
+			}
 			return "", fmt.Errorf("failed to get image digest on %s: %w", host, err)
 		}
 		if digest != refDigest {
@@ -622,32 +795,101 @@ func (d *Deployer) pullImageOnHosts(hosts []string, image string) error {
 	return nil
 }
 
-func (d *Deployer) getTargetHosts(opts *DeployOptions) []string {
-	if len(opts.Hosts) > 0 {
-		return opts.Hosts
+func (d *Deployer) getTargets(opts *DeployOptions) ([]deploymentTarget, error) {
+	if opts == nil {
+		opts = &DeployOptions{}
 	}
 
-	if len(opts.Roles) > 0 {
-		var hosts []string
-		for _, role := range opts.Roles {
-			hosts = append(hosts, d.cfg.GetRoleHosts(role)...)
+	roles := append([]string(nil), opts.Roles...)
+	if len(roles) == 0 {
+		for role := range d.cfg.Servers {
+			roles = append(roles, role)
 		}
-		return hosts
+		sort.Strings(roles)
 	}
 
-	return d.cfg.GetAllHosts()
+	requestedHosts := make(map[string]struct{}, len(opts.Hosts))
+	for _, host := range opts.Hosts {
+		requestedHosts[host] = struct{}{}
+	}
+
+	seen := make(map[deploymentTarget]struct{})
+	matchedHosts := make(map[string]struct{})
+	var targets []deploymentTarget
+	for _, role := range roles {
+		roleCfg, ok := d.cfg.Servers[role]
+		if !ok {
+			return nil, fmt.Errorf("unknown role %q", role)
+		}
+		for _, host := range roleCfg.Hosts {
+			if len(requestedHosts) > 0 {
+				if _, ok := requestedHosts[host]; !ok {
+					continue
+				}
+				matchedHosts[host] = struct{}{}
+			}
+			target := deploymentTarget{Host: host, Role: role}
+			if _, ok := seen[target]; ok {
+				continue
+			}
+			seen[target] = struct{}{}
+			targets = append(targets, target)
+		}
+	}
+
+	for _, host := range opts.Hosts {
+		if _, ok := matchedHosts[host]; !ok {
+			return nil, fmt.Errorf("host %q is not configured for the selected role(s)", host)
+		}
+	}
+
+	return targets, nil
 }
 
-func (d *Deployer) generateContainerName(suffix string) string {
-	return fmt.Sprintf("%s-%s-%d", d.cfg.Service, suffix, time.Now().Unix())
+func targetHosts(targets []deploymentTarget) []string {
+	seen := make(map[string]struct{}, len(targets))
+	hosts := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target.Host]; ok {
+			continue
+		}
+		seen[target.Host] = struct{}{}
+		hosts = append(hosts, target.Host)
+	}
+	return hosts
+}
+
+func targetRoles(targets []deploymentTarget) []string {
+	seen := make(map[string]struct{}, len(targets))
+	roles := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target.Role]; ok {
+			continue
+		}
+		seen[target.Role] = struct{}{}
+		roles = append(roles, target.Role)
+	}
+	return roles
+}
+
+func (d *Deployer) getTargetHosts(opts *DeployOptions) []string {
+	targets, err := d.getTargets(opts)
+	if err != nil {
+		return nil
+	}
+	return targetHosts(targets)
+}
+
+func (d *Deployer) generateContainerName(stableName, suffix string) string {
+	return fmt.Sprintf("%s-%s-%d", stableName, suffix, time.Now().UnixNano())
 }
 
 // reapStaleTempContainers removes leftover temporary deploy containers named
 // "<service>-new-*" that can linger after a failed rename. It is best-effort
 // and safe to call under the deploy lock once the current container has been
 // renamed to the service name (so the active container is never matched).
-func (d *Deployer) reapStaleTempContainers(host string) {
-	prefix := d.cfg.Service + "-new-"
+func (d *Deployer) reapStaleTempContainers(host, stableName string) {
+	prefix := stableName + "-new-"
 	// The podman name filter is substring-based; enforce an exact prefix match
 	// client-side to avoid touching similarly named services.
 	containers, err := d.containers.List(host, true, map[string]string{"name": prefix})
@@ -705,38 +947,49 @@ func (d *Deployer) Redeploy(ctx context.Context, opts *DeployOptions) error {
 }
 
 func (d *Deployer) Stop(hosts []string) error {
+	return d.StopRoles(hosts, nil)
+}
+
+func (d *Deployer) StopRoles(hosts, roles []string) error {
 	stopTimeout := d.cfg.Deploy.GetStopTimeout()
-	return d.runOnHosts("stop", hosts, func(host string) error {
-		return d.containers.Stop(host, d.cfg.Service, stopTimeout)
+	return d.runOnTargets("stop", hosts, roles, func(target deploymentTarget) error {
+		return d.containers.Stop(target.Host, RoleContainerName(d.cfg, target.Role), stopTimeout)
 	})
 }
 
 func (d *Deployer) Start(hosts []string) error {
-	return d.runOnHosts("start", hosts, func(host string) error {
-		return d.containers.Start(host, d.cfg.Service)
+	return d.StartRoles(hosts, nil)
+}
+
+func (d *Deployer) StartRoles(hosts, roles []string) error {
+	return d.runOnTargets("start", hosts, roles, func(target deploymentTarget) error {
+		return d.containers.Start(target.Host, RoleContainerName(d.cfg, target.Role))
 	})
 }
 
 func (d *Deployer) Restart(hosts []string) error {
+	return d.RestartRoles(hosts, nil)
+}
+
+func (d *Deployer) RestartRoles(hosts, roles []string) error {
 	stopTimeout := d.cfg.Deploy.GetStopTimeout()
-	return d.runOnHosts("restart", hosts, func(host string) error {
-		return d.containers.Restart(host, d.cfg.Service, stopTimeout)
+	return d.runOnTargets("restart", hosts, roles, func(target deploymentTarget) error {
+		return d.containers.Restart(target.Host, RoleContainerName(d.cfg, target.Role), stopTimeout)
 	})
 }
 
-// rollbackHosts reverts a deployment on hosts that succeeded, restoring the
-// previous version. This is a best-effort operation: errors are logged but
-// do not prevent rollback attempts on other hosts.
-func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVersion string, roles []string) {
+// rollbackTargets reverts role/host pairs that succeeded, restoring the
+// previous version. Every target is attempted and failures are aggregated.
+func (d *Deployer) rollbackTargets(ctx context.Context, targets []deploymentTarget, previousVersion string) error {
 	if previousVersion == "" {
-		d.log.Warn("No previous version recorded, cannot auto-rollback")
-		return
+		return fmt.Errorf("no previous version recorded")
 	}
 
 	prevImage := fmt.Sprintf("%s:%s", stripImageTag(d.cfg.Image), previousVersion)
+	var rollbackErrors []string
 
-	for _, host := range hosts {
-		d.log.Host(host, "Rolling back to %s...", previousVersion)
+	for _, target := range targets {
+		d.log.Host(target.Host, "Rolling back %s role to %s...", target.Role, previousVersion)
 
 		// Re-deploy the previous version. deployToHostLocked performs a full
 		// blue-green swap: it starts the previous-version container alongside
@@ -749,18 +1002,19 @@ func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVe
 		rollbackOpts := &DeployOptions{
 			Version:     previousVersion,
 			SkipPull:    true, // Image should still be cached from last deployment
-			Hosts:       []string{host},
-			Roles:       roles,
+			Hosts:       []string{target.Host},
+			Roles:       []string{target.Role},
 			Destination: "rollback",
 		}
 
-		// Use deployToHost directly to avoid recursion into the full Deploy
+		// Use deployToTarget directly to avoid recursion into the full Deploy
 		// method (which would run hooks, record history, etc.)
-		if err := d.deployToHost(ctx, host, prevImage, previousVersion, rollbackOpts); err != nil {
-			d.log.HostError(host, "rollback failed: %v", err)
+		if err := d.deployToTarget(ctx, target, prevImage, previousVersion, rollbackOpts); err != nil {
+			d.log.HostError(target.Host, "%s role rollback failed: %v", target.Role, err)
+			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s/%s: %v", target.Host, target.Role, err))
 			continue
 		}
-		d.log.HostSuccess(host, "rolled back to %s", previousVersion)
+		d.log.HostSuccess(target.Host, "%s role rolled back to %s", target.Role, previousVersion)
 	}
 
 	// Run post-rollback hook
@@ -768,41 +1022,42 @@ func (d *Deployer) rollbackHosts(ctx context.Context, hosts []string, previousVe
 		Service:     d.cfg.Service,
 		Image:       prevImage,
 		Version:     previousVersion,
-		Hosts:       strings.Join(hosts, ","),
+		Hosts:       strings.Join(targetHosts(targets), ","),
 		Destination: "rollback",
 		Performer:   CurrentUser(),
-		Role:        strings.Join(roles, ","),
+		Role:        strings.Join(targetRoles(targets), ","),
 		RecordedAt:  time.Now().Format(time.RFC3339),
 	}
 	if err := d.hooks.Run(ctx, "post-rollback", rollbackCtx); err != nil {
-		d.log.Warn("post-rollback hook failed: %v", err)
+		rollbackErrors = append(rollbackErrors, fmt.Sprintf("post-rollback hook: %v", err))
 	}
+	if len(rollbackErrors) > 0 {
+		return fmt.Errorf("rollback failed: %s", strings.Join(rollbackErrors, "; "))
+	}
+	return nil
 }
 
-// runOnHosts executes an operation on all hosts in parallel, collecting errors.
-func (d *Deployer) runOnHosts(operation string, hosts []string, fn func(host string) error) error {
-	if len(hosts) == 0 {
-		hosts = d.cfg.GetAllHosts()
+func (d *Deployer) runOnTargets(operation string, hosts, roles []string, fn func(deploymentTarget) error) error {
+	targets, err := d.getTargets(&DeployOptions{Hosts: hosts, Roles: roles})
+	if err != nil {
+		return err
 	}
-
 	label := strings.ToUpper(operation[:1]) + operation[1:]
-	d.log.Info("%sing %s on %d host(s)...", label, d.cfg.Service, len(hosts))
+	d.log.Info("%sing %s on %d role target(s)...", label, d.cfg.Service, len(targets))
 
 	var wg sync.WaitGroup
-	errors := make(chan error, len(hosts))
-
-	for _, host := range hosts {
+	errors := make(chan error, len(targets))
+	for _, target := range targets {
 		wg.Add(1)
-		go func(h string) {
+		go func(target deploymentTarget) {
 			defer wg.Done()
-			if err := fn(h); err != nil {
-				errors <- fmt.Errorf("%s: %w", h, err)
+			if err := fn(target); err != nil {
+				errors <- fmt.Errorf("%s/%s: %w", target.Host, target.Role, err)
 				return
 			}
-			d.log.HostSuccess(h, "%sed", operation)
-		}(host)
+			d.log.HostSuccess(target.Host, "%s role %sed", target.Role, operation)
+		}(target)
 	}
-
 	wg.Wait()
 	close(errors)
 
@@ -810,10 +1065,9 @@ func (d *Deployer) runOnHosts(operation string, hosts []string, fn func(host str
 	for err := range errors {
 		errs = append(errs, err.Error())
 	}
-
+	sort.Strings(errs)
 	if len(errs) > 0 {
 		return fmt.Errorf("%s failed: %s", operation, strings.Join(errs, "; "))
 	}
-
 	return nil
 }

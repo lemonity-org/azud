@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lemonity-org/azud/internal/config"
 )
 
 func TestInitCreatesConfigAndHooks(t *testing.T) {
@@ -34,6 +36,19 @@ func TestInitCreatesConfigAndHooks(t *testing.T) {
 	assertFileExists(t, ".azud/hooks/pre-build")
 	assertFileExists(t, ".azud/hooks/pre-deploy")
 	assertFileExists(t, ".azud/hooks/post-deploy")
+	assertFileExists(t, ".gitignore")
+
+	gitignore, err := os.ReadFile(".gitignore")
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	if strings.Count(string(gitignore), ".azud/secrets") != 1 {
+		t.Fatalf("expected exactly one .azud/secrets entry, got:\n%s", gitignore)
+	}
+
+	if _, err := config.NewLoader("config/deploy.yml", "").Load(); err != nil {
+		t.Fatalf("generated configuration must load and validate: %v", err)
+	}
 }
 
 func TestInitCreatesGitHubWorkflowAndGitignoreEntry(t *testing.T) {
@@ -69,6 +84,31 @@ func TestInitCreatesGitHubWorkflowAndGitignoreEntry(t *testing.T) {
 	}
 	if !strings.Contains(string(content), ".azud/secrets") {
 		t.Fatalf("expected .gitignore to include .azud/secrets, got:\n%s", string(content))
+	}
+
+	generatedConfig, err := os.ReadFile(filepath.Join("config", "deploy.yml"))
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	if !strings.Contains(string(generatedConfig), "secrets_provider: env") ||
+		!strings.Contains(string(generatedConfig), "secrets_env_prefix: AZUD_SECRET_") {
+		t.Fatalf("GitHub Actions config must use the environment provider:\n%s", generatedConfig)
+	}
+
+	workflow, err := os.ReadFile(filepath.Join(".github", "workflows", "deploy.yml"))
+	if err != nil {
+		t.Fatalf("read generated workflow: %v", err)
+	}
+	if !strings.Contains(string(workflow), "uses: lemonity-org/azud@v1") {
+		t.Fatalf("generated workflow must use the maintained stable action tag")
+	}
+	if !strings.Contains(string(workflow), "actions/cache@caa296126883cff596d87d8935842f9db880ef25") ||
+		!strings.Contains(string(workflow), "cancel-in-progress: false") {
+		t.Fatalf("generated workflow must persist and serialize durable deployment state")
+	}
+
+	if _, err := config.NewLoader("config/deploy.yml", "").Load(); err != nil {
+		t.Fatalf("generated GitHub Actions configuration must validate: %v", err)
 	}
 }
 

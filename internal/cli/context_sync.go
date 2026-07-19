@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -65,6 +66,8 @@ func syncBuildContext(sshClient *ssh.Client, host, localContext string) (string,
 
 	extractCmd := fmt.Sprintf("tar xzf - -C %s", shell.Quote(remotePath))
 	result, err := sshClient.ExecuteWithStdin(host, extractCmd, pr)
+	_ = pr.Close()
+	archiveBuildErr := <-archiveErr
 	if err != nil {
 		return "", fmt.Errorf("failed to extract build context on remote: %w", err)
 	}
@@ -73,8 +76,8 @@ func syncBuildContext(sshClient *ssh.Client, host, localContext string) (string,
 	}
 
 	// Check if archive creation had errors
-	if err := <-archiveErr; err != nil {
-		return "", fmt.Errorf("failed to create build context archive: %w", err)
+	if archiveBuildErr != nil {
+		return "", fmt.Errorf("failed to create build context archive: %w", archiveBuildErr)
 	}
 
 	log.Success("Build context synced")
@@ -130,9 +133,8 @@ func createContextArchive(w io.Writer, contextDir string, patterns []ignorePatte
 		}
 
 		if shouldIgnore(relPath, d.IsDir(), patterns) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
+			// Continue walking ignored directories so later negation patterns can
+			// re-include descendants, matching container-ignore semantics.
 			return nil
 		}
 
@@ -141,17 +143,35 @@ func createContextArchive(w io.Writer, contextDir string, patterns []ignorePatte
 			return err
 		}
 
-		// Only include regular files and directories
-		if !info.Mode().IsRegular() && !info.IsDir() {
+		isSymlink := info.Mode()&os.ModeSymlink != 0
+		// Preserve symlinks as links (do not follow them), matching local
+		// Podman/Docker context behavior.
+		if !info.Mode().IsRegular() && !info.IsDir() && !isSymlink {
 			return nil
 		}
 
-		header, err := tar.FileInfoHeader(info, "")
+		linkTarget := ""
+		if isSymlink {
+			linkTarget, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if filepath.IsAbs(linkTarget) {
+				return fmt.Errorf("symlink %s points outside the build context", relPath)
+			}
+			resolved := filepath.Clean(filepath.Join(filepath.Dir(path), linkTarget))
+			resolvedRel, relErr := filepath.Rel(contextDir, resolved)
+			if relErr != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("symlink %s points outside the build context", relPath)
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			return err
 		}
 		// Use relative path in the archive
-		header.Name = relPath
+		header.Name = filepath.ToSlash(relPath)
+		header.Linkname = filepath.ToSlash(header.Linkname)
 		if d.IsDir() {
 			header.Name += "/"
 		}
@@ -239,15 +259,28 @@ func shouldIgnore(relPath string, isDir bool, patterns []ignorePattern) bool {
 
 // matchIgnorePattern checks if a relative path matches a .dockerignore pattern.
 func matchIgnorePattern(relPath, pattern string) bool {
+	relPath = filepath.ToSlash(relPath)
+	pattern = filepath.ToSlash(pattern)
+	separator := "/"
+	// A slashless pattern applies to a file or directory with that basename
+	// at any depth (for example *.env matches config/private.env).
+	if !strings.Contains(pattern, separator) {
+		for _, component := range strings.Split(relPath, separator) {
+			if matchSimple(component, pattern) {
+				return true
+			}
+		}
+	}
+
 	// Handle **/ prefix (match in any directory depth)
 	if strings.HasPrefix(pattern, "**/") {
 		suffix := strings.TrimPrefix(pattern, "**/")
 		if matchSimple(relPath, suffix) {
 			return true
 		}
-		parts := strings.Split(relPath, string(filepath.Separator))
+		parts := strings.Split(relPath, separator)
 		for i := range parts {
-			sub := strings.Join(parts[i:], string(filepath.Separator))
+			sub := strings.Join(parts[i:], separator)
 			if matchSimple(sub, suffix) {
 				return true
 			}
@@ -258,7 +291,7 @@ func matchIgnorePattern(relPath, pattern string) bool {
 	// Handle /** suffix (match everything under)
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := strings.TrimSuffix(pattern, "/**")
-		return relPath == prefix || strings.HasPrefix(relPath, prefix+string(filepath.Separator))
+		return relPath == prefix || strings.HasPrefix(relPath, prefix+separator)
 	}
 
 	// Direct match
@@ -267,9 +300,9 @@ func matchIgnorePattern(relPath, pattern string) bool {
 	}
 
 	// Match if the pattern matches a parent directory of the path
-	parts := strings.Split(relPath, string(filepath.Separator))
+	parts := strings.Split(relPath, separator)
 	for i := 1; i < len(parts); i++ {
-		parent := strings.Join(parts[:i], string(filepath.Separator))
+		parent := strings.Join(parts[:i], separator)
 		if matchSimple(parent, pattern) {
 			return true
 		}
@@ -280,6 +313,6 @@ func matchIgnorePattern(relPath, pattern string) bool {
 
 // matchSimple performs a filepath.Match-style glob match.
 func matchSimple(name, pattern string) bool {
-	matched, _ := filepath.Match(pattern, name)
+	matched, _ := path.Match(pattern, name)
 	return matched
 }

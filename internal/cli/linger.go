@@ -9,10 +9,7 @@ import (
 )
 
 func enableLinger(sshClient *ssh.Client, host, user string) error {
-	if user == "" {
-		user = "root"
-	}
-	cmd := fmt.Sprintf("loginctl enable-linger %s", shell.Quote(user))
+	cmd := lingerCommand(user)
 	result, err := sshClient.Execute(host, cmd)
 	if err != nil {
 		return err
@@ -21,4 +18,18 @@ func enableLinger(sshClient *ssh.Client, host, user string) error {
 		return fmt.Errorf("enable-linger failed: %s", strings.TrimSpace(result.Stderr))
 	}
 	return nil
+}
+
+func lingerCommand(user string) string {
+	if user == "" {
+		user = "root"
+	}
+	prefix := ""
+	if user != "root" {
+		// Enabling persistence for a login user is a privileged host change.
+		// Non-interactive SSH sessions cannot satisfy a PolicyKit prompt, so
+		// require the same explicit passwordless sudo contract as bootstrap.
+		prefix = "sudo -n "
+	}
+	return fmt.Sprintf("%sloginctl enable-linger %s", prefix, shell.Quote(user))
 }

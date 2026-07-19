@@ -164,15 +164,19 @@ func (b *Bootstrapper) isPodmanInstalled(host string) (bool, error) {
 }
 
 func (b *Bootstrapper) installPodman(host string, osInfo *OSInfo) error {
+	prefix, err := b.privilegePrefix(host)
+	if err != nil {
+		return err
+	}
 	var installCmd string
 
 	switch osInfo.Family {
 	case "debian":
-		installCmd = b.getDebianPodmanInstall()
+		installCmd = b.getDebianPodmanInstall(prefix)
 	case "rhel":
-		installCmd = b.getRHELPodmanInstall()
+		installCmd = b.getRHELPodmanInstall(prefix)
 	case "alpine":
-		installCmd = b.getAlpinePodmanInstall()
+		installCmd = b.getAlpinePodmanInstall(prefix)
 	default:
 		return fmt.Errorf("unsupported OS family: %s", osInfo.Family)
 	}
@@ -189,26 +193,40 @@ func (b *Bootstrapper) installPodman(host string, osInfo *OSInfo) error {
 	return nil
 }
 
-func (b *Bootstrapper) getDebianPodmanInstall() string {
-	return `
-set -e
-apt-get update
-apt-get install -y podman netavark aardvark-dns
-`
+func (b *Bootstrapper) privilegePrefix(host string) (string, error) {
+	result, err := b.sshClient.Execute(host, "id -u")
+	if err != nil {
+		return "", fmt.Errorf("failed to detect privileges: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("failed to detect privileges: %s", result.Stderr)
+	}
+	if strings.TrimSpace(result.Stdout) == "0" {
+		return "", nil
+	}
+	return "sudo -n ", nil
 }
 
-func (b *Bootstrapper) getRHELPodmanInstall() string {
-	return `
+func (b *Bootstrapper) getDebianPodmanInstall(prefix string) string {
+	return fmt.Sprintf(`
 set -e
-dnf install -y podman netavark aardvark-dns
-`
+%sapt-get update
+%sapt-get install -y podman netavark aardvark-dns uidmap slirp4netns fuse-overlayfs
+`, prefix, prefix)
 }
 
-func (b *Bootstrapper) getAlpinePodmanInstall() string {
-	return `
+func (b *Bootstrapper) getRHELPodmanInstall(prefix string) string {
+	return fmt.Sprintf(`
 set -e
-apk add --update podman netavark aardvark-dns
-`
+%sdnf install -y podman netavark aardvark-dns shadow-utils slirp4netns fuse-overlayfs
+`, prefix)
+}
+
+func (b *Bootstrapper) getAlpinePodmanInstall(prefix string) string {
+	return fmt.Sprintf(`
+set -e
+%sapk add --update podman netavark aardvark-dns shadow-subids slirp4netns fuse-overlayfs
+`, prefix)
 }
 
 func (b *Bootstrapper) configurePodman(host string) error {

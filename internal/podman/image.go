@@ -2,6 +2,7 @@ package podman
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -113,7 +114,13 @@ func (c *BuildConfig) BuildCommand() string {
 		args = append(args, "-t", shell.Quote(tag))
 	}
 
-	for key, value := range c.Args {
+	argKeys := make([]string, 0, len(c.Args))
+	for key := range c.Args {
+		argKeys = append(argKeys, key)
+	}
+	sort.Strings(argKeys)
+	for _, key := range argKeys {
+		value := c.Args[key]
 		args = append(args, "--build-arg", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
 	}
 

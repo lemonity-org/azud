@@ -12,6 +12,7 @@ import (
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/shell"
 )
 
 var envCmd = &cobra.Command{
@@ -150,8 +151,11 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get target hosts
-	hosts := cfg.GetAllHosts()
+	hosts := cfg.GetAllSSHHosts()
 	if envHost != "" {
+		if !containsString(cfg.GetAllSSHHosts(), envHost) {
+			return fmt.Errorf("host %s is not configured", envHost)
+		}
 		hosts = []string{envHost}
 	}
 
@@ -181,27 +185,17 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	hasErrors := false
 	remoteDir := remoteSecretsDir()
 	remoteSecrets := remoteSecretsPath()
+	remoteDirArg := remotePathShellArg(remoteDir)
+	remoteSecretsArg := remotePathShellArg(remoteSecrets)
 
 	for _, host := range hosts {
 		log.Host(host, "Pushing secrets...")
 
-		// Create secrets directory
-		mkdirCmd := fmt.Sprintf("mkdir -p \"%s\" && chmod 700 \"%s\"", remoteDir, remoteDir)
-		result, err := sshClient.Execute(host, mkdirCmd)
-		if err != nil {
-			log.HostError(host, "Failed to create secrets directory: %v", err)
-			hasErrors = true
-			continue
-		}
-		if result.ExitCode != 0 {
-			log.HostError(host, "Failed to create secrets directory: %s", result.Stderr)
-			hasErrors = true
-			continue
-		}
-
-		// Write secrets file via stdin to avoid heredoc delimiter injection
-		writeCmd := fmt.Sprintf("cat > \"%s\"", remoteSecrets)
-		result, err = sshClient.ExecuteWithStdin(host, writeCmd, strings.NewReader(content.String()))
+		// Write a mode-0600 temporary file and atomically replace the final
+		// file. Paths are assigned as quoted data while documented home
+		// prefixes expand on the remote host.
+		writeCmd := fmt.Sprintf(`dir=%s; path=%s; tmp="${path}.tmp.$$"; umask 077 && mkdir -p "$dir" && chmod 700 "$dir" && trap 'rm -f "$tmp"' EXIT HUP INT TERM && cat > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$path" && chmod 600 "$path" && test "$(stat -c '%%a' "$path" 2>/dev/null || stat -f '%%Lp' "$path")" = 600 && trap - EXIT`, remoteDirArg, remoteSecretsArg)
+		result, err := sshClient.ExecuteWithStdin(host, writeCmd, strings.NewReader(content.String()))
 		if err != nil {
 			log.HostError(host, "Failed to write secrets: %v", err)
 			hasErrors = true
@@ -209,15 +203,6 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		}
 		if result.ExitCode != 0 {
 			log.HostError(host, "Failed to write secrets: %s", result.Stderr)
-			hasErrors = true
-			continue
-		}
-
-		// Set permissions
-		chmodCmd := fmt.Sprintf("chmod 600 \"%s\"", remoteSecrets)
-		_, err = sshClient.Execute(host, chmodCmd)
-		if err != nil {
-			log.HostError(host, "Failed to set permissions: %v", err)
 			hasErrors = true
 			continue
 		}
@@ -236,6 +221,9 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 func runEnvPull(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
+	if !containsString(cfg.GetAllSSHHosts(), envHost) {
+		return fmt.Errorf("host %s is not configured", envHost)
+	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -243,7 +231,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	log.Header("Pulling Secrets from %s", envHost)
 
 	// Read secrets from remote
-	readCmd := fmt.Sprintf("cat \"%s\" 2>/dev/null || echo ''", remoteSecretsPath())
+	readCmd := fmt.Sprintf("cat %s 2>/dev/null || echo ''", remotePathShellArg(remoteSecretsPath()))
 	result, err := sshClient.Execute(envHost, readCmd)
 	if err != nil {
 		return fmt.Errorf("failed to read secrets from server: %w", err)
@@ -265,8 +253,12 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	secretsPath := getSecretsFilePath()
 
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(secretsPath), 0755); err != nil {
+	secretsDir := filepath.Dir(secretsPath)
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create secrets directory: %w", err)
+	}
+	if err := os.Chmod(secretsDir, 0700); err != nil {
+		return fmt.Errorf("failed to secure secrets directory: %w", err)
 	}
 
 	// Write secrets file
@@ -283,8 +275,29 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		content.WriteString(fmt.Sprintf("%s=%s\n", k, secrets[k]))
 	}
 
-	if err := os.WriteFile(secretsPath, []byte(content.String()), 0600); err != nil {
+	tmpFile, err := os.CreateTemp(secretsDir, ".secrets-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create secrets temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to secure secrets temp file: %w", err)
+	}
+	if _, err := tmpFile.WriteString(content.String()); err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("failed to write secrets file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync secrets file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close secrets file: %w", err)
+	}
+	if err := os.Rename(tmpPath, secretsPath); err != nil {
+		return fmt.Errorf("failed to commit secrets file: %w", err)
 	}
 
 	log.Success("Pulled %d secrets to %s", len(secrets), secretsPath)
@@ -538,6 +551,10 @@ func remoteSecretsDir() string {
 
 func remoteSecretsPath() string {
 	return config.RemoteSecretsPath(cfg)
+}
+
+func remotePathShellArg(path string) string {
+	return shell.QuoteRemotePath(path)
 }
 
 func loadSecretsFile(path string) (map[string]string, error) {
