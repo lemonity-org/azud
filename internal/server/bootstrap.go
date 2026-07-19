@@ -156,11 +156,16 @@ func (b *Bootstrapper) detectOS(host string) (*OSInfo, error) {
 }
 
 func (b *Bootstrapper) isPodmanInstalled(host string) (bool, error) {
-	result, err := b.sshClient.Execute(host, "podman --version 2>/dev/null && echo 'ok'")
+	// Installation detection must not initialize the caller's rootless Podman
+	// runtime. A newly created user can have the executable available before
+	// its user namespace/runtime directory is ready; executing Podman here
+	// would misclassify that host as missing the package and trigger an
+	// unnecessary privileged reinstall.
+	result, err := b.sshClient.Execute(host, "command -v podman >/dev/null 2>&1")
 	if err != nil {
 		return false, nil // Podman not installed
 	}
-	return strings.Contains(result.Stdout, "ok"), nil
+	return result.ExitCode == 0, nil
 }
 
 func (b *Bootstrapper) installPodman(host string, osInfo *OSInfo) error {
