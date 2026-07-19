@@ -110,10 +110,21 @@ jobs:
             printf 'HOME=/root\n' | sudo tee /root/.ssh/environment >/dev/null
             sudo chmod 600 /root/.ssh/environment
           fi
-          printf 'PermitUserEnvironment HOME,XDG_*\n' | sudo tee /etc/ssh/sshd_config.d/azud-integration.conf >/dev/null
+          sudo sed -i '1i PermitUserEnvironment HOME,XDG_*' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
           sudo service ssh restart
+          expected_environment='/root|'
+          if [ "$TARGET_USER" = "deploy" ]; then
+            expected_environment='/home/deploy|/home/deploy/.config'
+          fi
+          actual_environment=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
+            'printf "%s|%s" "$HOME" "${XDG_CONFIG_HOME:-}"')
+          if [ "$actual_environment" != "$expected_environment" ]; then
+            echo "Unexpected SSH target environment: ${actual_environment}" >&2
+            exit 1
+          fi
 
       - name: Run setup integration test
         env:
