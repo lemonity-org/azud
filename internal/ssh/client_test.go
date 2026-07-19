@@ -4,8 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -40,12 +44,31 @@ func startBlackholeSSHListener(t *testing.T) (port int) {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
+func writeTestPrivateKey(t *testing.T) string {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate test private key: %v", err)
+	}
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("failed to marshal test private key: %v", err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("failed to write test private key: %v", err)
+	}
+	return keyPath
+}
+
 func TestConnectHonorsCancellationDuringSSHHandshake(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
 	port := startBlackholeSSHListener(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	client := NewClient(&Config{
 		Context:               ctx,
+		Keys:                  []string{writeTestPrivateKey(t)},
 		Port:                  port,
 		ConnectTimeout:        5 * time.Second,
 		InsecureIgnoreHostKey: true,
@@ -67,6 +90,7 @@ func TestDifferentHostConnectionsAreNotGloballySerialized(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
 	port := startBlackholeSSHListener(t)
 	client := NewClient(&Config{
+		Keys:                  []string{writeTestPrivateKey(t)},
 		Port:                  port,
 		ConnectTimeout:        250 * time.Millisecond,
 		InsecureIgnoreHostKey: true,
