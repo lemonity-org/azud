@@ -113,7 +113,18 @@ jobs:
           AZUD_INTEGRATION_KEY: "/tmp/azud_ci_key"
           AZUD_INTEGRATION_ROOTLESS: ${{ matrix.rootless }}
           AZUD_INTEGRATION_PROXY_ROOTFUL: ${{ matrix.proxy_rootful }}
-        run: go test ./... -run TestSetupIntegration -count=1
+        run: |
+          set -o pipefail
+          test_log=$(mktemp)
+          if go test ./... -run TestSetupIntegration -count=1 2>&1 | tee "$test_log"; then
+            exit 0
+          fi
+          annotation=$(tail -c 60000 "$test_log")
+          annotation=${annotation//'%'/'%25'}
+          annotation=${annotation//$'\r'/'%0D'}
+          annotation=${annotation//$'\n'/'%0A'}
+          printf '::error title=Setup integration test failed::%s\n' "$annotation"
+          exit 1
 
       - name: Cleanup podman artifacts
         if: always()
