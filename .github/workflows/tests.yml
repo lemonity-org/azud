@@ -107,22 +107,36 @@ jobs:
           else
             sudo install -d -m 700 /root/.ssh
             sudo install -m 600 /tmp/azud_ci_key.pub /root/.ssh/authorized_keys
-            printf 'HOME=/root\n' | sudo tee /root/.ssh/environment >/dev/null
+            printf '%s\n' \
+              'HOME=/root' \
+              'XDG_CONFIG_HOME=/root/.config' \
+              'XDG_DATA_HOME=/root/.local/share' \
+              'XDG_CACHE_HOME=/root/.cache' \
+              | sudo tee /root/.ssh/environment >/dev/null
             sudo chmod 600 /root/.ssh/environment
           fi
           sudo sed -i '1i PermitUserEnvironment HOME,XDG_*' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
           sudo service ssh restart
-          expected_environment='/root|'
+          expected_environment='/root|/root/.config'
           if [ "$TARGET_USER" = "deploy" ]; then
             expected_environment='/home/deploy|/home/deploy/.config'
           fi
-          actual_environment=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
-            'printf "%s|%s" "$HOME" "${XDG_CONFIG_HOME:-}"')
+          actual_environment='SSH connection unavailable'
+          for attempt in {1..10}; do
+            if value=$(ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
+              'printf "%s|%s" "$HOME" "${XDG_CONFIG_HOME:-}"'); then
+              actual_environment=$value
+              break
+            fi
+            sleep 1
+          done
           if [ "$actual_environment" != "$expected_environment" ]; then
-            echo "Unexpected SSH target environment: ${actual_environment}" >&2
+            printf '::error title=Unexpected SSH target environment::expected %s, got %s\n' \
+              "$expected_environment" "$actual_environment"
             exit 1
           fi
 
