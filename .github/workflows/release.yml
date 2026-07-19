@@ -5,22 +5,92 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
+  verify:
+    if: github.ref_name != 'v1'
+    name: Verify release commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - name: Validate semantic-version tag
+        shell: bash
+        run: |
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${GITHUB_REF_NAME}" =~ $semver ]]; then
+            echo "Refusing non-SemVer release tag: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run race-enabled tests
+        run: go test -race ./...
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Run security and release smoke checks
+        run: |
+          ./scripts/security-lint.sh
+          sh scripts/release_smoke_test.sh
+
+      - name: Require successful live integration matrix for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          required_checks=(
+            "Go test & lint"
+            "Integration (rootful-bridge)"
+            "Integration (rootless-bridge)"
+            "Integration (mixed-rootless-app-rootful-proxy)"
+          )
+          for check_name in "${required_checks[@]}"; do
+            conclusions=$(gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+              --jq ".check_runs[] | select(.name == \"${check_name}\") | .conclusion")
+            if ! grep -qx success <<<"$conclusions"; then
+              echo "Required check is not successful: ${check_name}" >&2
+              exit 1
+            fi
+          done
+
   release:
+    # Updating the stable major tag below triggers this workflow once more;
+    # skip that marker run so only full semantic-version tags publish assets.
+    if: github.ref_name != 'v1'
     name: Build & Release
     runs-on: ubuntu-latest
+    needs: [verify, container]
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.25.x"
           cache: true
@@ -49,8 +119,22 @@ jobs:
         working-directory: bin/release
         run: sha256sum azud-* > checksums.txt
 
+      - name: Smoke release-built binary and scaffold
+        run: |
+          bin/release/azud-linux-amd64 version | grep -F "Azud ${GITHUB_REF_NAME}"
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf "$smoke_dir"' EXIT
+          cd "$smoke_dir"
+          "$GITHUB_WORKSPACE/bin/release/azud-linux-amd64" init --github-actions
+          "$GITHUB_WORKSPACE/bin/release/azud-linux-amd64" config
+
+      - name: Attest release binaries
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-checksums: bin/release/checksums.txt
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
@@ -58,11 +142,39 @@ jobs:
             bin/release/azud-*
             bin/release/checksums.txt
 
+  container:
+    if: github.ref_name != 'v1'
+    name: Build & Publish Container
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Extract version metadata
+        id: meta
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          if echo "${GITHUB_REF_NAME}" | grep -q '-'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -70,15 +182,15 @@ jobs:
 
       - name: Docker metadata
         id: docker-meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/lemonity-org/azud
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ steps.meta.outputs.prerelease == 'false' }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
@@ -89,3 +201,49 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ steps.meta.outputs.commit }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
+
+      - name: Attest container image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-name: ghcr.io/lemonity-org/azud
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  finalize:
+    if: github.ref_name != 'v1' && !contains(github.ref_name, '-')
+    name: Publish stable aliases
+    runs-on: ubuntu-latest
+    needs: [release, container]
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update latest container alias
+        run: |
+          version_tag="${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create \
+            --tag ghcr.io/lemonity-org/azud:latest \
+            "ghcr.io/lemonity-org/azud:${version_tag}"
+
+      - name: Update stable v1 action tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v1" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/v1" \
+              -f sha="${GITHUB_SHA}" -F force=true
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/v1" -f sha="${GITHUB_SHA}"
+          fi

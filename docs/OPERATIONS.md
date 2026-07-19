@@ -1,5 +1,14 @@
 # Operations Guide
 
+## Durable state
+
+Azud stores deployment history and canary progress outside the checkout in
+`~/.local/share/azud` (or `/var/lib/azud` when run as root). You may set
+`AZUD_STATE_DIR` to an absolute, access-controlled persistent path. Back up this
+directory and ensure only one deployment pipeline mutates a service at a time.
+Ephemeral CI runners must restore the directory before any deploy, rollback, or
+canary command; see `docs/CI_CD.md`.
+
 Day-2 tasks for running Azud in production.
 
 ## Logs and Debugging

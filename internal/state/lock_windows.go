@@ -15,8 +15,7 @@ var (
 )
 
 const (
-	lockfileExclusiveLock   = 0x00000002
-	lockfileFailImmediately = 0x00000001
+	lockfileExclusiveLock = 0x00000002
 )
 
 func lockFileExclusive(f *os.File) error {
@@ -24,7 +23,7 @@ func lockFileExclusive(f *os.File) error {
 	ol := new(syscall.Overlapped)
 	r1, _, err := procLockFileEx.Call(
 		uintptr(h),
-		uintptr(lockfileExclusiveLock|lockfileFailImmediately),
+		uintptr(lockfileExclusiveLock),
 		0,
 		1, 0,
 		uintptr(unsafe.Pointer(ol)),

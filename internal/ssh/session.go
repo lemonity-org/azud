@@ -3,6 +3,7 @@ package ssh
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -22,7 +23,23 @@ type Connection struct {
 	proxyClient    *ssh.Client // bastion/proxy connection, closed with client
 	lastUsed       time.Time
 	commandTimeout time.Duration
+	context        context.Context
 	mu             sync.Mutex
+	sessions       chan struct{}
+}
+
+func (c *Connection) beginSession() func() {
+	if c.sessions != nil {
+		c.sessions <- struct{}{}
+	}
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+	return func() {
+		if c.sessions != nil {
+			<-c.sessions
+		}
+	}
 }
 
 // Result holds the result of a command execution
@@ -50,10 +67,8 @@ func (r *Result) Output() string {
 
 // Execute runs a command on the remote host
 func (c *Connection) Execute(cmd string) (*Result, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -90,10 +105,8 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 
 // ExecuteWithStdin runs a command on the remote host with provided stdin.
 func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -131,16 +144,17 @@ func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, err
 
 // ExecuteWithPty runs a command with a pseudo-terminal
 func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	session, err := c.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 	defer func() { _ = session.Close() }()
+
+	width, height, startResize, cleanupTerminal := preparePTY(stdin, session)
+	defer cleanupTerminal()
 
 	// Request pseudo-terminal
 	modes := ssh.TerminalModes{
@@ -149,23 +163,23 @@ func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr 
 		ssh.TTY_OP_OSPEED: 14400, // output speed = 14.4kbaud
 	}
 
-	if err := session.RequestPty("xterm", 80, 40, modes); err != nil {
+	if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
 		return fmt.Errorf("failed to request PTY: %w", err)
 	}
+	stopResize := startResize()
+	defer stopResize()
 
 	session.Stdin = stdin
 	session.Stdout = stdout
 	session.Stderr = stderr
 
-	return session.Run(cmd)
+	return c.runWithTimeout(session, cmd)
 }
 
 // ExecuteStream runs a command and streams output to the provided writers
 func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -179,11 +193,36 @@ func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	return c.runWithTimeout(session, cmd)
 }
 
+// ExecuteIO runs a command with live stdin/stdout/stderr. When tty is true it
+// allocates a remote pseudo-terminal; otherwise it uses ordinary pipes.
+func (c *Connection) ExecuteIO(cmd string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
+	if tty {
+		return c.ExecuteWithPty(cmd, stdin, stdout, stderr)
+	}
+	release := c.beginSession()
+	defer release()
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer func() { _ = session.Close() }()
+	session.Stdin = stdin
+	session.Stdout = stdout
+	session.Stderr = stderr
+	return c.runWithTimeout(session, cmd)
+}
+
 // runWithTimeout executes a command on the session with an optional timeout.
 // If commandTimeout is zero, it falls back to session.Run (no timeout).
 func (c *Connection) runWithTimeout(session *ssh.Session, cmd string) error {
-	if c.commandTimeout <= 0 {
-		return session.Run(cmd)
+	ctx := c.context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.commandTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.commandTimeout)
+		defer cancel()
 	}
 
 	if err := session.Start(cmd); err != nil {
@@ -198,18 +237,19 @@ func (c *Connection) runWithTimeout(session *ssh.Session, cmd string) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(c.commandTimeout):
+	case <-ctx.Done():
 		_ = session.Close()
-		return fmt.Errorf("command timed out after %s", c.commandTimeout)
+		if ctx.Err() == context.DeadlineExceeded && c.commandTimeout > 0 {
+			return fmt.Errorf("command timed out after %s: %w", c.commandTimeout, ctx.Err())
+		}
+		return fmt.Errorf("command canceled: %w", ctx.Err())
 	}
 }
 
 // Upload copies a local file to the remote host using SCP
 func (c *Connection) Upload(localPath, remotePath string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	// Read local file
 	localFile, err := os.Open(localPath)
@@ -252,7 +292,7 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 
 	// Run SCP command
 	cmd := fmt.Sprintf("scp -t %s", shell.Quote(remoteDir))
-	if err := session.Run(cmd); err != nil {
+	if err := c.runWithTimeout(session, cmd); err != nil {
 		return fmt.Errorf("SCP failed: %w", err)
 	}
 
@@ -261,10 +301,8 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 
 // UploadContent uploads content directly to a remote file
 func (c *Connection) UploadContent(content []byte, remotePath string, mode os.FileMode) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -287,7 +325,7 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 	}()
 
 	cmd := fmt.Sprintf("scp -t %s", shell.Quote(remoteDir))
-	if err := session.Run(cmd); err != nil {
+	if err := c.runWithTimeout(session, cmd); err != nil {
 		return fmt.Errorf("SCP failed: %w", err)
 	}
 
@@ -296,10 +334,8 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 
 // Download copies a remote file to the local host
 func (c *Connection) Download(remotePath, localPath string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastUsed = time.Now()
+	release := c.beginSession()
+	defer release()
 
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -319,7 +355,7 @@ func (c *Connection) Download(remotePath, localPath string) error {
 	session.Stdout = &stdout
 
 	cmd := fmt.Sprintf("cat %s", shell.Quote(remotePath))
-	if err := session.Run(cmd); err != nil {
+	if err := c.runWithTimeout(session, cmd); err != nil {
 		return fmt.Errorf("failed to read remote file: %w", err)
 	}
 
@@ -339,6 +375,8 @@ func (c *Connection) Download(remotePath, localPath string) error {
 // calls fn (which may use c.Execute() etc. through separate sessions). When
 // fn returns, closing stdin causes cat to exit, which releases the flock.
 func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn func() error) error {
+	release := c.beginSession()
+	defer release()
 	// Create a dedicated session — bypass c.mu so the lock session can
 	// coexist with command sessions opened by fn().
 	session, err := c.client.NewSession()
@@ -367,7 +405,7 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	// and thus immune to injection. All other paths are fully single-quoted.
 	quotedDir := quoteRemotePath(dir)
 	quotedLockFile := quoteRemotePath(lockFile)
-	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'",
+	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'", // safe: paths are quoteRemotePath output and timeout is numeric
 		quotedDir, secs, quotedLockFile)
 
 	if err := session.Start(cmd); err != nil {
@@ -387,6 +425,10 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 		}
 	}()
 
+	lockContext := c.context
+	if lockContext == nil {
+		lockContext = context.Background()
+	}
 	select {
 	case err := <-locked:
 		if err != nil {
@@ -396,8 +438,12 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 		}
 	case <-time.After(timeout + 5*time.Second):
 		_ = stdinPipe.Close()
-		_ = session.Wait()
+		_ = session.Close()
 		return fmt.Errorf("timed out acquiring remote lock %s", lockFile)
+	case <-lockContext.Done():
+		_ = stdinPipe.Close()
+		_ = session.Close()
+		return fmt.Errorf("remote lock canceled: %w", lockContext.Err())
 	}
 
 	// Lock acquired — run the callback.

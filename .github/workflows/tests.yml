@@ -9,19 +9,21 @@ jobs:
   test:
     name: Go test & lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.x"
+          go-version: "1.25.12"
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.8.0
 
@@ -29,53 +31,148 @@ jobs:
         run: go test -race ./...
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
       - name: Run security lint
         run: ./scripts/security-lint.sh
 
+      - name: Run release and installer smoke
+        run: sh scripts/release_smoke_test.sh
+
   integration:
-    name: Integration (setup)
+    name: Integration (${{ matrix.mode }})
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: rootful-bridge
+            user: root
+            rootless: "false"
+            proxy_rootful: "false"
+          - mode: rootless-bridge
+            user: deploy
+            rootless: "true"
+            proxy_rootful: "false"
+          - mode: mixed-rootless-app-rootful-proxy
+            user: deploy
+            rootless: "true"
+            proxy_rootful: "true"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.x"
+          go-version: "1.25.12"
           cache: true
 
       - name: Install Podman and SSH server
         run: |
           sudo apt-get update
-          sudo apt-get install -y podman netavark aardvark-dns openssh-server
+          sudo apt-get install -y podman netavark aardvark-dns openssh-server uidmap slirp4netns passt fuse-overlayfs iptables dbus-user-session curl
 
-      - name: Configure SSH for root
+      - name: Configure SSH target
+        env:
+          TARGET_USER: ${{ matrix.user }}
         run: |
-          sudo mkdir -p /root/.ssh
           ssh-keygen -t ed25519 -N "" -f /tmp/azud_ci_key
-          sudo tee /root/.ssh/authorized_keys < /tmp/azud_ci_key.pub >/dev/null
-          sudo chmod 600 /root/.ssh/authorized_keys
+          if [ "$TARGET_USER" = "deploy" ]; then
+            sudo useradd --create-home --shell /bin/bash deploy
+            sudo install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
+            sudo install -m 600 -o deploy -g deploy /tmp/azud_ci_key.pub /home/deploy/.ssh/authorized_keys
+            sudo tee /etc/sudoers.d/azud-integration >/dev/null <<'EOF'
+          deploy ALL=(root) NOPASSWD: /usr/bin/podman *
+          deploy ALL=(root) NOPASSWD: /usr/bin/loginctl enable-linger deploy
+          deploy ALL=(root) NOPASSWD: /usr/bin/systemctl *
+          deploy ALL=(root) NOPASSWD: /usr/bin/mkdir -p /etc/containers/systemd/
+          deploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/containers/systemd/*
+          EOF
+            sudo chmod 440 /etc/sudoers.d/azud-integration
+            sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin loginctl enable-linger deploy
+          else
+            sudo install -d -m 700 /root/.ssh
+            sudo install -m 600 /tmp/azud_ci_key.pub /root/.ssh/authorized_keys
+          fi
+          target_home=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+          target_uid=$(id -u "$TARGET_USER")
+          sudo install -d -m 700 -o "$TARGET_USER" -g "$TARGET_USER" "/run/user/${target_uid}"
+          if [ "$TARGET_USER" = "deploy" ]; then
+            sudo install -d -m 700 -o deploy -g deploy "${target_home}/.config/environment.d"
+            sudo tee "${target_home}/.config/environment.d/zz-azud-ci.conf" >/dev/null <<EOF
+          HOME=${target_home}
+          XDG_CONFIG_HOME=${target_home}/.config
+          XDG_DATA_HOME=${target_home}/.local/share
+          XDG_CACHE_HOME=${target_home}/.cache
+          XDG_RUNTIME_DIR=/run/user/${target_uid}
+          EOF
+            sudo chown deploy:deploy "${target_home}/.config/environment.d/zz-azud-ci.conf"
+            sudo chmod 600 "${target_home}/.config/environment.d/zz-azud-ci.conf"
+          fi
+          sshd_environment="SetEnv XDG_CONFIG_HOME=${target_home}/.config"
+          sshd_environment+=" XDG_DATA_HOME=${target_home}/.local/share"
+          sshd_environment+=" XDG_CACHE_HOME=${target_home}/.cache"
+          sshd_environment+=" XDG_RUNTIME_DIR=/run/user/${target_uid}"
+          sudo sed -i "1i ${sshd_environment}" /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
-          sudo service ssh restart
+          sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin service ssh restart
+          expected_environment="${target_home}|${target_home}/.config|/run/user/${target_uid}"
+          actual_environment='SSH connection unavailable'
+          for attempt in {1..10}; do
+            if value=$(ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
+              'printf "%s|%s|%s" "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}" "${XDG_RUNTIME_DIR:-}"'); then
+              actual_environment=$value
+              break
+            fi
+            sleep 1
+          done
+          if [ "$actual_environment" != "$expected_environment" ]; then
+            printf '::error title=Unexpected SSH target environment::expected %s, got %s\n' \
+              "$expected_environment" "$actual_environment"
+            exit 1
+          fi
+          if [ "$TARGET_USER" = "deploy" ]; then
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
+              'systemctl --user import-environment HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR'
+          fi
 
       - name: Run setup integration test
         env:
           AZUD_INTEGRATION: "1"
+          AZUD_INTEGRATION_FULL: "1"
           AZUD_INTEGRATION_HOST: "127.0.0.1"
-          AZUD_INTEGRATION_USER: "root"
+          AZUD_INTEGRATION_USER: ${{ matrix.user }}
           AZUD_INTEGRATION_PORT: "22"
           AZUD_INTEGRATION_KEY: "/tmp/azud_ci_key"
-        run: go test ./... -run TestSetupIntegration -count=1
+          AZUD_INTEGRATION_ROOTLESS: ${{ matrix.rootless }}
+          AZUD_INTEGRATION_PROXY_ROOTFUL: ${{ matrix.proxy_rootful }}
+        run: |
+          set -o pipefail
+          test_log=$(mktemp)
+          if go test ./... -run TestSetupIntegration -count=1 2>&1 | tee "$test_log"; then
+            exit 0
+          fi
+          annotation=$(tail -c 60000 "$test_log")
+          annotation=${annotation//'%'/'%25'}
+          annotation=${annotation//$'\r'/'%0D'}
+          annotation=${annotation//$'\n'/'%0A'}
+          printf '::error title=Setup integration test failed::%s\n' "$annotation"
+          exit 1
 
       - name: Cleanup podman artifacts
         if: always()
         run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/azud_ci_key "${{ matrix.user }}@127.0.0.1" \
+            'systemctl --user stop azud-it.service azud-it-worker.service azud-proxy.service 2>/dev/null || true; podman rm -f azud-proxy azud-it azud-it-worker azud-it-cache azud-it-cron-heartbeat 2>/dev/null || true; podman network rm azud 2>/dev/null || true' || true
           sudo podman rm -f azud-proxy azud-it 2>/dev/null || true
           sudo podman network rm azud 2>/dev/null || true
           sudo podman volume rm caddy_data caddy_config 2>/dev/null || true

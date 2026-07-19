@@ -47,11 +47,13 @@ Each destination can have its own image tag to avoid cross-environment conflicts
 
 This keeps CI/CD fast and avoids pushing large images from a laptop.
 
-## Stateless CLI
+## Configuration and durable operational state
 
-Azud does not store server state locally. The CLI reads configuration from
-`config/deploy.yml` and computes desired state. This keeps deploys reproducible
-and version-controlled.
+The CLI reads desired state from `config/deploy.yml`, keeping deploys
+reproducible and version-controlled. It also keeps a small deployment and canary
+journal in `AZUD_STATE_DIR` (`~/.local/share/azud` for normal Unix users or
+`/var/lib/azud` for root). CI must persist that directory so a clean checkout can
+find the prior stable version, roll back, or continue a canary safely.
 
 ## Canary Deployments
 

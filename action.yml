@@ -73,9 +73,9 @@ runs:
       shell: bash
       run: |
         if command -v podman >/dev/null 2>&1; then
-          podman login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+          printf '%s' "$REGISTRY_PASSWORD" | podman login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin
         else
-          docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+          printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin
         fi
       env:
         REGISTRY_SERVER: ${{ inputs.registry-server }}

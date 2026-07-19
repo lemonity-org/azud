@@ -93,6 +93,15 @@ download_and_verify() {
     fatal "Checksum mismatch!\n  Expected: ${EXPECTED}\n  Actual:   ${ACTUAL}"
   fi
   log "Checksum verified."
+
+  if ! command -v gh >/dev/null 2>&1; then
+    fatal "GitHub CLI (gh) is required to verify release provenance: https://cli.github.com/"
+  fi
+  log "Verifying GitHub/Sigstore build provenance..."
+  if ! gh attestation verify "${TMPDIR}/${BINARY_NAME}" --repo "$REPO" >/dev/null; then
+    fatal "Release provenance verification failed for ${BINARY_NAME}"
+  fi
+  log "Build provenance verified."
 }
 
 install_binary() {
@@ -103,7 +112,10 @@ install_binary() {
 }
 
 print_success() {
-  INSTALLED_VERSION=$("${INSTALL_DIR}/azud" version 2>/dev/null || echo "${VERSION}")
+  INSTALLED_VERSION=$("${INSTALL_DIR}/azud" version 2>/dev/null | awk 'NR == 1 { print $2 }')
+  if [ -z "$INSTALLED_VERSION" ]; then
+    INSTALLED_VERSION="$VERSION"
+  fi
   cat <<EOF
 
   azud ${INSTALLED_VERSION} installed successfully!

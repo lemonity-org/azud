@@ -36,6 +36,23 @@ func Quote(s string) string {
 	return "'" + escaped + "'"
 }
 
+// QuoteRemotePath safely quotes a remote path while allowing only a leading
+// documented home-directory token to expand on the remote host.
+func QuoteRemotePath(path string) string {
+	switch {
+	case path == "$HOME" || path == "${HOME}" || path == "~":
+		return "${HOME}"
+	case strings.HasPrefix(path, "$HOME/"):
+		return "${HOME}/" + Quote(strings.TrimPrefix(path, "$HOME/"))
+	case strings.HasPrefix(path, "${HOME}/"):
+		return "${HOME}/" + Quote(strings.TrimPrefix(path, "${HOME}/"))
+	case strings.HasPrefix(path, "~/"):
+		return "${HOME}/" + Quote(strings.TrimPrefix(path, "~/"))
+	default:
+		return Quote(path)
+	}
+}
+
 // QuoteAll quotes each string in the slice and returns a new slice.
 func QuoteAll(args []string) []string {
 	quoted := make([]string, len(args))

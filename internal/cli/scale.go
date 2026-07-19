@@ -2,14 +2,12 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
@@ -91,9 +89,20 @@ func runScale(cmd *cobra.Command, args []string) error {
 
 	log.Header("Scaling Application")
 
-	for role, op := range scales {
+	roles := make([]string, 0, len(scales))
+	for role := range scales {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	var operationErrors []string
+	for _, role := range roles {
+		op := scales[role]
 		hosts := cfg.GetRoleHosts(role)
 		if scaleHost != "" {
+			if !containsString(hosts, scaleHost) {
+				operationErrors = append(operationErrors, fmt.Sprintf("%s/%s: host is not configured for role", scaleHost, role))
+				continue
+			}
 			hosts = []string{scaleHost}
 		}
 
@@ -102,6 +111,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 
 			if err := ensureRemoteSecretsFile(sshClient, []string{host}, cfg.Env.Secret); err != nil {
 				log.HostError(host, "Missing secrets: %v", err)
+				operationErrors = append(operationErrors, fmt.Sprintf("%s/%s: missing secrets: %v", host, role, err))
 				continue
 			}
 
@@ -109,6 +119,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 			currentCount, err := countRunningInstances(containerManager, host, role)
 			if err != nil {
 				log.HostError(host, "Failed to get current count: %v", err)
+				operationErrors = append(operationErrors, fmt.Sprintf("%s/%s: count: %v", host, role, err))
 				continue
 			}
 
@@ -128,12 +139,14 @@ func runScale(cmd *cobra.Command, args []string) error {
 				// Scale up
 				if err := scaleUp(containerManager, imageManager, proxyManager, podmanClient, sshClient, host, role, currentCount, targetCount, log); err != nil {
 					log.HostError(host, "Scale up failed: %v", err)
+					operationErrors = append(operationErrors, fmt.Sprintf("%s/%s: scale up: %v", host, role, err))
 					continue
 				}
 			} else {
 				// Scale down
 				if err := scaleDown(containerManager, proxyManager, host, role, currentCount, targetCount, log); err != nil {
 					log.HostError(host, "Scale down failed: %v", err)
+					operationErrors = append(operationErrors, fmt.Sprintf("%s/%s: scale down: %v", host, role, err))
 					continue
 				}
 			}
@@ -142,6 +155,9 @@ func runScale(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if len(operationErrors) > 0 {
+		return fmt.Errorf("scaling failed: %s", strings.Join(operationErrors, "; "))
+	}
 	log.Success("Scaling complete!")
 	return nil
 }
@@ -159,10 +175,17 @@ func runScaleStatus(cmd *cobra.Command, args []string) error {
 	log.Header("Scale Status")
 
 	var rows [][]string
+	var statusErrors []string
 
-	for role, roleConfig := range cfg.Servers {
+	matchedHost := scaleHost == ""
+	for _, role := range cfg.GetRoles() {
+		roleConfig := cfg.Servers[role]
 		hosts := roleConfig.Hosts
 		if scaleHost != "" {
+			if !containsString(hosts, scaleHost) {
+				continue
+			}
+			matchedHost = true
 			hosts = []string{scaleHost}
 		}
 
@@ -171,14 +194,20 @@ func runScaleStatus(cmd *cobra.Command, args []string) error {
 			status := fmt.Sprintf("%d", count)
 			if err != nil {
 				status = "error"
+				statusErrors = append(statusErrors, fmt.Sprintf("%s/%s: %v", host, role, err))
 			}
 
 			rows = append(rows, []string{role, host, status})
 		}
 	}
+	if !matchedHost {
+		return fmt.Errorf("host %s is not configured for any role", scaleHost)
+	}
 
 	log.Table([]string{"Role", "Host", "Instances"}, rows)
-
+	if len(statusErrors) > 0 {
+		return fmt.Errorf("scale status failed: %s", strings.Join(statusErrors, "; "))
+	}
 	return nil
 }
 
@@ -205,26 +234,68 @@ func (op scaleOperation) calculateTarget(current int) int {
 	return op.value
 }
 
-func countRunningInstances(cm *podman.ContainerManager, host, role string) (int, error) {
-	filters := map[string]string{
+type roleInstance struct {
+	Name   string
+	Index  int
+	Stable bool
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// listRoleInstances enumerates instances by their exact managed service and
+// role labels. Names are then validated against the documented stable name or
+// the indexed scale name, preventing prefix collisions with other services.
+func listRoleInstances(cm *podman.ContainerManager, host, role string) ([]roleInstance, error) {
+	containers, err := cm.List(host, false, map[string]string{
 		"label": fmt.Sprintf("azud.service=%s", cfg.Service),
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	containers, err := cm.List(host, false, filters)
+	stableName := deploy.RoleContainerName(cfg, role)
+	prefix := stableName + "-"
+	instances := make([]roleInstance, 0, len(containers))
+	for _, container := range containers {
+		if container.Labels["azud.service"] != cfg.Service || container.Labels["azud.role"] != role {
+			continue
+		}
+		if container.Name == stableName {
+			instances = append(instances, roleInstance{Name: container.Name, Index: -1, Stable: true})
+			continue
+		}
+		if !strings.HasPrefix(container.Name, prefix) {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(container.Name, prefix))
+		if err != nil || index < 0 {
+			continue
+		}
+		instances = append(instances, roleInstance{Name: container.Name, Index: index})
+	}
+
+	sort.Slice(instances, func(i, j int) bool {
+		if instances[i].Stable != instances[j].Stable {
+			return instances[i].Stable
+		}
+		return instances[i].Index < instances[j].Index
+	})
+	return instances, nil
+}
+
+func countRunningInstances(cm *podman.ContainerManager, host, role string) (int, error) {
+	instances, err := listRoleInstances(cm, host, role)
 	if err != nil {
 		return 0, err
 	}
-
-	count := 0
-	for _, c := range containers {
-		// Check if container belongs to this role
-		if strings.HasPrefix(c.Name, fmt.Sprintf("%s-%s", cfg.Service, role)) ||
-			c.Name == cfg.Service {
-			count++
-		}
-	}
-
-	return count, nil
+	return len(instances), nil
 }
 
 func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Manager, podmanClient *podman.Client, sshClient *ssh.Client, host, role string, from, to int, log *output.Logger) error {
@@ -233,125 +304,88 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 		return fmt.Errorf("failed to pull image: %w", err)
 	}
 
-	roleConfig := cfg.Servers[role]
 	proxyHost := cfg.Proxy.PrimaryHost()
+	instances, err := listRoleInstances(cm, host, role)
+	if err != nil {
+		return fmt.Errorf("failed to enumerate instances: %w", err)
+	}
+	used := make(map[int]struct{})
+	for _, instance := range instances {
+		if !instance.Stable {
+			used[instance.Index] = struct{}{}
+		}
+	}
 
-	var wg sync.WaitGroup
-	errors := make(chan error, to-from)
-
-	for i := from; i < to; i++ {
-		wg.Add(1)
-		go func(instance int) {
-			defer wg.Done()
-
-			containerName := fmt.Sprintf("%s-%s-%d", cfg.Service, role, instance)
-			log.Host(host, "Starting instance %s", containerName)
-
-			// Build container config
-			containerConfig := &podman.ContainerConfig{
-				Name:    containerName,
-				Image:   cfg.Image,
-				Detach:  true,
-				Restart: "unless-stopped",
-				Network: "azud",
-				Labels: map[string]string{
-					"azud.managed":  "true",
-					"azud.service":  cfg.Service,
-					"azud.role":     role,
-					"azud.instance": fmt.Sprintf("%d", instance),
-				},
-				Env: make(map[string]string),
-			}
-			if cfg.UseHostPortUpstreams() {
-				containerConfig.Ports = append(containerConfig.Ports, fmt.Sprintf("127.0.0.1::%d", cfg.Proxy.AppPort))
-			}
-
-			// Add environment variables
-			for key, value := range cfg.Env.Clear {
-				containerConfig.Env[key] = value
-			}
-			for key, value := range roleConfig.Env {
-				containerConfig.Env[key] = value
-			}
-			containerConfig.SecretEnv = cfg.Env.Secret
-			if len(containerConfig.SecretEnv) > 0 {
-				containerConfig.EnvFile = config.RemoteSecretsPath(cfg)
-			}
-
-			// Add role-specific options (convert map to podman run flags)
-			for opt, val := range roleConfig.Options {
-				switch opt {
-				case "memory":
-					containerConfig.Memory = val
-				case "cpus":
-					containerConfig.CPUs = val
-				default:
-					containerConfig.Options = append(containerConfig.Options, fmt.Sprintf("--%s=%s", opt, val))
+	created := make([]string, 0, to-from)
+	registered := make(map[string]string)
+	cleanup := func() error {
+		var cleanupErrors []string
+		for i := len(created) - 1; i >= 0; i-- {
+			name := created[i]
+			if upstream, routed := registered[name]; routed {
+				if err := pm.RemoveUpstream(host, proxyHost, upstream); err != nil {
+					// Keep a still-routed container alive. Removing it here would turn
+					// a failed scale-up into an avoidable bad gateway.
+					cleanupErrors = append(cleanupErrors, fmt.Sprintf("remove route for %s: %v", name, err))
+					continue
 				}
 			}
-
-			// Add command if specified
-			if roleConfig.Cmd != "" {
-				containerConfig.Command = []string{"/bin/sh", "-c", roleConfig.Cmd}
+			if err := cm.Remove(host, name, true); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("remove container %s: %v", name, err))
 			}
+		}
+		if len(cleanupErrors) > 0 {
+			return fmt.Errorf("cleanup incomplete: %s", strings.Join(cleanupErrors, "; "))
+		}
+		return nil
+	}
+	failWithCleanup := func(cause error) error {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return fmt.Errorf("%w (%v)", cause, cleanupErr)
+		}
+		return cause
+	}
 
-			// Add volumes
-			containerConfig.Volumes = cfg.Volumes
-
-			// Add health check
-			livenessCmd := deploy.LivenessCommand(cfg)
-			if livenessCmd != "" {
-				containerConfig.HealthCmd = livenessCmd
-				containerConfig.HealthInterval = cfg.Proxy.Healthcheck.Interval
-				containerConfig.HealthTimeout = cfg.Proxy.Healthcheck.Timeout
-				containerConfig.HealthRetries = 3
+	for len(instances)+len(created) < to {
+		index := 0
+		for {
+			if _, exists := used[index]; !exists {
+				break
 			}
+			index++
+		}
+		used[index] = struct{}{}
+		containerName := fmt.Sprintf("%s-%d", deploy.RoleContainerName(cfg, role), index)
+		log.Host(host, "Starting instance %s", containerName)
+		containerConfig := deploy.NewAppContainerConfig(cfg, cfg.Image, containerName, role, map[string]string{
+			"azud.instance": strconv.Itoa(index),
+		})
+		if _, err := cm.Run(host, containerConfig); err != nil {
+			return failWithCleanup(fmt.Errorf("failed to start %s: %w", containerName, err))
+		}
+		created = append(created, containerName)
 
-			// Run the container
-			_, err := cm.Run(host, containerConfig)
-			if err != nil {
-				errors <- fmt.Errorf("failed to start %s: %w", containerName, err)
-				return
-			}
-
-			// Wait for health check if configured
-			if cfg.Deploy.ReadinessDelay > 0 {
-				time.Sleep(cfg.Deploy.ReadinessDelay)
-			}
-
+		if deploy.IsProxyRole(role) {
 			if cfg.Proxy.Healthcheck.GetReadinessPath() != "" {
 				if err := deploy.WaitForContainerReady(cfg, podmanClient, sshClient, host, containerName); err != nil {
-					log.Warn("Health check failed for %s: %v", containerName, err)
-					// Continue anyway, proxy will detect unhealthy upstream
+					return failWithCleanup(fmt.Errorf("instance %s is not ready: %w", containerName, err))
 				}
 			}
-
-			// Register with proxy
-			if proxyHost != "" {
-				upstream, upstreamErr := scaleUpstreamForContainer(cm, host, containerName)
-				if upstreamErr != nil {
-					log.Warn("Failed to resolve upstream for %s: %v", containerName, upstreamErr)
-					upstream = fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
-				}
-				if err := pm.AddUpstream(host, proxyHost, upstream); err != nil {
-					log.Warn("Failed to register %s with proxy: %v", containerName, err)
-				}
+			if proxyHost == "" {
+				return failWithCleanup(fmt.Errorf("proxy host is required to scale web role"))
 			}
-
-			log.Host(host, "Instance %s started", containerName)
-		}(i)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	var errs []string
-	for err := range errors {
-		errs = append(errs, err.Error())
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("some instances failed: %s", strings.Join(errs, "; "))
+			upstream, err := scaleUpstreamForContainer(cm, host, containerName)
+			if err != nil {
+				return failWithCleanup(fmt.Errorf("failed to resolve upstream for %s: %w", containerName, err))
+			}
+			if err := pm.AddUpstream(host, proxyHost, upstream); err != nil {
+				return failWithCleanup(fmt.Errorf("failed to register %s with proxy: %w", containerName, err))
+			}
+			registered[containerName] = upstream
+		} else if err := cm.WaitRunning(host, containerName, cfg.Deploy.ReadinessDelay); err != nil {
+			return failWithCleanup(fmt.Errorf("instance %s failed startup check: %w", containerName, err))
+		}
+		log.Host(host, "Instance %s started", containerName)
 	}
 
 	return nil
@@ -359,60 +393,46 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 
 func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string, from, to int, log *output.Logger) error {
 	proxyHost := cfg.Proxy.PrimaryHost()
-	var wg sync.WaitGroup
-	errors := make(chan error, from-to)
+	instances, err := listRoleInstances(cm, host, role)
+	if err != nil {
+		return fmt.Errorf("failed to enumerate instances: %w", err)
+	}
+	if to >= len(instances) {
+		return nil
+	}
 
-	for i := from - 1; i >= to; i-- {
-		wg.Add(1)
-		go func(instance int) {
-			defer wg.Done()
-
-			containerName := fmt.Sprintf("%s-%s-%d", cfg.Service, role, instance)
-			log.Host(host, "Stopping instance %s", containerName)
-
-			// Remove from proxy first
-			if proxyHost != "" {
-				upstream, upstreamErr := scaleUpstreamForContainer(cm, host, containerName)
-				if upstreamErr != nil {
-					log.Debug("Failed to resolve upstream for %s: %v", containerName, upstreamErr)
-					upstream = fmt.Sprintf("%s:%d", containerName, cfg.Proxy.AppPort)
-				}
-				if err := pm.RemoveUpstream(host, proxyHost, upstream); err != nil {
-					log.Debug("Failed to remove %s from proxy: %v", containerName, err)
-				}
+	// Remove indexed instances from highest to lowest, keeping the stable
+	// container until it is the final instance selected for scale-to-zero.
+	sort.Slice(instances, func(i, j int) bool {
+		if instances[i].Stable != instances[j].Stable {
+			return !instances[i].Stable
+		}
+		return instances[i].Index > instances[j].Index
+	})
+	for _, instance := range instances[:len(instances)-to] {
+		containerName := instance.Name
+		log.Host(host, "Stopping instance %s", containerName)
+		if deploy.IsProxyRole(role) {
+			if proxyHost == "" {
+				return fmt.Errorf("proxy host is required to scale down web role")
 			}
-
-			// Wait for drain
+			upstream, err := scaleUpstreamForContainer(cm, host, containerName)
+			if err != nil {
+				return fmt.Errorf("failed to resolve upstream for %s: %w", containerName, err)
+			}
+			if err := pm.RemoveUpstream(host, proxyHost, upstream); err != nil {
+				return fmt.Errorf("refusing to stop still-routed instance %s: %w", containerName, err)
+			}
 			if cfg.Deploy.DrainTimeout > 0 {
-				time.Sleep(cfg.Deploy.DrainTimeout)
-			}
-
-			// Stop and remove container
-			if err := cm.Stop(host, containerName, 30); err != nil {
-				if !strings.Contains(err.Error(), "No such container") {
-					errors <- fmt.Errorf("failed to stop %s: %w", containerName, err)
-					return
+				if err := pm.DrainUpstream(host, upstream, cfg.Deploy.DrainTimeout); err != nil {
+					return fmt.Errorf("failed to drain %s: %w", containerName, err)
 				}
 			}
-
-			if err := cm.Remove(host, containerName, true); err != nil {
-				log.Debug("Failed to remove %s: %v", containerName, err)
-			}
-
-			log.Host(host, "Instance %s stopped", containerName)
-		}(i)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	var errs []string
-	for err := range errors {
-		errs = append(errs, err.Error())
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("some instances failed: %s", strings.Join(errs, "; "))
+		}
+		if err := cm.Remove(host, containerName, true); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", containerName, err)
+		}
+		log.Host(host, "Instance %s stopped", containerName)
 	}
 
 	return nil

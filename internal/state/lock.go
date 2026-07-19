@@ -13,7 +13,9 @@ type FileLock struct {
 }
 
 // AcquireFileLock acquires an exclusive file lock on the given path.
-// Returns a FileLock that must be released by calling Release().
+// Waits for an existing holder and returns a FileLock that must be released by
+// calling Release(). Local state writes are short, so blocking avoids dropping
+// concurrent deployment/history updates.
 func AcquireFileLock(path string) (*FileLock, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -25,10 +27,11 @@ func AcquireFileLock(path string) (*FileLock, error) {
 		return nil, fmt.Errorf("failed to open lock file: %w", err)
 	}
 
-	// Try to acquire exclusive lock (non-blocking)
+	// Acquire the exclusive lock, waiting for the short state mutation that
+	// currently owns it to finish.
 	if err := lockFileExclusive(file); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("failed to acquire lock (another process may be holding it): %w", err)
+		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
 
 	return &FileLock{file: file, path: path}, nil

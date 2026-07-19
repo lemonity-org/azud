@@ -30,11 +30,11 @@ UNSAFE_PATTERNS=$(grep -rn 'fmt.Sprintf.*%s' --include="*.go" internal/ 2>/dev/n
     grep -v 'format\|Format\|template\|Template\|log\|Log\|error\|Error\|message\|Message' || true)
 
 if [ -n "$UNSAFE_PATTERNS" ]; then
-    echo -e "${YELLOW}Warning: Potential unquoted variables in SSH commands:${NC}"
+    echo -e "${RED}Error: Potential unquoted variables in SSH commands:${NC}"
     echo "$UNSAFE_PATTERNS"
     echo ""
     echo "If these are safe, add '// safe: <reason>' comment to suppress."
-    # Don't fail on warnings, just alert
+    ERRORS=$((ERRORS + 1))
 fi
 
 # Pattern 2: Direct string concatenation in SSH commands
@@ -46,9 +46,10 @@ CONCAT_PATTERNS=$(grep -rn 'Execute(.*+.*+' --include="*.go" internal/ 2>/dev/nu
     grep -v '// safe:' || true)
 
 if [ -n "$CONCAT_PATTERNS" ]; then
-    echo -e "${YELLOW}Warning: String concatenation in Execute calls:${NC}"
+    echo -e "${RED}Error: String concatenation in Execute calls:${NC}"
     echo "$CONCAT_PATTERNS"
     echo ""
+    ERRORS=$((ERRORS + 1))
 fi
 
 # Pattern 3: Check for credentials in command strings (passwords, tokens, secrets)
@@ -102,11 +103,12 @@ if command -v govulncheck &> /dev/null; then
         echo -e "${RED}Error: Vulnerability check failed${NC}"
         ERRORS=$((ERRORS + 1))
     else
-        echo -e "${GREEN}No known vulnerabilities in dependencies${NC}"
+        echo -e "${GREEN}No reachable vulnerabilities found${NC}"
     fi
 else
-    echo -e "${YELLOW}Warning: govulncheck not installed, skipping dependency check${NC}"
-    echo "Install with: go install golang.org/x/vuln/cmd/govulncheck@latest"
+    echo -e "${RED}Error: govulncheck is required for the security gate${NC}"
+    echo "Install with: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0"
+    ERRORS=$((ERRORS + 1))
 fi
 
 echo ""

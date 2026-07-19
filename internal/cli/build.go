@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -53,12 +54,16 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	// Generate version tag using template (supports {destination}, {version}, {timestamp})
 	dest := GetDestination()
-	imageTag := generateImageTag(cfg.Image, dest)
-	latestTag := fmt.Sprintf("%s:latest", cfg.Image)
+	imageTag, err := generateImageTag(cfg.Image, dest)
+	if err != nil {
+		return err
+	}
+	baseImage := stripImageReference(cfg.Image)
+	latestTag := fmt.Sprintf("%s:latest", baseImage)
 
 	// Add destination suffix to latest tag if destination is specified
 	if dest != "" {
-		latestTag = fmt.Sprintf("%s:%s-latest", cfg.Image, dest)
+		latestTag = fmt.Sprintf("%s:%s-latest", baseImage, dest)
 	}
 
 	log.Header("Building %s", imageTag)
@@ -173,7 +178,13 @@ func buildLocal(imageTag, latestTag string, multiarch bool) error {
 	args = append(args, "-t", latestTag)
 
 	// Build args from config
-	for key, value := range cfg.Builder.Args {
+	buildArgKeys := make([]string, 0, len(cfg.Builder.Args))
+	for key := range cfg.Builder.Args {
+		buildArgKeys = append(buildArgKeys, key)
+	}
+	sort.Strings(buildArgKeys)
+	for _, key := range buildArgKeys {
+		value := cfg.Builder.Args[key]
 		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
 	}
 
@@ -586,7 +597,20 @@ func generateVersion() string {
 //
 // Default template is "{version}" for backward compatibility.
 // Recommended for multi-environment: "{destination}-{version}"
-func generateImageTag(baseImage, destination string) string {
+var ociTagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+
+func stripImageReference(image string) string {
+	if at := strings.Index(image, "@"); at >= 0 {
+		image = image[:at]
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	if colon := strings.LastIndex(image, ":"); colon > lastSlash {
+		image = image[:colon]
+	}
+	return image
+}
+
+func generateImageTag(baseImage, destination string) (string, error) {
 	version := generateVersion()
 	template := cfg.Builder.TagTemplate
 
@@ -610,5 +634,8 @@ func generateImageTag(baseImage, destination string) string {
 		tag = strings.ReplaceAll(tag, "{destination}", "")
 	}
 
-	return fmt.Sprintf("%s:%s", baseImage, tag)
+	if !ociTagPattern.MatchString(tag) {
+		return "", fmt.Errorf("generated image tag %q is not a valid OCI tag", tag)
+	}
+	return fmt.Sprintf("%s:%s", stripImageReference(baseImage), tag), nil
 }

@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -18,14 +19,26 @@ import (
 
 // Client manages SSH connections to remote hosts
 type Client struct {
-	config    *Config
-	pool      *Pool
-	agentConn net.Conn // SSH agent connection, closed on Client.Close()
-	mu        sync.RWMutex
+	config     *Config
+	pool       *Pool
+	agentConn  net.Conn   // SSH agent connection, closed on Client.Close()
+	mu         sync.Mutex // protects agentConn
+	connectMu  sync.Mutex
+	connecting map[string]*connectCall
+}
+
+type connectCall struct {
+	done chan struct{}
+	conn *Connection
+	err  error
 }
 
 // Config holds SSH client configuration
 type Config struct {
+	// Context cancels connection attempts and active commands. Defaults to
+	// context.Background when unset.
+	Context context.Context
+
 	// SSH username
 	User string
 
@@ -68,6 +81,9 @@ type ProxyConfig struct {
 
 // NewClient creates a new SSH client with the given configuration
 func NewClient(cfg *Config) *Client {
+	if cfg.Context == nil {
+		cfg.Context = context.Background()
+	}
 	if cfg.Port == 0 {
 		cfg.Port = 22
 	}
@@ -79,19 +95,52 @@ func NewClient(cfg *Config) *Client {
 	}
 
 	return &Client{
-		config: cfg,
-		pool:   NewPool(),
+		config:     cfg,
+		pool:       NewPool(),
+		connecting: make(map[string]*connectCall),
 	}
 }
 
 // Connect establishes a connection to the given host
 func (c *Client) Connect(host string) (*Connection, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// Check pool for existing connection
 	if conn := c.pool.Get(host); conn != nil {
 		return conn, nil
+	}
+	c.connectMu.Lock()
+	if call := c.connecting[host]; call != nil {
+		c.connectMu.Unlock()
+		select {
+		case <-call.done:
+			return call.conn, call.err
+		case <-c.config.Context.Done():
+			return nil, c.config.Context.Err()
+		}
+	}
+	call := &connectCall{done: make(chan struct{})}
+	c.connecting[host] = call
+	c.connectMu.Unlock()
+
+	call.conn, call.err = c.connect(host)
+	c.connectMu.Lock()
+	delete(c.connecting, host)
+	close(call.done)
+	c.connectMu.Unlock()
+	return call.conn, call.err
+}
+
+func (c *Client) connect(host string) (*Connection, error) {
+	// Another completed connection may have entered the pool before this call
+	// was registered.
+	if conn := c.pool.Get(host); conn != nil {
+		return conn, nil
+	}
+
+	ctx := c.config.Context
+	if c.config.ConnectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.config.ConnectTimeout)
+		defer cancel()
 	}
 
 	// Build SSH client config
@@ -104,9 +153,9 @@ func (c *Client) Connect(host string) (*Connection, error) {
 	var client *ssh.Client
 	var proxyClient *ssh.Client
 	if c.config.Proxy != nil && c.config.Proxy.Host != "" {
-		client, proxyClient, err = c.connectViaProxy(host, sshConfig)
+		client, proxyClient, err = c.connectViaProxy(ctx, host, sshConfig)
 	} else {
-		client, err = c.connectDirect(host, sshConfig)
+		client, err = c.connectDirect(ctx, host, sshConfig)
 	}
 
 	if err != nil {
@@ -120,6 +169,8 @@ func (c *Client) Connect(host string) (*Connection, error) {
 		proxyClient:    proxyClient,
 		lastUsed:       time.Now(),
 		commandTimeout: c.config.CommandTimeout,
+		context:        c.config.Context,
+		sessions:       make(chan struct{}, 8),
 	}
 
 	c.pool.Put(host, conn)
@@ -127,9 +178,9 @@ func (c *Client) Connect(host string) (*Connection, error) {
 }
 
 // connectDirect establishes a direct SSH connection
-func (c *Client) connectDirect(host string, sshConfig *ssh.ClientConfig) (*ssh.Client, error) {
-	addr := fmt.Sprintf("%s:%d", host, c.config.Port)
-	client, err := ssh.Dial("tcp", addr, sshConfig)
+func (c *Client) connectDirect(ctx context.Context, host string, sshConfig *ssh.ClientConfig) (*ssh.Client, error) {
+	addr := fmt.Sprintf("%s:%d", host, c.config.Port) // safe: net.Dial address, not a shell command
+	client, err := dialSSHContext(ctx, addr, sshConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
@@ -139,7 +190,7 @@ func (c *Client) connectDirect(host string, sshConfig *ssh.ClientConfig) (*ssh.C
 // connectViaProxy establishes an SSH connection through a bastion host.
 // Returns both the target client and the proxy client so the caller can
 // close the proxy connection when the target is no longer needed.
-func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh.Client, *ssh.Client, error) {
+func (c *Client) connectViaProxy(ctx context.Context, host string, sshConfig *ssh.ClientConfig) (*ssh.Client, *ssh.Client, error) {
 	// Build proxy SSH config
 	proxyConfig, err := c.buildProxySSHConfig()
 	if err != nil {
@@ -151,22 +202,38 @@ func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh
 	if proxyPort == 0 {
 		proxyPort = 22
 	}
-	proxyAddr := fmt.Sprintf("%s:%d", c.config.Proxy.Host, proxyPort)
+	proxyAddr := fmt.Sprintf("%s:%d", c.config.Proxy.Host, proxyPort) // safe: net.Dial address, not a shell command
 
-	proxyClient, err := ssh.Dial("tcp", proxyAddr, proxyConfig)
+	proxyClient, err := dialSSHContext(ctx, proxyAddr, proxyConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to proxy %s: %w", proxyAddr, err)
 	}
 
 	// Connect to target through proxy
-	targetAddr := fmt.Sprintf("%s:%d", host, c.config.Port)
-	conn, err := proxyClient.Dial("tcp", targetAddr)
+	targetAddr := fmt.Sprintf("%s:%d", host, c.config.Port) // safe: SSH transport address, not a shell command
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	dialDone := make(chan dialResult, 1)
+	go func() {
+		conn, err := proxyClient.Dial("tcp", targetAddr)
+		dialDone <- dialResult{conn: conn, err: err}
+	}()
+	var conn net.Conn
+	select {
+	case result := <-dialDone:
+		conn, err = result.conn, result.err
+	case <-ctx.Done():
+		_ = proxyClient.Close()
+		return nil, nil, ctx.Err()
+	}
 	if err != nil {
 		_ = proxyClient.Close()
 		return nil, nil, fmt.Errorf("failed to connect to %s via proxy: %w", targetAddr, err)
 	}
 
-	ncc, chans, reqs, err := ssh.NewClientConn(conn, targetAddr, sshConfig)
+	ncc, chans, reqs, err := newSSHClientConnContext(ctx, conn, targetAddr, sshConfig)
 	if err != nil {
 		_ = conn.Close()
 		_ = proxyClient.Close()
@@ -174,6 +241,36 @@ func (c *Client) connectViaProxy(host string, sshConfig *ssh.ClientConfig) (*ssh
 	}
 
 	return ssh.NewClient(ncc, chans, reqs), proxyClient, nil
+}
+
+func dialSSHContext(ctx context.Context, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	ncc, chans, reqs, err := newSSHClientConnContext(ctx, conn, addr, cfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(ncc, chans, reqs), nil
+}
+
+func newSSHClientConnContext(ctx context.Context, conn net.Conn, addr string, cfg *ssh.ClientConfig) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	ncc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	close(done)
+	if err != nil && ctx.Err() != nil {
+		return nil, nil, nil, ctx.Err()
+	}
+	return ncc, chans, reqs, err
 }
 
 // buildSSHConfig creates an ssh.ClientConfig from the client configuration
@@ -280,6 +377,8 @@ func (c *Client) getAuthMethods(keyPaths []string) ([]ssh.AuthMethod, error) {
 // getAgentAuth returns SSH agent authentication if available.
 // The agent connection is stored in c.agentConn and closed when c.Close() is called.
 func (c *Client) getAgentAuth() ssh.AuthMethod {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// If we already have an agent connection, reuse it
 	if c.agentConn != nil {
 		agentClient := agent.NewClient(c.agentConn)
@@ -394,7 +493,7 @@ func (c *Client) fingerprintCheckingCallback(fallback ssh.HostKeyCallback) ssh.H
 		// 3. Plain host without port
 		lookupKeys := []string{hostname}
 		if port != "" && port != "22" {
-			lookupKeys = append(lookupKeys, fmt.Sprintf("[%s]:%s", host, port))
+			lookupKeys = append(lookupKeys, fmt.Sprintf("[%s]:%s", host, port)) // safe: known_hosts lookup key, not a shell command
 		}
 		lookupKeys = append(lookupKeys, host)
 
@@ -449,6 +548,22 @@ func (c *Client) ExecuteWithStdin(host, cmd string, stdin io.Reader) (*Result, e
 	}
 
 	return conn.ExecuteWithStdin(cmd, stdin)
+}
+
+func (c *Client) ExecuteStream(host, cmd string, stdout, stderr io.Writer) error {
+	conn, err := c.Connect(host)
+	if err != nil {
+		return err
+	}
+	return conn.ExecuteStream(cmd, stdout, stderr)
+}
+
+func (c *Client) ExecuteIO(host, cmd string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
+	conn, err := c.Connect(host)
+	if err != nil {
+		return err
+	}
+	return conn.ExecuteIO(cmd, stdin, stdout, stderr, tty)
 }
 
 // ExecuteParallel runs a command on multiple hosts concurrently

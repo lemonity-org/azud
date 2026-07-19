@@ -1,0 +1,15 @@
+# Changelog
+
+Azud follows [Semantic Versioning](https://semver.org/). Release entries are
+generated from the changes accumulated under “Unreleased” and the GitHub
+release notes for the corresponding signed tag.
+
+## Unreleased
+
+- Hardened zero-downtime deploy, rollback, scale, canary, proxy, secrets, and
+  SSH failure handling for the 1.0 release line.
+- Added strict configuration validation, durable local state, role-aware
+  workloads, reproducible Quadlet units, and release provenance.
+
+Earlier `v0.0.x-dev` builds were development previews and did not carry a
+stable compatibility promise.

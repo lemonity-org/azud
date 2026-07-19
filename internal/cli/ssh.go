@@ -89,16 +89,18 @@ func runSSHTrust(cmd *cobra.Command, args []string) error {
 
 	log.Header("Trusting SSH Hosts")
 	log.Info("known_hosts: %s", knownHosts)
+	var trustErrors []string
 
 	for _, host := range hosts {
 		target := host
 		if cfg.SSH.Port != 0 && cfg.SSH.Port != 22 {
-			target = fmt.Sprintf("[%s]:%d", host, cfg.SSH.Port)
+			target = fmt.Sprintf("[%s]:%d", host, cfg.SSH.Port) // safe: known_hosts lookup key, not a shell command
 		}
 
 		expected := expectedFingerprints(target, host)
 		if cfg.Security.RequireTrustedFingerprints && len(expected) == 0 {
 			log.HostError(host, "No trusted fingerprint configured for %s", target)
+			trustErrors = append(trustErrors, fmt.Sprintf("%s: no trusted fingerprint configured", host))
 			continue
 		}
 
@@ -112,18 +114,21 @@ func runSSHTrust(cmd *cobra.Command, args []string) error {
 		key, err := sshKeyscan(host, cfg.SSH.Port)
 		if err != nil {
 			log.HostError(host, "ssh-keyscan failed: %v", err)
+			trustErrors = append(trustErrors, fmt.Sprintf("%s: ssh-keyscan: %v", host, err))
 			continue
 		}
 
 		fingerprints, err := extractFingerprints(key)
 		if err != nil {
 			log.HostError(host, "fingerprint parse failed: %v", err)
+			trustErrors = append(trustErrors, fmt.Sprintf("%s: fingerprint parse: %v", host, err))
 			continue
 		}
 
 		if len(expected) > 0 {
 			if !fingerprintMatch(expected, fingerprints) {
 				log.HostError(host, "fingerprint mismatch (expected %s, got %s)", strings.Join(expected, ", "), strings.Join(fingerprints, ", "))
+				trustErrors = append(trustErrors, fmt.Sprintf("%s: fingerprint mismatch", host))
 				continue
 			}
 		}
@@ -131,32 +136,44 @@ func runSSHTrust(cmd *cobra.Command, args []string) error {
 		if !sshTrustYes {
 			if !isatty.IsTerminal(os.Stdin.Fd()) {
 				log.HostError(host, "confirmation required but stdin is not a TTY (use --yes to skip)")
+				trustErrors = append(trustErrors, fmt.Sprintf("%s: confirmation required", host))
 				continue
 			}
 
 			ok, err := confirmTrust(host, target, fingerprints)
 			if err != nil {
 				log.HostError(host, "confirmation failed: %v", err)
+				trustErrors = append(trustErrors, fmt.Sprintf("%s: confirmation: %v", host, err))
 				continue
 			}
 			if !ok {
 				log.Host(host, "Skipped (not confirmed)")
+				trustErrors = append(trustErrors, fmt.Sprintf("%s: trust declined", host))
 				continue
 			}
 		}
 
 		if sshTrustRefresh {
-			_ = removeKnownHost(knownHosts, target)
+			if err := removeKnownHost(knownHosts, target); err != nil {
+				log.HostError(host, "failed to remove existing key: %v", err)
+				trustErrors = append(trustErrors, fmt.Sprintf("%s: remove existing key: %v", host, err))
+				continue
+			}
 		}
 
 		if err := appendKnownHost(knownHosts, key); err != nil {
 			log.HostError(host, "failed to write known_hosts: %v", err)
+			trustErrors = append(trustErrors, fmt.Sprintf("%s: write known_hosts: %v", host, err))
 			continue
 		}
 
 		log.HostSuccess(host, "Trusted")
 	}
 
+	if len(trustErrors) > 0 {
+		sort.Strings(trustErrors)
+		return fmt.Errorf("failed to trust one or more hosts: %s", strings.Join(trustErrors, "; "))
+	}
 	return nil
 }
 
@@ -188,7 +205,7 @@ func printSSHTrust(hosts []string, template bool) error {
 	for _, host := range hosts {
 		target := host
 		if cfg.SSH.Port != 0 && cfg.SSH.Port != 22 {
-			target = fmt.Sprintf("[%s]:%d", host, cfg.SSH.Port)
+			target = fmt.Sprintf("[%s]:%d", host, cfg.SSH.Port) // safe: known_hosts lookup key, not a shell command
 		}
 
 		key, err := sshKeyscan(host, cfg.SSH.Port)
@@ -271,7 +288,10 @@ func knownHostExists(path, host string) (bool, error) {
 
 func removeKnownHost(path, host string) error {
 	cmd := exec.Command("ssh-keygen", "-R", host, "-f", path)
-	_ = cmd.Run()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 

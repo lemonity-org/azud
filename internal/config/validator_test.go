@@ -72,6 +72,30 @@ func TestValidate_RequiredFields(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteSecretsPath(t *testing.T) {
+	valid := []string{"$HOME/.azud/secrets", "${HOME}/private/env", "~/private/env", "/etc/azud/secrets", "/srv/app secrets/env"}
+	for _, path := range valid {
+		if !isValidRemoteSecretsPath(path) {
+			t.Errorf("expected %q to be valid", path)
+		}
+	}
+	invalid := []string{"relative/path", "$HOME/../secrets", "$HOME/x$(id)", "/tmp/x;id", "/tmp/x\nmode=777", ""}
+	for _, path := range invalid {
+		if isValidRemoteSecretsPath(path) {
+			t.Errorf("expected %q to be invalid", path)
+		}
+	}
+}
+
+func TestSafeExpandEnvPreservesRemoteHome(t *testing.T) {
+	t.Setenv("HOME", "/local/home")
+	t.Setenv("AZUD_TEST_VALUE", "expanded")
+	got := safeExpandEnv(`path: $HOME/.azud/secrets value: ${AZUD_TEST_VALUE}`)
+	if got != `path: $HOME/.azud/secrets value: expanded` {
+		t.Fatalf("safeExpandEnv = %q", got)
+	}
+}
+
 func TestValidate_ServiceName(t *testing.T) {
 	validBase := func(service string) *Config {
 		return &Config{
@@ -1371,5 +1395,48 @@ func TestValidate_AccessoryNameInjection(t *testing.T) {
 	err := Validate(cfg)
 	if err == nil || !strings.Contains(err.Error(), "accessories.db`whoami`") {
 		t.Fatalf("expected accessory name validation error, got %v", err)
+	}
+}
+
+func TestValidate_RoleOptionsAreAllowlisted(t *testing.T) {
+	tests := []struct {
+		name    string
+		options map[string]string
+		wantErr string
+	}{
+		{name: "memory and cpus", options: map[string]string{"memory": "512m", "cpus": "0.5"}},
+		{name: "unknown option", options: map[string]string{"annotation": "value"}, wantErr: "unsupported container option"},
+		{name: "shell option key", options: map[string]string{"label; touch /tmp/pwned": "x"}, wantErr: "unsupported container option"},
+		{name: "invalid memory", options: map[string]string{"memory": "1g; reboot"}, wantErr: "options.memory"},
+		{name: "invalid cpus", options: map[string]string{"cpus": "$(id)"}, wantErr: "options.cpus"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseValidConfig()
+			cfg.Servers["web"] = RoleConfig{Hosts: []string{"localhost"}, Options: tt.options}
+			err := Validate(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected validation error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidate_RoleNameInjection(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Servers = map[string]RoleConfig{
+		"web; touch /tmp/pwned": {Hosts: []string{"localhost"}},
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "role name") {
+		t.Fatalf("expected role name validation error, got %v", err)
 	}
 }

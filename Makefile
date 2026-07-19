@@ -16,7 +16,6 @@ GOLINT = golangci-lint
 
 # Build parameters
 BINARY_NAME = azud
-PROXY_BINARY_NAME = azud-proxy
 BUILD_DIR = bin
 CMD_DIR = cmd
 
@@ -28,7 +27,7 @@ LDFLAGS = -ldflags "-X github.com/lemonity-org/azud/pkg/version.Version=$(VERSIO
 # Platforms for cross-compilation
 PLATFORMS = darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all build build-all clean test lint fmt deps help install
+.PHONY: all build clean test lint fmt deps help install release verify run dev version security-lint test-coverage
 
 # Default target
 all: deps build
@@ -40,16 +39,6 @@ build:
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)/$(BINARY_NAME)
 	@echo "Built $(BUILD_DIR)/$(BINARY_NAME)"
 
-## build-proxy: Build the azud-proxy binary
-build-proxy:
-	@echo "Building $(PROXY_BINARY_NAME)..."
-	@mkdir -p $(BUILD_DIR)
-	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(PROXY_BINARY_NAME) ./$(CMD_DIR)/$(PROXY_BINARY_NAME)
-	@echo "Built $(BUILD_DIR)/$(PROXY_BINARY_NAME)"
-
-## build-all: Build both azud and azud-proxy
-build-all: build build-proxy
-
 ## install: Install azud to GOPATH/bin
 install:
 	@echo "Installing $(BINARY_NAME)..."
@@ -60,7 +49,7 @@ install:
 release:
 	@echo "Building release binaries..."
 	@mkdir -p $(BUILD_DIR)/release
-	@for platform in $(PLATFORMS); do \
+	@set -e; for platform in $(PLATFORMS); do \
 		GOOS=$${platform%/*} GOARCH=$${platform#*/} \
 		$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(BINARY_NAME)-$${platform%/*}-$${platform#*/}$$([ "$${platform%/*}" = "windows" ] && echo ".exe") \
 		./$(CMD_DIR)/$(BINARY_NAME); \
@@ -71,7 +60,7 @@ release:
 clean:
 	@echo "Cleaning..."
 	@rm -rf $(BUILD_DIR)
-	@rm -f $(BINARY_NAME) $(PROXY_BINARY_NAME)
+	@rm -f $(BINARY_NAME)
 	@echo "Clean complete"
 
 ## test: Run tests
@@ -115,16 +104,6 @@ verify:
 ## run: Build and run azud
 run: build
 	./$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
-
-## podman-build: Build container image for azud-proxy
-podman-build:
-	@echo "Building container image..."
-	podman build -t azud-proxy:$(VERSION) -f Dockerfile.proxy .
-
-## podman-push: Push container image
-podman-push:
-	@echo "Pushing container image..."
-	podman push azud-proxy:$(VERSION)
 
 ## help: Show this help message
 help:

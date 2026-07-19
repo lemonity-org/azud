@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -126,6 +131,7 @@ func TestMatchIgnorePattern(t *testing.T) {
 		// Glob patterns
 		{"README.md", "*.md", true},
 		{"CHANGELOG.md", "*.md", true},
+		{"config/private.env", "*.env", true},
 		{"lib/app.ex", "*.md", false},
 
 		// Nested path matches parent
@@ -150,5 +156,84 @@ func TestMatchIgnorePattern(t *testing.T) {
 		if got != tt.match {
 			t.Errorf("matchIgnorePattern(%q, %q) = %v, want %v", tt.path, tt.pattern, got, tt.match)
 		}
+	}
+}
+
+func archiveHeaders(t *testing.T, dir string, patterns []ignorePattern) map[string]*tar.Header {
+	t.Helper()
+	var archive bytes.Buffer
+	if err := createContextArchive(&archive, dir, patterns); err != nil {
+		t.Fatalf("createContextArchive: %v", err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(archive.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer func() { _ = gz.Close() }()
+	tr := tar.NewReader(gz)
+	headers := make(map[string]*tar.Header)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next: %v", err)
+		}
+		copy := *header
+		headers[header.Name] = &copy
+	}
+	return headers
+}
+
+func TestCreateContextArchiveIgnoreNegationAndSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "ignored", "keep"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"app.txt":                  "app",
+		"config/private.env":       "secret",
+		"ignored/drop.txt":         "drop",
+		"ignored/keep/include.txt": "include",
+	} {
+		full := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("app.txt", filepath.Join(dir, "app-link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	patterns := parseIgnorePatterns("*.env\nignored\n!ignored/keep/include.txt\n")
+	headers := archiveHeaders(t, dir, patterns)
+	if _, ok := headers["config/private.env"]; ok {
+		t.Fatal("nested *.env file was included")
+	}
+	if _, ok := headers["ignored/drop.txt"]; ok {
+		t.Fatal("ignored descendant was included")
+	}
+	if _, ok := headers["ignored/keep/include.txt"]; !ok {
+		t.Fatal("negated descendant under ignored directory was not included")
+	}
+	link := headers["app-link"]
+	if link == nil || link.Typeflag != tar.TypeSymlink || link.Linkname != "app.txt" {
+		t.Fatalf("safe symlink header = %#v", link)
+	}
+}
+
+func TestCreateContextArchiveRejectsEscapingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink("../outside-secret", filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	var archive bytes.Buffer
+	err := createContextArchive(&archive, dir, nil)
+	if err == nil || !strings.Contains(err.Error(), "outside the build context") {
+		t.Fatalf("expected escaping symlink error, got %v", err)
 	}
 }

@@ -1,8 +1,10 @@
 package deploy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,6 +32,64 @@ func TestHistoryStore_Record(t *testing.T) {
 
 	if len(files) != 1 {
 		t.Errorf("Expected 1 history file, got %d", len(files))
+	}
+}
+
+func TestHistoryStoreEnsureAvailableFailsBeforeRemoteMutation(t *testing.T) {
+	tmpDir := t.TempDir()
+	blockingFile := filepath.Join(tmpDir, "not-a-directory")
+	if err := os.WriteFile(blockingFile, []byte("x"), 0600); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+	store := &HistoryStore{basePath: filepath.Join(blockingFile, "history")}
+	if err := store.EnsureAvailable(); err == nil {
+		t.Fatal("expected unavailable history directory to fail")
+	}
+}
+
+func TestHistoryStore_ConcurrentRecordsAreUnique(t *testing.T) {
+	tmpDir := t.TempDir()
+	const records = 40
+	stores := []*HistoryStore{
+		NewHistoryStore(tmpDir, records+10, nil),
+		NewHistoryStore(tmpDir, records+10, nil),
+		NewHistoryStore(tmpDir, records+10, nil),
+	}
+	startedAt := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, records)
+	for i := 0; i < records; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			record := NewDeploymentRecord("test-service", "test:v1", "v1", "", []string{"host1"})
+			record.ID = fmt.Sprintf("deploy_%02d", i)
+			record.StartedAt = startedAt
+			errs <- stores[i%len(stores)].Record(record)
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Record: %v", err)
+		}
+	}
+
+	got, err := stores[0].List("test-service", 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != records {
+		t.Fatalf("got %d records, want %d", len(got), records)
+	}
+	seen := make(map[string]bool, records)
+	for _, record := range got {
+		seen[record.ID] = true
+	}
+	if len(seen) != records {
+		t.Fatalf("got %d unique IDs, want %d", len(seen), records)
 	}
 }
 

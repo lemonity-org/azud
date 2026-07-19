@@ -98,9 +98,6 @@ type Handler struct {
 // Upstream represents a backend server
 type Upstream struct {
 	Dial string `json:"dial"`
-	// Weight for weighted round-robin load balancing (used for canary deployments)
-	// Higher weight = more traffic. Default is 1 if omitted.
-	Weight int `json:"weight,omitempty"`
 }
 
 // LoadBalancing configures load balancing

@@ -1,7 +1,9 @@
 package podman
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -149,8 +151,18 @@ func (m *ContainerManager) Logs(host string, config *LogsConfig) (*ssh.Result, e
 	return m.client.ssh.Execute(host, cmd)
 }
 
+func (m *ContainerManager) LogsStream(host string, config *LogsConfig, stdout, stderr io.Writer) error {
+	cmd := m.client.RewriteCommand(config.BuildLogsCommand())
+	return m.client.ssh.ExecuteStream(host, cmd, stdout, stderr)
+}
+
+func (m *ContainerManager) ExecInteractive(host string, config *ExecConfig, stdin io.Reader, stdout, stderr io.Writer) error {
+	cmd := m.client.RewriteCommand(config.BuildExecCommand())
+	return m.client.ssh.ExecuteIO(host, cmd, stdin, stdout, stderr, config.TTY)
+}
+
 func (m *ContainerManager) List(host string, all bool, filters map[string]string) ([]Container, error) {
-	args := []string{"ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}"}
+	args := []string{"ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{json .Labels}}"}
 	if all {
 		args = append(args, "-a")
 	}
@@ -176,7 +188,7 @@ func (m *ContainerManager) List(host string, all bool, filters map[string]string
 			continue
 		}
 
-		parts := strings.Split(line, "|")
+		parts := strings.SplitN(line, "|", 7)
 		if len(parts) < 5 {
 			continue
 		}
@@ -191,6 +203,11 @@ func (m *ContainerManager) List(host string, all bool, filters map[string]string
 
 		if len(parts) > 5 && parts[5] != "" {
 			container.Ports = strings.Split(parts[5], ", ")
+		}
+		if len(parts) > 6 && parts[6] != "" {
+			if err := json.Unmarshal([]byte(parts[6]), &container.Labels); err != nil {
+				return nil, fmt.Errorf("failed to parse labels for container %s: %w", container.Name, err)
+			}
 		}
 
 		containers = append(containers, container)
@@ -308,7 +325,7 @@ func (m *ContainerManager) Rename(host, oldName, newName string) error {
 }
 
 func (m *ContainerManager) CopyTo(host, container, src, dest string) error {
-	result, err := m.client.Execute(host, "cp", src, fmt.Sprintf("%s:%s", container, dest))
+	result, err := m.client.Execute(host, "cp", src, fmt.Sprintf("%s:%s", container, dest)) // safe: Execute quotes each argv element
 	if err != nil {
 		return err
 	}
@@ -321,7 +338,7 @@ func (m *ContainerManager) CopyTo(host, container, src, dest string) error {
 }
 
 func (m *ContainerManager) CopyFrom(host, container, src, dest string) error {
-	result, err := m.client.Execute(host, "cp", fmt.Sprintf("%s:%s", container, src), dest)
+	result, err := m.client.Execute(host, "cp", fmt.Sprintf("%s:%s", container, src), dest) // safe: Execute quotes each argv element
 	if err != nil {
 		return err
 	}

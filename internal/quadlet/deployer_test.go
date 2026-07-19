@@ -50,3 +50,19 @@ func TestNewQuadletDeployerWithOptions_UserModeDisablesSudo(t *testing.T) {
 		t.Fatalf("unexpected systemctl command: %s", got)
 	}
 }
+
+func TestQuoteRemotePathExpandsRootlessHomeSafely(t *testing.T) {
+	for _, input := range []string{
+		"~/.config/containers/systemd/",
+		"$HOME/.config/containers/systemd/",
+		"${HOME}/.config/containers/systemd/",
+	} {
+		if got, want := quoteRemotePath(input), `"${HOME}"/.config/containers/systemd/`; got != want {
+			t.Fatalf("quoteRemotePath(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	if got, want := quoteRemotePath("/etc/containers/systemd/"), "/etc/containers/systemd/"; got != want {
+		t.Fatalf("absolute path = %q, want %q", got, want)
+	}
+}

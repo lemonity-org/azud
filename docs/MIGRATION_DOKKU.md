@@ -19,6 +19,7 @@ proxy:
   hosts:
     - app.example.com
   ssl: true
+  acme_email: ops@example.com
   app_port: 3000
 ```
 
@@ -43,7 +44,8 @@ Update DNS to point to the Azud server(s).
 
 ## 6) Differences to keep in mind
 
-- Azud uses a stateless CLI and config files instead of git push
+- Azud uses configuration files instead of git push, plus a durable local state
+  directory for rollback history and in-progress canaries
 - Azud has built-in zero-downtime deploys via blue-green
 - Caddy manages HTTPS automatically
 

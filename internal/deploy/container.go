@@ -26,6 +26,12 @@ func parseCommandArgs(cmd string) []string {
 	return strings.Fields(cmd)
 }
 
+// ParseCommandArgs exposes Azud's command-preserving parser to other workload
+// types such as accessories.
+func ParseCommandArgs(cmd string) []string {
+	return parseCommandArgs(cmd)
+}
+
 // newPreDeployContainerConfig creates a minimal one-off container configuration
 // for running a pre-deploy command (e.g., database migrations) from the new
 // image. The container is created with --rm and runs in the foreground.
@@ -54,43 +60,77 @@ func newPreDeployContainerConfig(cfg *config.Config, image, name string) *podman
 	return containerCfg
 }
 
-// newAppContainerConfig creates a standard container configuration from the
-// application config. The extra labels parameter allows callers to add
-// deployment-specific labels (e.g., canary markers).
+// RoleContainerName returns the stable container name for a service role. The
+// web role retains the historical service name; every other role gets its own
+// name so multiple roles can coexist on one host.
+func RoleContainerName(cfg *config.Config, role string) string {
+	if role == "" || role == "web" {
+		return cfg.Service
+	}
+	return fmt.Sprintf("%s-%s", cfg.Service, role)
+}
+
+// IsProxyRole reports whether a role serves HTTP traffic through Caddy.
+func IsProxyRole(role string) bool {
+	return role == "" || role == "web"
+}
+
+// NewAppContainerConfig creates a standard role-aware application container
+// configuration. The extra labels parameter allows callers to add
+// deployment-specific labels (for example canary or scale markers).
 //
 // The Podman HEALTHCHECK is configured with the liveness probe path
 // (healthcheck.liveness_path, falling back to healthcheck.path). This
 // probe runs continuously inside the container and determines if it is
 // still functioning. The readiness probe is checked separately during
 // deployment to gate proxy registration.
-func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels map[string]string) *podman.ContainerConfig {
-	labels := map[string]string{
-		"azud.managed": "true",
-		"azud.service": cfg.Service,
+func NewAppContainerConfig(cfg *config.Config, image, name, role string, extraLabels map[string]string) *podman.ContainerConfig {
+	labels := make(map[string]string)
+	roleConfig, hasRole := cfg.Servers[role]
+	if hasRole {
+		for key, value := range roleConfig.Labels {
+			labels[key] = value
+		}
 	}
 	for k, v := range extraLabels {
 		labels[k] = v
 	}
+	// Managed labels are applied last so configuration cannot spoof ownership.
+	labels["azud.managed"] = "true"
+	labels["azud.service"] = cfg.Service
+	if role != "" {
+		labels["azud.role"] = role
+	}
 
+	aliases := []string{RoleContainerName(cfg, role)}
 	containerCfg := &podman.ContainerConfig{
 		Name:    name,
 		Image:   image,
 		Detach:  true,
 		Restart: "unless-stopped",
 		Network: "azud",
-		// Register the service name as a network alias so DNS resolves
-		// regardless of the actual container name. This is needed because
-		// podman rename does not update aardvark-dns entries.
-		NetworkAliases: []string{cfg.Service},
+		// Register the stable role name as a network alias so DNS continues to
+		// resolve while a temporary deployment container is renamed.
+		NetworkAliases: aliases,
 		Labels:         labels,
 		Env:            make(map[string]string),
 	}
-	if cfg.UseHostPortUpstreams() {
+	if IsProxyRole(role) && cfg.UseHostPortUpstreams() {
 		containerCfg.Ports = append(containerCfg.Ports, fmt.Sprintf("127.0.0.1::%d", cfg.Proxy.AppPort))
 	}
 
 	for key, value := range cfg.Env.Clear {
 		containerCfg.Env[key] = value
+	}
+	if hasRole {
+		for key, value := range roleConfig.Env {
+			containerCfg.Env[key] = value
+		}
+		containerCfg.Memory = roleConfig.Options["memory"]
+		containerCfg.CPUs = roleConfig.Options["cpus"]
+		if roleConfig.Cmd != "" {
+			containerCfg.Command = parseCommandArgs(roleConfig.Cmd)
+		}
 	}
 
 	containerCfg.SecretEnv = cfg.Env.Secret
@@ -99,6 +139,11 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 	}
 	containerCfg.Volumes = cfg.Volumes
 
+	// HTTP liveness/readiness settings only belong to the proxy-serving role.
+	if !IsProxyRole(role) {
+		return containerCfg
+	}
+
 	// Use liveness probe for Podman HEALTHCHECK (continuous container health)
 	livenessCmd := LivenessCommand(cfg)
 	if livenessCmd != "" {
@@ -106,16 +151,17 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 		containerCfg.HealthInterval = cfg.Proxy.Healthcheck.Interval
 		containerCfg.HealthTimeout = cfg.Proxy.Healthcheck.Timeout
 		containerCfg.HealthRetries = 3
-		// Give the app time to start before health check failures count.
-		// Uses the deploy timeout as the start period so the container
-		// stays in "starting" state during the entire deployment window
-		// and the readiness probe gates registration instead.
 		if cfg.Deploy.DeployTimeout > 0 {
 			containerCfg.HealthStartPeriod = cfg.Deploy.DeployTimeout.String()
 		}
 	}
 
 	return containerCfg
+}
+
+// newAppContainerConfig retains an internal shorthand for web-only callers.
+func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels map[string]string) *podman.ContainerConfig {
+	return NewAppContainerConfig(cfg, image, name, "web", extraLabels)
 }
 
 // waitForContainerHealthy polls a container's health status and also
@@ -128,8 +174,9 @@ func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels m
 //   - Readiness probe (direct HTTP check): checks if the container can
 //     accept traffic. This gates proxy registration during deployment.
 //
-// The function succeeds when EITHER the Podman health status is "healthy"
-// OR the readiness probe responds successfully.
+// When a readiness path is configured, only that readiness probe can admit
+// the container to traffic. Liveness remains an independent hard-failure
+// signal and cannot make a not-yet-ready container pass.
 func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, sshClient *ssh.Client, host, container string) error {
 	timeout := cfg.Deploy.DeployTimeout
 	if timeout == 0 {
@@ -146,6 +193,7 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 	livenessEnabled := LivenessCommand(cfg) != ""
 
 	for time.Now().Before(deadline) {
+		livenessHealthy := !livenessEnabled
 		// Check Podman HEALTHCHECK status (liveness)
 		if livenessEnabled {
 			result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
@@ -153,7 +201,7 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 				status := strings.Trim(result.Stdout, "'\n ")
 				switch status {
 				case "healthy":
-					return nil
+					livenessHealthy = true
 				case "unhealthy":
 					unsupported := healthcheckUnsupported(podmanClient, host, container)
 					if !unsupported {
@@ -167,16 +215,27 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 		}
 
 		// Check readiness probe (can the container accept traffic?)
+		readinessHealthy := false
 		if readinessPath != "" {
-			if ok := readinessProbe(sshClient, host, readinessCandidates, readinessHelper); ok {
-				return nil
-			}
+			readinessHealthy = readinessProbe(sshClient, host, readinessCandidates, readinessHelper)
+		}
+		if probeAdmitsTraffic(readinessPath != "", readinessHealthy, livenessHealthy) {
+			return nil
 		}
 
 		time.Sleep(checkInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for container to become ready")
+}
+
+// probeAdmitsTraffic centralizes the deployment gate. Once readiness is
+// configured, liveness alone can never admit a container to the proxy.
+func probeAdmitsTraffic(readinessConfigured, readinessHealthy, livenessHealthy bool) bool {
+	if readinessConfigured {
+		return readinessHealthy
+	}
+	return livenessHealthy
 }
 
 // WaitForContainerReady exposes readiness checks for callers outside deploy.

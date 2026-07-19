@@ -16,7 +16,7 @@ var historyCmd = &cobra.Command{
 	Use:     "history",
 	Aliases: []string{"releases"},
 	Short:   "Show deployment history",
-	Long: `View deployment history records stored in .azud/history.
+	Long: `View deployment history records stored in Azud's durable state directory.
 
 Examples:
   azud history list
@@ -153,7 +153,7 @@ func runHistoryShow(cmd *cobra.Command, args []string) error {
 }
 
 func newHistoryStore(log *output.Logger) *deploy.HistoryStore {
-	return deploy.NewHistoryStore(".", cfg.Deploy.RetainHistory, log)
+	return deploy.NewDurableHistoryStore(cfg.Deploy.RetainHistory, log)
 }
 
 func formatHistoryTime(ts time.Time) string {

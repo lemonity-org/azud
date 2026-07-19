@@ -108,6 +108,7 @@ func init() {
 
 	cronBootCmd.Flags().StringVar(&cronHost, "host", "", "Specific host")
 	cronStopCmd.Flags().StringVar(&cronHost, "host", "", "Specific host")
+	cronLogsCmd.Flags().StringVar(&cronHost, "host", "", "Specific host")
 	cronRunCmd.Flags().StringVar(&cronHost, "host", "", "Specific host")
 
 	cronCmd.AddCommand(cronBootCmd)
@@ -147,20 +148,30 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 	imageManager := podman.NewImageManager(podmanClient)
 
 	log.Header("Starting Cron Jobs")
+	var bootErrors []string
 
 	for _, name := range cronNames {
 		cronConfig := cfg.Cron[name]
 		hosts := getCronHosts(name)
+		if len(hosts) == 0 {
+			bootErrors = append(bootErrors, fmt.Sprintf("%s: selected host %q is not configured for this cron job", name, cronHost))
+			continue
+		}
 
 		if err := ensureRemoteSecretsFile(sshClient, hosts, cfg.Env.Secret); err != nil {
-			return err
+			bootErrors = append(bootErrors, fmt.Sprintf("%s: %v", name, err))
+			continue
 		}
 
 		for _, host := range hosts {
 			containerName := getCronContainerName(name)
 
 			// Check if already running
-			running, _ := containerManager.IsRunning(host, containerName)
+			running, err := containerManager.IsRunning(host, containerName)
+			if err != nil {
+				bootErrors = append(bootErrors, fmt.Sprintf("%s@%s inspect: %v", name, host, err))
+				continue
+			}
 			if running {
 				log.HostSuccess(host, "Cron %s already running", name)
 				continue
@@ -171,6 +182,12 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 			// Pull the image first
 			if err := imageManager.Pull(host, cfg.Image); err != nil {
 				log.HostError(host, "Failed to pull image: %v", err)
+				bootErrors = append(bootErrors, fmt.Sprintf("%s@%s pull: %v", name, host, err))
+				continue
+			}
+			if err := validateCronImageRuntime(containerManager, host, name, cronConfig, true); err != nil {
+				log.HostError(host, "Unsupported cron image runtime: %v", err)
+				bootErrors = append(bootErrors, fmt.Sprintf("%s@%s runtime: %v", name, host, err))
 				continue
 			}
 
@@ -178,9 +195,10 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 			containerConfig := buildCronContainerConfig(name, cronConfig)
 
 			// Run the container
-			_, err := containerManager.Run(host, containerConfig)
+			_, err = containerManager.Run(host, containerConfig)
 			if err != nil {
 				log.HostError(host, "Failed to start cron %s: %v", name, err)
+				bootErrors = append(bootErrors, fmt.Sprintf("%s@%s start: %v", name, host, err))
 				continue
 			}
 
@@ -188,6 +206,9 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if len(bootErrors) > 0 {
+		return fmt.Errorf("cron boot failed: %s", strings.Join(bootErrors, "; "))
+	}
 	return nil
 }
 
@@ -220,6 +241,9 @@ func runCronStop(cmd *cobra.Command, args []string) error {
 
 	for _, name := range cronNames {
 		hosts := getCronHosts(name)
+		if len(hosts) == 0 {
+			return fmt.Errorf("selected host %q is not configured for cron job %s", cronHost, name)
+		}
 
 		for _, host := range hosts {
 			wg.Add(1)
@@ -237,7 +261,9 @@ func runCronStop(cmd *cobra.Command, args []string) error {
 				}
 
 				if err := containerManager.Remove(h, containerName, true); err != nil {
-					log.Debug("Failed to remove container: %v", err)
+					log.HostError(h, "Failed to remove cron %s: %v", n, err)
+					errors <- fmt.Errorf("%s@%s remove: %w", n, h, err)
+					return
 				}
 
 				log.HostSuccess(h, "Cron %s stopped", n)
@@ -248,6 +274,13 @@ func runCronStop(cmd *cobra.Command, args []string) error {
 	wg.Wait()
 	close(errors)
 
+	var stopErrors []string
+	for err := range errors {
+		stopErrors = append(stopErrors, err.Error())
+	}
+	if len(stopErrors) > 0 {
+		return fmt.Errorf("cron stop failed: %s", strings.Join(stopErrors, "; "))
+	}
 	return nil
 }
 
@@ -260,20 +293,16 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 
 	hosts := getCronHosts(name)
 	if len(hosts) == 0 {
-		return fmt.Errorf("no hosts configured for cron job %s", name)
+		return fmt.Errorf("no matching host configured for cron job %s (selected %q)", name, cronHost)
+	}
+	if len(hosts) > 1 && cronHost == "" {
+		return fmt.Errorf("cron job %s has multiple hosts; select one with --host", name)
 	}
 
 	host := hosts[0]
-	if cronHost != "" {
-		host = cronHost
-	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
-
-	if err := ensureRemoteSecretsFile(sshClient, []string{host}, cfg.Env.Secret); err != nil {
-		return err
-	}
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
@@ -286,6 +315,13 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 		Tail:      cronTail,
 	}
 
+	if cronFollow {
+		if err := containerManager.LogsStream(host, logsConfig, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("failed to follow logs: %w", err)
+		}
+		return nil
+	}
+
 	result, err := containerManager.Logs(host, logsConfig)
 	if err != nil {
 		return fmt.Errorf("failed to get logs: %w", err)
@@ -294,6 +330,9 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 	fmt.Print(result.Stdout)
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("cron logs failed with exit code %d", result.ExitCode)
 	}
 
 	return nil
@@ -312,19 +351,29 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 	cronConfig := cfg.Cron[name]
 	hosts := getCronHosts(name)
 	if len(hosts) == 0 {
-		return fmt.Errorf("no hosts configured for cron job %s", name)
+		return fmt.Errorf("no matching host configured for cron job %s (selected %q)", name, cronHost)
+	}
+	if len(hosts) > 1 && cronHost == "" {
+		return fmt.Errorf("cron job %s has multiple hosts; select one with --host", name)
 	}
 
 	host := hosts[0]
-	if cronHost != "" {
-		host = cronHost
-	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
+	imageManager := podman.NewImageManager(podmanClient)
+	if err := ensureRemoteSecretsFile(sshClient, []string{host}, cfg.Env.Secret); err != nil {
+		return err
+	}
+	if err := imageManager.Pull(host, cfg.Image); err != nil {
+		return fmt.Errorf("failed to pull cron image: %w", err)
+	}
+	if err := validateCronImageRuntime(containerManager, host, name, cronConfig, false); err != nil {
+		return err
+	}
 
 	log.Header("Running Cron Job: %s", name)
 	log.Host(host, "Executing: %s", cronConfig.Command)
@@ -365,13 +414,18 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 
 // buildCronRunContainerConfig builds the container config for a manual cron run.
 func buildCronRunContainerConfig(name, containerName string, cronConfig config.CronConfig) *podman.ContainerConfig {
+	command := cronConfig.Command
+	if cronConfig.Timeout != "" {
+		command = fmt.Sprintf("timeout %s sh -c %s", shell.Quote(cronConfig.Timeout), shell.Quote(cronConfig.Command))
+	}
 	containerConfig := &podman.ContainerConfig{
-		Name:    containerName,
-		Image:   cfg.Image,
-		Detach:  false,
-		Remove:  true,
-		Network: "azud",
-		Command: []string{"/bin/sh", "-c", cronConfig.Command},
+		Name:       containerName,
+		Image:      cfg.Image,
+		Detach:     false,
+		Remove:     true,
+		Network:    "azud",
+		Entrypoint: "/bin/sh",
+		Command:    []string{"-c", command},
 		Labels: map[string]string{
 			"azud.managed":  "true",
 			"azud.service":  cfg.Service,
@@ -417,15 +471,20 @@ func runCronList(cmd *cobra.Command, args []string) error {
 	log.Header("Cron Jobs")
 
 	var rows [][]string
+	var statusErrors []string
 
-	for name, cronConfig := range cfg.Cron {
+	for _, name := range cfg.GetCronNames() {
+		cronConfig := cfg.Cron[name]
 		hosts := getCronHosts(name)
 		containerName := getCronContainerName(name)
 
 		for _, host := range hosts {
 			status := "stopped"
 			running, err := containerManager.IsRunning(host, containerName)
-			if err == nil && running {
+			if err != nil {
+				status = "error"
+				statusErrors = append(statusErrors, fmt.Sprintf("%s@%s: %v", name, host, err))
+			} else if running {
 				status = "running"
 			}
 
@@ -440,7 +499,9 @@ func runCronList(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Table([]string{"Name", "Schedule", "Command", "Host", "Status"}, rows)
-
+	if len(statusErrors) > 0 {
+		return fmt.Errorf("cron status failed: %s", strings.Join(statusErrors, "; "))
+	}
 	return nil
 }
 
@@ -461,10 +522,48 @@ func cronLockFileInContainer(name string) string {
 }
 
 func getCronHosts(name string) []string {
-	if cronHost != "" {
-		return []string{cronHost}
+	hosts := cfg.GetCronHosts(name)
+	if cronHost == "" {
+		return hosts
 	}
-	return cfg.GetCronHosts(name)
+	for _, host := range hosts {
+		if host == cronHost {
+			return []string{host}
+		}
+	}
+	return nil
+}
+
+func validateCronImageRuntime(containerManager *podman.ContainerManager, host, name string, cronConfig config.CronConfig, scheduled bool) error {
+	required := []string{"/bin/sh"}
+	if scheduled {
+		required = append(required, "crontab", "crond")
+		if cronConfig.Lock {
+			required = append(required, "flock")
+		}
+	}
+	if cronConfig.Timeout != "" {
+		required = append(required, "timeout")
+	}
+	checks := make([]string, 0, len(required))
+	for _, command := range required {
+		if strings.Contains(command, "/") {
+			checks = append(checks, fmt.Sprintf("test -x %s", shell.Quote(command)))
+		} else {
+			checks = append(checks, fmt.Sprintf("command -v %s >/dev/null 2>&1", shell.Quote(command)))
+		}
+	}
+	checkConfig := &podman.ContainerConfig{
+		Name:       fmt.Sprintf("%s-cron-%s-runtime-check-%d", cfg.Service, name, time.Now().UnixNano()),
+		Image:      cfg.Image,
+		Remove:     true,
+		Entrypoint: "/bin/sh",
+		Command:    []string{"-c", strings.Join(checks, " && ")},
+	}
+	if _, err := containerManager.Run(host, checkConfig); err != nil {
+		return fmt.Errorf("image %s must provide %s: %w", cfg.Image, strings.Join(required, ", "), err)
+	}
+	return nil
 }
 
 func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman.ContainerConfig {
@@ -475,12 +574,13 @@ func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman
 	cronCommand := buildCronCommand(name, cronConfig)
 
 	containerConfig := &podman.ContainerConfig{
-		Name:    containerName,
-		Image:   cfg.Image,
-		Detach:  true,
-		Restart: "unless-stopped",
-		Network: "azud",
-		Command: []string{"/bin/sh", "-c", cronCommand},
+		Name:       containerName,
+		Image:      cfg.Image,
+		Detach:     true,
+		Restart:    "unless-stopped",
+		Network:    "azud",
+		Entrypoint: "/bin/sh",
+		Command:    []string{"-c", cronCommand},
 		Labels: map[string]string{
 			"azud.managed":       "true",
 			"azud.service":       cfg.Service,

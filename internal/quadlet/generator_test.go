@@ -67,12 +67,12 @@ func TestGenerateContainerFile_Full(t *testing.T) {
 		"Requires=network-online.target",
 		"Image=myapp:latest",
 		"ContainerName=myapp",
-		"Environment=PORT=3000",
-		"EnvironmentFile=/etc/secrets.env",
+		`Environment="PORT=3000"`,
+		`EnvironmentFile="/etc/secrets.env"`,
 		"PublishPort=8080:3000",
 		"Volume=/data:/app/data",
 		"Network=azud",
-		"Label=azud.managed=true",
+		`Label="azud.managed=true"`,
 		"HealthCmd=echo ok",
 		"HealthInterval=10s",
 		"Exec=/app/start",
@@ -86,6 +86,22 @@ func TestGenerateContainerFile_Full(t *testing.T) {
 		if !strings.Contains(result, check) {
 			t.Errorf("expected %q in output, got:\n%s", check, result)
 		}
+	}
+}
+
+func TestGenerateContainerFileQuotesAndOrdersEnvironment(t *testing.T) {
+	unit := &ContainerUnit{Image: "app", Environment: map[string]string{
+		"Z_LAST":  `spaces " quotes \\ and 100%`,
+		"A_FIRST": "one",
+	}}
+	result := GenerateContainerFile(unit)
+	first := `Environment="A_FIRST=one"`
+	last := `Environment="Z_LAST=spaces \" quotes \\\\ and 100%%"`
+	if !strings.Contains(result, first) || !strings.Contains(result, last) {
+		t.Fatalf("environment was not safely encoded:\n%s", result)
+	}
+	if strings.Index(result, first) > strings.Index(result, last) {
+		t.Fatalf("environment output is not deterministic:\n%s", result)
 	}
 }
 

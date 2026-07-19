@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
@@ -101,16 +102,21 @@ func init() {
 
 	// Exec flags
 	appExecCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
+	appExecCmd.Flags().StringVar(&appRole, "role", "", "Specific role (default: web)")
 	appExecCmd.Flags().BoolVarP(&appInteractive, "interactive", "i", false, "Keep STDIN open")
 	appExecCmd.Flags().BoolVarP(&appTTY, "tty", "t", false, "Allocate a pseudo-TTY")
 
 	// Start/Stop/Restart flags
 	appStartCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
+	appStartCmd.Flags().StringVar(&appRole, "role", "", "Specific role")
 	appStopCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
+	appStopCmd.Flags().StringVar(&appRole, "role", "", "Specific role")
 	appRestartCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
+	appRestartCmd.Flags().StringVar(&appRole, "role", "", "Specific role")
 
 	// Details flags
 	appDetailsCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
+	appDetailsCmd.Flags().StringVar(&appRole, "role", "", "Specific role")
 
 	// Add subcommands
 	appCmd.AddCommand(appLogsCmd)
@@ -128,16 +134,13 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	// Get target host
-	host := appHost
-	if host == "" {
-		hosts := getAppHosts()
-		if len(hosts) == 0 {
-			return fmt.Errorf("no hosts configured")
-		}
-		host = hosts[0]
-		if len(hosts) > 1 {
-			log.Warn("Multiple hosts, showing logs from %s", host)
-		}
+	hosts := getSingleRoleAppHosts()
+	if len(hosts) == 0 {
+		return fmt.Errorf("no matching host configured for role %s", defaultAppRole())
+	}
+	host := hosts[0]
+	if len(hosts) > 1 {
+		log.Warn("Multiple hosts, showing logs from %s", host)
 	}
 
 	sshClient := createSSHClient()
@@ -146,12 +149,22 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 
+	role := appRole
+	if role == "" {
+		role = "web"
+	}
 	logsConfig := &podman.LogsConfig{
-		Container: cfg.Service,
+		Container: deploy.RoleContainerName(cfg, role),
 		Follow:    appFollow,
 		Tail:      appTail,
 	}
 
+	if appFollow {
+		if err := containerManager.LogsStream(host, logsConfig, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("failed to follow logs: %w", err)
+		}
+		return nil
+	}
 	result, err := containerManager.Logs(host, logsConfig)
 	if err != nil {
 		return fmt.Errorf("failed to get logs: %w", err)
@@ -160,6 +173,9 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	fmt.Print(result.Stdout)
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("logs exited with code %d", result.ExitCode)
 	}
 
 	return nil
@@ -173,14 +189,11 @@ func runAppExec(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get target host
-	host := appHost
-	if host == "" {
-		hosts := getAppHosts()
-		if len(hosts) == 0 {
-			return fmt.Errorf("no hosts configured")
-		}
-		host = hosts[0]
+	hosts := getSingleRoleAppHosts()
+	if len(hosts) == 0 {
+		return fmt.Errorf("no matching host configured for role %s", defaultAppRole())
 	}
+	host := hosts[0]
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -189,10 +202,16 @@ func runAppExec(cmd *cobra.Command, args []string) error {
 	containerManager := podman.NewContainerManager(podmanClient)
 
 	execConfig := &podman.ExecConfig{
-		Container:   cfg.Service,
+		Container:   deploy.RoleContainerName(cfg, defaultAppRole()),
 		Command:     args,
 		Interactive: appInteractive,
 		TTY:         appTTY,
+	}
+	if appInteractive || appTTY {
+		if err := containerManager.ExecInteractive(host, execConfig, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("interactive exec failed: %w", err)
+		}
+		return nil
 	}
 
 	result, err := containerManager.Exec(host, execConfig)
@@ -222,7 +241,7 @@ func runAppStart(cmd *cobra.Command, args []string) error {
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	hosts := getAppHosts()
-	return deployer.Start(hosts)
+	return deployer.StartRoles(hosts, selectedAppRoles())
 }
 
 func runAppStop(cmd *cobra.Command, args []string) error {
@@ -235,7 +254,7 @@ func runAppStop(cmd *cobra.Command, args []string) error {
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	hosts := getAppHosts()
-	return deployer.Stop(hosts)
+	return deployer.StopRoles(hosts, selectedAppRoles())
 }
 
 func runAppRestart(cmd *cobra.Command, args []string) error {
@@ -248,7 +267,7 @@ func runAppRestart(cmd *cobra.Command, args []string) error {
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	hosts := getAppHosts()
-	return deployer.Restart(hosts)
+	return deployer.RestartRoles(hosts, selectedAppRoles())
 }
 
 func runAppDetails(cmd *cobra.Command, args []string) error {
@@ -269,29 +288,42 @@ func runAppDetails(cmd *cobra.Command, args []string) error {
 	log.Header("Application Details: %s", cfg.Service)
 
 	var rows [][]string
-	for _, host := range hosts {
-		running, err := containerManager.IsRunning(host, cfg.Service)
-		if err != nil {
-			rows = append(rows, []string{host, "error", err.Error()})
-			continue
-		}
-
-		status := "stopped"
-		if running {
-			status = "running"
-
-			// Get stats
-			stats, err := containerManager.Stats(host, cfg.Service)
-			if err == nil {
-				rows = append(rows, []string{host, status, stats})
+	var detailErrors []string
+	roles := selectedAppRoles()
+	if len(roles) == 0 {
+		roles = cfg.GetRoles()
+	}
+	for _, role := range roles {
+		containerName := deploy.RoleContainerName(cfg, role)
+		for _, host := range cfg.GetRoleHosts(role) {
+			if appHost != "" && host != appHost {
 				continue
 			}
-		}
+			running, err := containerManager.IsRunning(host, containerName)
+			if err != nil {
+				rows = append(rows, []string{role, host, "error", err.Error()})
+				detailErrors = append(detailErrors, fmt.Sprintf("%s/%s: %v", host, role, err))
+				continue
+			}
 
-		rows = append(rows, []string{host, status, "-"})
+			status := "stopped"
+			if running {
+				status = "running"
+
+				// Get stats
+				stats, err := containerManager.Stats(host, containerName)
+				if err == nil {
+					rows = append(rows, []string{role, host, status, stats})
+					continue
+				}
+				detailErrors = append(detailErrors, fmt.Sprintf("%s/%s stats: %v", host, role, err))
+			}
+
+			rows = append(rows, []string{role, host, status, "-"})
+		}
 	}
 
-	log.Table([]string{"Host", "Status", "Stats"}, rows)
+	log.Table([]string{"Role", "Host", "Status", "Stats"}, rows)
 
 	// Show image info
 	log.Println("")
@@ -303,17 +335,52 @@ func runAppDetails(cmd *cobra.Command, args []string) error {
 		log.Println("Proxy: (not configured)")
 	}
 
+	if len(detailErrors) > 0 {
+		return fmt.Errorf("application details failed: %s", strings.Join(detailErrors, "; "))
+	}
 	return nil
 }
 
 func getAppHosts() []string {
 	if appHost != "" {
-		return []string{appHost}
+		candidateHosts := cfg.GetAllHosts()
+		if appRole != "" {
+			candidateHosts = cfg.GetRoleHosts(appRole)
+		}
+		if containsString(candidateHosts, appHost) {
+			return []string{appHost}
+		}
+		return nil
 	}
 	if appRole != "" {
 		return cfg.GetRoleHosts(appRole)
 	}
 	return cfg.GetAllHosts()
+}
+
+func defaultAppRole() string {
+	if appRole != "" {
+		return appRole
+	}
+	return "web"
+}
+
+func selectedAppRoles() []string {
+	if appRole == "" {
+		return nil
+	}
+	return []string{appRole}
+}
+
+func getSingleRoleAppHosts() []string {
+	hosts := cfg.GetRoleHosts(defaultAppRole())
+	if appHost == "" {
+		return hosts
+	}
+	if containsString(hosts, appHost) {
+		return []string{appHost}
+	}
+	return nil
 }
 
 var accessoryCmd = &cobra.Command{
@@ -370,11 +437,19 @@ Example:
 	RunE: runAccessoryRemove,
 }
 
-var accessoryRemoveYes bool
+var (
+	accessoryRemoveYes bool
+	accessoryHost      string
+)
 
 func init() {
 	accessoryLogsCmd.Flags().BoolVarP(&appFollow, "follow", "f", false, "Follow logs")
 	accessoryLogsCmd.Flags().StringVar(&appTail, "tail", "100", "Number of lines")
+	accessoryBootCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
+	accessoryStopCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
+	accessoryLogsCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
+	accessoryExecCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
+	accessoryRemoveCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
 
 	accessoryRemoveCmd.Flags().BoolVar(&accessoryRemoveYes, "yes", false, "Skip confirmation prompt")
 
@@ -398,17 +473,17 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.PrimaryHost()
-	if host == "" {
-		return fmt.Errorf("no host configured for accessory %s", name)
+	hosts, err := selectedAccessoryHosts(name, accessory, false)
+	if err != nil {
+		return err
 	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	log.Info("Starting accessory %s on %s...", name, host)
+	log.Info("Starting accessory %s on %s...", name, strings.Join(hosts, ", "))
 
-	return deployAccessories(sshClient, log)
+	return deployAccessoriesOnHost(sshClient, log, accessoryHost, name)
 }
 
 func runAccessoryStop(cmd *cobra.Command, args []string) error {
@@ -422,7 +497,10 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.PrimaryHost()
+	hosts, err := selectedAccessoryHosts(name, accessory, false)
+	if err != nil {
+		return err
+	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -434,11 +512,17 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 
 	log.Info("Stopping accessory %s...", name)
 
-	if err := containerManager.Stop(host, containerName, 30); err != nil {
-		return fmt.Errorf("failed to stop accessory: %w", err)
+	var stopErrors []string
+	for _, host := range hosts {
+		if err := containerManager.Stop(host, containerName, 30); err != nil {
+			stopErrors = append(stopErrors, fmt.Sprintf("%s: %v", host, err))
+			continue
+		}
+		log.HostSuccess(host, "Accessory %s stopped", name)
 	}
-
-	log.Success("Accessory %s stopped", name)
+	if len(stopErrors) > 0 {
+		return fmt.Errorf("failed to stop accessory %s: %s", name, strings.Join(stopErrors, "; "))
+	}
 	return nil
 }
 
@@ -453,15 +537,15 @@ func runAccessoryRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.PrimaryHost()
-	if host == "" {
-		return fmt.Errorf("no host configured for accessory %s", name)
+	hosts, err := selectedAccessoryHosts(name, accessory, false)
+	if err != nil {
+		return err
 	}
 
 	containerName := fmt.Sprintf("%s-%s", cfg.Service, name)
 
 	if !accessoryRemoveYes {
-		fmt.Printf("This will stop and remove the accessory %q (%s) on %s.\n", name, containerName, host)
+		fmt.Printf("This will stop and remove the accessory %q (%s) on %s.\n", name, containerName, strings.Join(hosts, ", "))
 		fmt.Print("Are you sure? [y/N] ")
 
 		var answer string
@@ -481,17 +565,24 @@ func runAccessoryRemove(cmd *cobra.Command, args []string) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 
-	log.Info("Stopping accessory %s on %s...", name, host)
-	if err := containerManager.Stop(host, containerName, 30); err != nil {
-		log.Warn("Stop returned an error (container may already be stopped): %v", err)
-	}
+	var removeErrors []string
+	for _, host := range hosts {
+		log.Host(host, "Stopping accessory %s...", name)
+		if err := containerManager.Stop(host, containerName, 30); err != nil && !strings.Contains(err.Error(), "No such container") {
+			removeErrors = append(removeErrors, fmt.Sprintf("%s stop: %v", host, err))
+			continue
+		}
 
-	log.Info("Removing accessory %s on %s...", name, host)
-	if err := containerManager.Remove(host, containerName, true); err != nil {
-		return fmt.Errorf("failed to remove accessory container: %w", err)
+		log.Host(host, "Removing accessory %s...", name)
+		if err := containerManager.Remove(host, containerName, true); err != nil {
+			removeErrors = append(removeErrors, fmt.Sprintf("%s remove: %v", host, err))
+			continue
+		}
+		log.HostSuccess(host, "Accessory %s removed", name)
 	}
-
-	log.Success("Accessory %s removed from %s", name, host)
+	if len(removeErrors) > 0 {
+		return fmt.Errorf("failed to remove accessory %s: %s", name, strings.Join(removeErrors, "; "))
+	}
 	return nil
 }
 
@@ -503,7 +594,11 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.PrimaryHost()
+	hosts, err := selectedAccessoryHosts(name, accessory, true)
+	if err != nil {
+		return err
+	}
+	host := hosts[0]
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -518,6 +613,12 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 		Follow:    appFollow,
 		Tail:      appTail,
 	}
+	if appFollow {
+		if err := containerManager.LogsStream(host, logsConfig, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("failed to follow accessory logs: %w", err)
+		}
+		return nil
+	}
 
 	result, err := containerManager.Logs(host, logsConfig)
 	if err != nil {
@@ -525,6 +626,12 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(result.Stdout)
+	if result.Stderr != "" {
+		fmt.Fprint(os.Stderr, result.Stderr)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("accessory logs exited with status %d", result.ExitCode)
+	}
 	return nil
 }
 
@@ -549,7 +656,11 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("accessory %s not found", name)
 	}
 
-	host := accessory.PrimaryHost()
+	hosts, err := selectedAccessoryHosts(name, accessory, true)
+	if err != nil {
+		return err
+	}
+	host := hosts[0]
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
@@ -565,6 +676,12 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 		Interactive: appInteractive,
 		TTY:         appTTY,
 	}
+	if appInteractive || appTTY {
+		if err := containerManager.ExecInteractive(host, execConfig, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("interactive accessory exec failed: %w", err)
+		}
+		return nil
+	}
 
 	result, err := containerManager.Exec(host, execConfig)
 	if err != nil {
@@ -575,8 +692,30 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
 	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("accessory exec exited with status %d", result.ExitCode)
+	}
 
 	return nil
+}
+
+func selectedAccessoryHosts(name string, accessory config.AccessoryConfig, requireSingle bool) ([]string, error) {
+	hosts := accessoryHosts(accessory)
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("no host configured for accessory %s", name)
+	}
+	if accessoryHost != "" {
+		for _, host := range hosts {
+			if host == accessoryHost {
+				return []string{host}, nil
+			}
+		}
+		return nil, fmt.Errorf("host %s is not configured for accessory %s", accessoryHost, name)
+	}
+	if requireSingle && len(hosts) > 1 {
+		return nil, fmt.Errorf("accessory %s has multiple hosts; select one with --host", name)
+	}
+	return hosts, nil
 }
 
 var configCmd = &cobra.Command{
@@ -604,7 +743,8 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	log.Println("")
 
 	log.Println("Servers:")
-	for role, rc := range cfg.Servers {
+	for _, role := range cfg.GetRoles() {
+		rc := cfg.Servers[role]
 		log.Println("  %s: %s", role, strings.Join(rc.Hosts, ", "))
 	}
 	log.Println("")
@@ -620,7 +760,8 @@ func runConfig(cmd *cobra.Command, args []string) error {
 
 	if len(cfg.Accessories) > 0 {
 		log.Println("Accessories:")
-		for name, acc := range cfg.Accessories {
+		for _, name := range cfg.GetAccessoryNames() {
+			acc := cfg.Accessories[name]
 			log.Println("  %s: %s", name, acc.Image)
 		}
 		log.Println("")
@@ -628,7 +769,8 @@ func runConfig(cmd *cobra.Command, args []string) error {
 
 	if len(cfg.Cron) > 0 {
 		log.Println("Cron Jobs:")
-		for name, cron := range cfg.Cron {
+		for _, name := range cfg.GetCronNames() {
+			cron := cfg.Cron[name]
 			log.Println("  %s: %s (%s)", name, cron.Schedule, cron.Command)
 		}
 	}

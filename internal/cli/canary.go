@@ -10,6 +10,7 @@ import (
 
 	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/state"
 )
 
 var canaryCmd = &cobra.Command{
@@ -128,9 +129,12 @@ func init() {
 	rootCmd.AddCommand(canaryCmd)
 }
 
-func getCanaryStatePath() string {
-	baseDir := filepath.Dir(getConfigDir())
-	return filepath.Join(baseDir, ".azud", "canary", fmt.Sprintf("%s.json", cfg.Service))
+func getCanaryStatePath() (string, error) {
+	baseDir, err := state.EnsureLocalDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(baseDir, "canary", fmt.Sprintf("%s.json", cfg.Service)), nil
 }
 
 func runCanaryDeploy(cmd *cobra.Command, args []string) error {
@@ -138,13 +142,16 @@ func runCanaryDeploy(cmd *cobra.Command, args []string) error {
 	log := output.DefaultLogger
 
 	if !cfg.Deploy.Canary.Enabled {
-		log.Warn("Canary deployments are not enabled in configuration")
-		log.Info("Add 'deploy.canary.enabled: true' to your config to enable")
+		return fmt.Errorf("canary deployments are disabled; set deploy.canary.enabled: true to enable them")
 	}
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
-	deployer := deploy.NewCanaryDeployer(cfg, sshClient, log, getCanaryStatePath())
+	statePath, err := getCanaryStatePath()
+	if err != nil {
+		return fmt.Errorf("failed to initialize canary state: %w", err)
+	}
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, log, statePath)
 
 	opts := &deploy.CanaryDeployOptions{
 		Version:         canaryVersion,
@@ -162,7 +169,11 @@ func runCanaryPromote(cmd *cobra.Command, args []string) error {
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
-	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, getCanaryStatePath())
+	statePath, err := getCanaryStatePath()
+	if err != nil {
+		return fmt.Errorf("failed to initialize canary state: %w", err)
+	}
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, statePath)
 	return deployer.Promote()
 }
 
@@ -171,7 +182,11 @@ func runCanaryRollback(cmd *cobra.Command, args []string) error {
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
-	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, getCanaryStatePath())
+	statePath, err := getCanaryStatePath()
+	if err != nil {
+		return fmt.Errorf("failed to initialize canary state: %w", err)
+	}
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, statePath)
 	return deployer.Rollback()
 }
 
@@ -181,29 +196,36 @@ func runCanaryStatus(cmd *cobra.Command, args []string) error {
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
-	deployer := deploy.NewCanaryDeployer(cfg, sshClient, log, getCanaryStatePath())
-	state := deployer.Status()
+	statePath, err := getCanaryStatePath()
+	if err != nil {
+		return fmt.Errorf("failed to initialize canary state: %w", err)
+	}
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, log, statePath)
+	canaryState, err := deployer.Status()
+	if err != nil {
+		return err
+	}
 
 	log.Header("Canary Deployment Status")
 
-	if state.Status == deploy.CanaryStatusNone {
+	if canaryState.Status == deploy.CanaryStatusNone {
 		log.Info("No canary deployment in progress")
 		return nil
 	}
 
-	log.StatusBadge("Status:", string(state.Status))
+	log.StatusBadge("Status:", string(canaryState.Status))
 	log.Info("Version:         %s %s %s",
-		output.Lavender.Bold(state.StableVersion),
+		output.Lavender.Bold(canaryState.StableVersion),
 		output.Pink.Sprint("→"),
-		output.Mint.Bold(state.CanaryVersion))
-	log.TrafficBar(state.CurrentWeight,
-		fmt.Sprintf("canary (%s)", state.CanaryVersion),
-		fmt.Sprintf("stable (%s)", state.StableVersion))
+		output.Mint.Bold(canaryState.CanaryVersion))
+	log.TrafficBar(canaryState.CurrentWeight,
+		fmt.Sprintf("canary (%s)", canaryState.CanaryVersion),
+		fmt.Sprintf("stable (%s)", canaryState.StableVersion))
 
-	duration := time.Since(state.StartedAt).Truncate(time.Second)
-	log.Info("Duration:        %s (started %s)", duration, state.StartedAt.Format("15:04:05"))
-	log.Info("Hosts:           %d", len(state.Hosts))
-	for _, host := range state.Hosts {
+	duration := time.Since(canaryState.StartedAt).Truncate(time.Second)
+	log.Info("Duration:        %s (started %s)", duration, canaryState.StartedAt.Format("15:04:05"))
+	log.Info("Hosts:           %d", len(canaryState.Hosts))
+	for _, host := range canaryState.Hosts {
 		log.Host(host, "")
 	}
 
@@ -224,6 +246,10 @@ func runCanaryWeight(cmd *cobra.Command, args []string) error {
 
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
-	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, getCanaryStatePath())
+	statePath, err := getCanaryStatePath()
+	if err != nil {
+		return fmt.Errorf("failed to initialize canary state: %w", err)
+	}
+	deployer := deploy.NewCanaryDeployer(cfg, sshClient, output.DefaultLogger, statePath)
 	return deployer.SetWeight(weight)
 }
