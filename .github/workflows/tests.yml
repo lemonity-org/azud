@@ -104,7 +104,7 @@ jobs:
             printf 'HOME=/root\n' | sudo tee /root/.ssh/environment >/dev/null
             sudo chmod 600 /root/.ssh/environment
           fi
-          sudo sed -i 's/^#\\?PermitUserEnvironment .*/PermitUserEnvironment HOME/' /etc/ssh/sshd_config
+          printf 'PermitUserEnvironment HOME\n' | sudo tee /etc/ssh/sshd_config.d/azud-integration.conf >/dev/null
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
           sudo service ssh restart
