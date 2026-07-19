@@ -94,7 +94,7 @@ jobs:
           deploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/containers/systemd/*
           EOF
             sudo chmod 440 /etc/sudoers.d/azud-integration
-            sudo loginctl enable-linger deploy
+            sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin loginctl enable-linger deploy
           else
             sudo install -d -m 700 /root/.ssh
             sudo install -m 600 /tmp/azud_ci_key.pub /root/.ssh/authorized_keys
@@ -126,6 +126,11 @@ jobs:
             printf '::error title=Unexpected SSH target environment::expected %s, got %s\n' \
               "$expected_environment" "$actual_environment"
             exit 1
+          fi
+          if [ "$TARGET_USER" = "deploy" ]; then
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
+              'systemctl --user import-environment HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR'
           fi
 
       - name: Run setup integration test
