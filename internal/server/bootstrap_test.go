@@ -24,3 +24,20 @@ func TestPodmanInstallCommandsUseNonInteractiveSudo(t *testing.T) {
 		}
 	}
 }
+
+func TestDebianPodmanInstallIncludesRootlessNetworkHelpers(t *testing.T) {
+	command := (&Bootstrapper{}).getDebianPodmanInstall("")
+	for _, packageName := range []string{
+		"netavark",
+		"aardvark-dns",
+		"uidmap",
+		"slirp4netns",
+		"passt",
+		"fuse-overlayfs",
+		"iptables",
+	} {
+		if !strings.Contains(command, " "+packageName) {
+			t.Errorf("Debian Podman install command does not include %s", packageName)
+		}
+	}
+}

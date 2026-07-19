@@ -211,7 +211,7 @@ func (b *Bootstrapper) getDebianPodmanInstall(prefix string) string {
 	return fmt.Sprintf(`
 set -e
 %sapt-get update
-%sapt-get install -y podman netavark aardvark-dns uidmap slirp4netns fuse-overlayfs
+%sapt-get install -y podman netavark aardvark-dns uidmap slirp4netns passt fuse-overlayfs iptables
 `, prefix, prefix)
 }
 

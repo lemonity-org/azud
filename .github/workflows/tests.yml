@@ -75,7 +75,7 @@ jobs:
       - name: Install Podman and SSH server
         run: |
           sudo apt-get update
-          sudo apt-get install -y podman netavark aardvark-dns openssh-server uidmap slirp4netns fuse-overlayfs dbus-user-session curl
+          sudo apt-get install -y podman netavark aardvark-dns openssh-server uidmap slirp4netns passt fuse-overlayfs iptables dbus-user-session curl
 
       - name: Configure SSH target
         env:
