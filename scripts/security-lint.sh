@@ -107,7 +107,7 @@ if command -v govulncheck &> /dev/null; then
     fi
 else
     echo -e "${RED}Error: govulncheck is required for the security gate${NC}"
-    echo "Install with: go install golang.org/x/vuln/cmd/govulncheck@latest"
+    echo "Install with: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0"
     ERRORS=$((ERRORS + 1))
 fi
 
