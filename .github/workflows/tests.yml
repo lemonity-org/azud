@@ -86,7 +86,13 @@ jobs:
             sudo useradd --create-home --shell /bin/bash deploy
             sudo install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
             sudo install -m 600 -o deploy -g deploy /tmp/azud_ci_key.pub /home/deploy/.ssh/authorized_keys
-            printf 'HOME=/home/deploy\n' | sudo tee /home/deploy/.ssh/environment >/dev/null
+            printf '%s\n' \
+              'HOME=/home/deploy' \
+              'XDG_CONFIG_HOME=/home/deploy/.config' \
+              'XDG_DATA_HOME=/home/deploy/.local/share' \
+              'XDG_CACHE_HOME=/home/deploy/.cache' \
+              "XDG_RUNTIME_DIR=/run/user/$(id -u deploy)" \
+              | sudo tee /home/deploy/.ssh/environment >/dev/null
             sudo chown deploy:deploy /home/deploy/.ssh/environment
             sudo chmod 600 /home/deploy/.ssh/environment
             sudo tee /etc/sudoers.d/azud-integration >/dev/null <<'EOF'
@@ -104,7 +110,7 @@ jobs:
             printf 'HOME=/root\n' | sudo tee /root/.ssh/environment >/dev/null
             sudo chmod 600 /root/.ssh/environment
           fi
-          printf 'PermitUserEnvironment HOME\n' | sudo tee /etc/ssh/sshd_config.d/azud-integration.conf >/dev/null
+          printf 'PermitUserEnvironment HOME,XDG_*\n' | sudo tee /etc/ssh/sshd_config.d/azud-integration.conf >/dev/null
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
           sudo service ssh restart
