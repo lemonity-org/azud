@@ -86,15 +86,6 @@ jobs:
             sudo useradd --create-home --shell /bin/bash deploy
             sudo install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
             sudo install -m 600 -o deploy -g deploy /tmp/azud_ci_key.pub /home/deploy/.ssh/authorized_keys
-            printf '%s\n' \
-              'HOME=/home/deploy' \
-              'XDG_CONFIG_HOME=/home/deploy/.config' \
-              'XDG_DATA_HOME=/home/deploy/.local/share' \
-              'XDG_CACHE_HOME=/home/deploy/.cache' \
-              "XDG_RUNTIME_DIR=/run/user/$(id -u deploy)" \
-              | sudo tee /home/deploy/.ssh/environment >/dev/null
-            sudo chown deploy:deploy /home/deploy/.ssh/environment
-            sudo chmod 600 /home/deploy/.ssh/environment
             sudo tee /etc/sudoers.d/azud-integration >/dev/null <<'EOF'
           deploy ALL=(root) NOPASSWD: /usr/bin/podman *
           deploy ALL=(root) NOPASSWD: /usr/bin/loginctl enable-linger deploy
@@ -107,18 +98,10 @@ jobs:
           else
             sudo install -d -m 700 /root/.ssh
             sudo install -m 600 /tmp/azud_ci_key.pub /root/.ssh/authorized_keys
-            printf '%s\n' \
-              'HOME=/root' \
-              'XDG_CONFIG_HOME=/root/.config' \
-              'XDG_DATA_HOME=/root/.local/share' \
-              'XDG_CACHE_HOME=/root/.cache' \
-              | sudo tee /root/.ssh/environment >/dev/null
-            sudo chmod 600 /root/.ssh/environment
           fi
-          sudo sed -i '1i PermitUserEnvironment yes' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
-          sudo service ssh restart
+          sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin service ssh restart
           expected_environment='/root|/root/.config'
           if [ "$TARGET_USER" = "deploy" ]; then
             expected_environment='/home/deploy|/home/deploy/.config'
@@ -128,7 +111,7 @@ jobs:
             if value=$(ssh -o BatchMode=yes -o ConnectTimeout=5 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
-              'printf "%s|%s" "$HOME" "${XDG_CONFIG_HOME:-}"'); then
+              'printf "%s|%s" "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"'); then
               actual_environment=$value
               break
             fi
