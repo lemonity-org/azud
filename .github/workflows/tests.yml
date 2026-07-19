@@ -99,19 +99,24 @@ jobs:
             sudo install -d -m 700 /root/.ssh
             sudo install -m 600 /tmp/azud_ci_key.pub /root/.ssh/authorized_keys
           fi
+          target_home=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+          target_uid=$(id -u "$TARGET_USER")
+          sudo install -d -m 700 -o "$TARGET_USER" -g "$TARGET_USER" "/run/user/${target_uid}"
+          sshd_environment="SetEnv XDG_CONFIG_HOME=${target_home}/.config"
+          sshd_environment+=" XDG_DATA_HOME=${target_home}/.local/share"
+          sshd_environment+=" XDG_CACHE_HOME=${target_home}/.cache"
+          sshd_environment+=" XDG_RUNTIME_DIR=/run/user/${target_uid}"
+          sudo sed -i "1i ${sshd_environment}" /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
           sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin service ssh restart
-          expected_environment='/root|/root/.config'
-          if [ "$TARGET_USER" = "deploy" ]; then
-            expected_environment='/home/deploy|/home/deploy/.config'
-          fi
+          expected_environment="${target_home}|${target_home}/.config|/run/user/${target_uid}"
           actual_environment='SSH connection unavailable'
           for attempt in {1..10}; do
             if value=$(ssh -o BatchMode=yes -o ConnectTimeout=5 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
-              'printf "%s|%s" "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"'); then
+              'printf "%s|%s|%s" "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}" "${XDG_RUNTIME_DIR:-}"'); then
               actual_environment=$value
               break
             fi
