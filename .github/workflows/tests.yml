@@ -102,6 +102,18 @@ jobs:
           target_home=$(getent passwd "$TARGET_USER" | cut -d: -f6)
           target_uid=$(id -u "$TARGET_USER")
           sudo install -d -m 700 -o "$TARGET_USER" -g "$TARGET_USER" "/run/user/${target_uid}"
+          if [ "$TARGET_USER" = "deploy" ]; then
+            sudo install -d -m 700 -o deploy -g deploy "${target_home}/.config/environment.d"
+            sudo tee "${target_home}/.config/environment.d/zz-azud-ci.conf" >/dev/null <<EOF
+          HOME=${target_home}
+          XDG_CONFIG_HOME=${target_home}/.config
+          XDG_DATA_HOME=${target_home}/.local/share
+          XDG_CACHE_HOME=${target_home}/.cache
+          XDG_RUNTIME_DIR=/run/user/${target_uid}
+          EOF
+            sudo chown deploy:deploy "${target_home}/.config/environment.d/zz-azud-ci.conf"
+            sudo chmod 600 "${target_home}/.config/environment.d/zz-azud-ci.conf"
+          fi
           sshd_environment="SetEnv XDG_CONFIG_HOME=${target_home}/.config"
           sshd_environment+=" XDG_DATA_HOME=${target_home}/.local/share"
           sshd_environment+=" XDG_CACHE_HOME=${target_home}/.cache"
