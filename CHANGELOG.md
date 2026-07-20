@@ -6,6 +6,10 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+No changes yet.
+
+## 1.0.0 - 2026-07-20
+
 - Hardened zero-downtime deploy, rollback, scale, canary, proxy, secrets, and
   SSH failure handling for the 1.0 release line.
 - Added strict configuration validation, durable local state, role-aware
