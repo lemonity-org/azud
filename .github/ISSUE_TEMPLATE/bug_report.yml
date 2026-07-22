@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible problem with Azud
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. For security vulnerabilities, stop here and use the private security reporting link instead.
+  - type: input
+    id: version
+    attributes:
+      label: Azud version
+      description: Output of `azud version`.
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include client OS, target OS, Podman version, and relevant topology. Do not include secrets or private hostnames.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest sequence that consistently reproduces the problem.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted logs
+      description: Remove tokens, passwords, keys, IP addresses, domains, usernames, and other sensitive data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: I removed secrets and sensitive infrastructure details from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

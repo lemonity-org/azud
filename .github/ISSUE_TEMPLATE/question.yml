@@ -1,0 +1,35 @@
+name: Support question
+description: Ask for help using or operating Azud
+title: "[Question]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the documentation, FAQ, and troubleshooting guide before asking. Never include secrets or sensitive infrastructure details.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include redacted commands, configuration, and output where useful.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Azud version
+      description: Output of `azud version`.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I checked the documentation and existing issues.
+          required: true
+        - label: I removed secrets and sensitive infrastructure details.
+          required: true

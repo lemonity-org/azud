@@ -342,9 +342,18 @@ Azud is built in Go with a clean internal architecture:
 
 ## Requirements
 
-- Go 1.21+
+- The Go version declared in `go.mod`
 - Podman on target servers
 - SSH access to target servers
+
+## Contributing and security
+
+Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before
+opening a pull request and follow the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
+in all project spaces.
+
+Please report vulnerabilities privately using the process in
+[`docs/SECURITY.md`](docs/SECURITY.md), not through a public issue.
 
 ## License
 

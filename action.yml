@@ -39,9 +39,10 @@ runs:
       id: install
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
         AZUD_VERSION: ${{ inputs.version }}
       run: |
-        sh "${{ github.action_path }}/scripts/install.sh"
+        sh "$ACTION_PATH/scripts/install.sh"
         echo "$HOME/.azud/bin" >> "$GITHUB_PATH"
         VERSION=$("$HOME/.azud/bin/azud" version 2>/dev/null | awk 'NR==1{print $2}')
         echo "version=${VERSION:-$AZUD_VERSION}" >> "$GITHUB_OUTPUT"
