@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/lemonity-org/azud/security/advisories/new
+    about: Report suspected vulnerabilities privately, never in a public issue.
+  - name: Documentation
+    url: https://github.com/lemonity-org/azud/tree/main/docs
+    about: Check the guides, FAQ, and troubleshooting documentation first.

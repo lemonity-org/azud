@@ -7,11 +7,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   verify:
     if: github.ref_name != 'v1'
     name: Verify release commit
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       checks: read
@@ -28,6 +36,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -77,6 +87,7 @@ jobs:
     name: Build & Release
     runs-on: ubuntu-latest
     needs: [verify, container]
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -88,11 +99,12 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.x"
+          go-version: "1.25.12"
           cache: true
 
       - name: Extract version metadata
@@ -147,6 +159,7 @@ jobs:
     name: Build & Publish Container
     runs-on: ubuntu-latest
     needs: verify
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -157,6 +170,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Extract version metadata
         id: meta
@@ -214,6 +229,7 @@ jobs:
     name: Publish stable aliases
     runs-on: ubuntu-latest
     needs: [release, container]
+    timeout-minutes: 15
     permissions:
       contents: write
       packages: write

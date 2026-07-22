@@ -1,4 +1,40 @@
-# Security Guide
+# Security Policy and Deployment Guide
+
+## Supported versions
+
+Security fixes are made for the latest stable `1.x` release. Older releases
+may not receive patches; upgrade to the newest release before reporting a
+problem that may already have been fixed.
+
+## Reporting a vulnerability
+
+Do not disclose suspected vulnerabilities in a public issue, discussion, or
+pull request. Use GitHub's
+[private vulnerability reporting](https://github.com/lemonity-org/azud/security/advisories/new)
+to contact the maintainers.
+
+Include, when possible:
+
+- The affected Azud version, component, and platform
+- Reproduction steps or a minimal proof of concept
+- The security impact and realistic attack prerequisites
+- Any suggested mitigation or patch
+- Whether the issue is already public or has a disclosure deadline
+
+The maintainers aim to acknowledge a report within three business days and
+provide an initial assessment within seven business days. We will coordinate
+validation, remediation, release, and credit with the reporter. Please allow a
+reasonable remediation period before public disclosure.
+
+Good-faith research that follows this policy, avoids privacy violations and
+service disruption, and uses only systems and data you are authorized to test
+will not lead the project to initiate legal action against the researcher.
+
+The CLI, installer, official container image, and GitHub Action are in scope.
+Deployment-specific misconfiguration is normally out of scope unless Azud
+creates it contrary to its documented security controls.
+
+## Deployment security
 
 Practical security recommendations for Azud deployments.
 

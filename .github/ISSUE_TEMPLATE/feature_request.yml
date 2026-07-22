@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose an improvement to Azud
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What limitation or use case should Azud address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior and user experience you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds or other designs you considered.
+  - type: textarea
+    id: risks
+    attributes:
+      label: Security and operational impact
+      description: Consider privileges, secrets, compatibility, failure modes, and migration needs.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: I am willing to help implement or test this change.
+          required: false
