@@ -55,10 +55,11 @@ Actions.
 6. Open a pull request and complete its security and testing checklist.
 
 Pull requests require all status checks to pass and all review conversations to
-be resolved. Outside contributions are reviewed by a maintainer. Maintainer
-pull requests may be self-merged after every required check passes because
-GitHub does not permit authors to approve their own changes. Maintainers use
-squash or rebase merges to keep `main` linear.
+be resolved. Outside contributions require approval from the code owner. The
+sole maintainer has a PR-only ruleset bypass so maintainer-authored changes can
+be self-merged after every required check passes; that bypass does not allow
+direct pushes to `main`. Maintainers use squash or rebase merges to keep `main`
+linear.
 
 ## Review expectations
 

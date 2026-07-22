@@ -185,8 +185,10 @@ jobs:
 
       - name: Cleanup podman artifacts
         if: always()
+        env:
+          TARGET_USER: ${{ matrix.user }}
         run: |
-          ssh -o StrictHostKeyChecking=no -i /tmp/azud_ci_key "${{ matrix.user }}@127.0.0.1" \
+          ssh -o StrictHostKeyChecking=no -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
             'systemctl --user stop azud-it.service azud-it-worker.service azud-proxy.service 2>/dev/null || true; podman rm -f azud-proxy azud-it azud-it-worker azud-it-cache azud-it-cron-heartbeat 2>/dev/null || true; podman network rm azud 2>/dev/null || true' || true
           sudo podman rm -f azud-proxy azud-it 2>/dev/null || true
           sudo podman network rm azud 2>/dev/null || true
