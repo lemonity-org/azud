@@ -54,9 +54,11 @@ Actions.
    unredacted logs.
 6. Open a pull request and complete its security and testing checklist.
 
-Pull requests require all status checks to pass, all review conversations to
-be resolved, and approval from at least one code owner. A new push dismisses a
-stale approval. Maintainers use squash or rebase merges to keep `main` linear.
+Pull requests require all status checks to pass and all review conversations to
+be resolved. Outside contributions are reviewed by a maintainer. Maintainer
+pull requests may be self-merged after every required check passes because
+GitHub does not permit authors to approve their own changes. Maintainers use
+squash or rebase merges to keep `main` linear.
 
 ## Review expectations
 
