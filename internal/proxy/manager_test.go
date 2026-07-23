@@ -293,6 +293,48 @@ func TestApplyProxySettingsClearsDisabledManagedState(t *testing.T) {
 	}
 }
 
+func TestApplyProxySettingsUsesProtocolCorrectListeners(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *ProxyConfig
+		want   []string
+	}{
+		{
+			name:   "HTTP only never listens with plaintext on the TLS port",
+			config: &ProxyConfig{},
+			want:   []string{":80"},
+		},
+		{
+			name: "automatic HTTPS owns a dedicated redirect listener",
+			config: &ProxyConfig{
+				AutoHTTPS:   true,
+				SSLRedirect: true,
+			},
+			want: []string{":443"},
+		},
+		{
+			name: "redirect disabled intentionally serves both protocols",
+			config: &ProxyConfig{
+				AutoHTTPS: true,
+			},
+			want: []string{":80", ":443"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &Manager{}
+			cfg := manager.buildBaseConfig()
+			manager.applyProxySettingsFrom(cfg, tt.config)
+
+			got := cfg.Apps.HTTP.Servers["srv0"].Listen
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("listeners = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPersistConfigCommandsProtectPrivateCaddyState(t *testing.T) {
 	tests := []struct {
 		name string

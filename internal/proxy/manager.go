@@ -517,7 +517,9 @@ func ensureHTTPServer(caddyConfig *CaddyConfig) {
 	}
 	if caddyConfig.Apps.HTTP.Servers["srv0"] == nil {
 		caddyConfig.Apps.HTTP.Servers["srv0"] = &HTTPServer{
-			Listen: []string{":80", ":443"},
+			// Default to plaintext only until the desired TLS mode is applied.
+			// Listening with plaintext on :443 produces invalid TLS responses.
+			Listen: []string{":80"},
 			Routes: []*Route{},
 		}
 	}
@@ -552,7 +554,9 @@ func (m *Manager) buildBaseConfig() *CaddyConfig {
 			HTTP: &HTTPApp{
 				Servers: map[string]*HTTPServer{
 					"srv0": {
-						Listen: []string{":80", ":443"},
+						// applyProxySettings replaces this safe plaintext
+						// default with the listener set for the desired mode.
+						Listen: []string{":80"},
 						Routes: []*Route{},
 					},
 				},
@@ -578,6 +582,7 @@ func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *Proxy
 
 	ensureHTTPServer(caddyConfig)
 	server := caddyConfig.Apps.HTTP.Servers["srv0"]
+	server.Listen = proxyListenAddresses(config)
 
 	switch {
 	case !config.AutoHTTPS:
@@ -670,6 +675,22 @@ func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *Proxy
 				},
 			},
 		}
+	}
+}
+
+// proxyListenAddresses keeps plaintext and TLS traffic on distinct listeners
+// whenever Caddy owns the HTTP-to-HTTPS redirect. A TLS-only application server
+// lets Caddy synthesize its dedicated port-80 redirect server. When redirects
+// are explicitly disabled, both listeners remain attached to the application
+// server so the service is intentionally reachable over HTTP and HTTPS.
+func proxyListenAddresses(config *ProxyConfig) []string {
+	switch {
+	case config == nil || !config.AutoHTTPS:
+		return []string{":80"}
+	case config.SSLRedirect:
+		return []string{":443"}
+	default:
+		return []string{":80", ":443"}
 	}
 }
 
