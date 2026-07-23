@@ -93,6 +93,7 @@ cannot contain the release metadata injected into official binaries.
      ssl: false
      # ssl_redirect: true
      app_port: 3000
+     # upstream_protocol: http # http, h2c, or https
      # response_timeout: 30s
      # forward_headers: true
      # buffering:
@@ -106,6 +107,7 @@ cannot contain the release metadata injected into official binaries.
      healthcheck:
        path: /up
        # readiness_path: /ready
+       # readiness_cmd: "grpc_health_probe -addr 127.0.0.1:3000"
        # liveness_path: /live
        # disable_liveness: true
        # liveness_cmd: "curl -fsS http://localhost:3000/up"
@@ -263,6 +265,7 @@ proxy:
   acme_email: ops@example.com
   # ssl_redirect: true
   app_port: 3000
+  # upstream_protocol: http # http, h2c, or https
   # response_timeout: 30s
   # forward_headers: true
   # buffering:

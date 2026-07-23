@@ -18,7 +18,9 @@ This gives zero-downtime deploys for healthy apps and safe rollbacks.
 
 Azud waits for your app to pass health checks before switching traffic.
 Configure them under `proxy.healthcheck` (path, interval) and adjust readiness
-settings under `deploy` if your app needs extra warmup time.
+settings under `deploy` if your app needs extra warmup time. For gRPC, TCP, or
+application-specific probes, set `proxy.healthcheck.readiness_cmd`; it runs
+inside the container and must exit successfully before the route is updated.
 
 ## Proxy and HTTPS
 
@@ -27,6 +29,11 @@ Azud manages Caddy as the reverse proxy by default:
 - Automatic HTTPS via Let's Encrypt
 - Routes traffic to the correct container port
 - Health checks gate traffic switching
+
+Each Azud-owned route and reverse-proxy handler has a stable Caddy `@id`.
+`azud proxy reconcile --check` reports drift between configuration, managed
+containers, canary state, and the live route; `--repair` explicitly restores
+that desired state without touching routes owned by other IDs.
 
 You can disable managed proxy for non-HTTP workloads, or use your own load balancer in front.
 

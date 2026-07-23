@@ -194,6 +194,12 @@ func Validate(cfg *Config) error {
 			Message: "https_port must be between 0 and 65535",
 		})
 	}
+	if protocol := strings.ToLower(strings.TrimSpace(cfg.Proxy.UpstreamProtocol)); protocol != "" && protocol != "http" && protocol != "h2c" && protocol != "https" {
+		errs = append(errs, ValidationError{
+			Field:   "proxy.upstream_protocol",
+			Message: "upstream_protocol must be one of: http, h2c, https",
+		})
+	}
 	if cfg.Proxy.ResponseTimeout != "" {
 		if _, err := time.ParseDuration(cfg.Proxy.ResponseTimeout); err != nil {
 			errs = append(errs, ValidationError{

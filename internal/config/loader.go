@@ -401,6 +401,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("proxy", "app_port") || destNode == nil && dest.Proxy.AppPort != 0 {
 		merged.Proxy.AppPort = dest.Proxy.AppPort
 	}
+	if dest.Proxy.UpstreamProtocol != "" {
+		merged.Proxy.UpstreamProtocol = dest.Proxy.UpstreamProtocol
+	}
 	if has("proxy", "http_port") || destNode == nil && dest.Proxy.HTTPPort != 0 {
 		merged.Proxy.HTTPPort = dest.Proxy.HTTPPort
 	}
@@ -433,6 +436,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	}
 	if dest.Proxy.Healthcheck.ReadinessPath != "" {
 		merged.Proxy.Healthcheck.ReadinessPath = dest.Proxy.Healthcheck.ReadinessPath
+	}
+	if dest.Proxy.Healthcheck.ReadinessCmd != "" {
+		merged.Proxy.Healthcheck.ReadinessCmd = dest.Proxy.Healthcheck.ReadinessCmd
 	}
 	if dest.Proxy.Healthcheck.LivenessPath != "" {
 		merged.Proxy.Healthcheck.LivenessPath = dest.Proxy.Healthcheck.LivenessPath
@@ -766,6 +772,11 @@ func applyDefaults(cfg *Config) {
 	// Proxy defaults
 	if cfg.Proxy.AppPort == 0 {
 		cfg.Proxy.AppPort = 3000
+	}
+	if cfg.Proxy.UpstreamProtocol == "" {
+		cfg.Proxy.UpstreamProtocol = "http"
+	} else {
+		cfg.Proxy.UpstreamProtocol = strings.ToLower(strings.TrimSpace(cfg.Proxy.UpstreamProtocol))
 	}
 	if cfg.Proxy.Host == "" && len(cfg.Proxy.Hosts) > 0 {
 		cfg.Proxy.Host = cfg.Proxy.Hosts[0]

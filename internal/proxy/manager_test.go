@@ -46,6 +46,145 @@ func TestReverseProxyHandlerSkipsRequestBodyHandler(t *testing.T) {
 	}
 }
 
+func TestBuildServiceRouteAssignsStableAzudIDs(t *testing.T) {
+	manager := &Manager{}
+	route := manager.buildServiceRoute(&ServiceConfig{
+		Name:      "shop-api",
+		Host:      "shop.example.com",
+		Upstreams: []string{"shop-api:3000"},
+	})
+
+	if route.ID != "azud-route-shop-api" {
+		t.Fatalf("route ID = %q", route.ID)
+	}
+	handler, _, ok := reverseProxyHandler(route)
+	if !ok || handler.ID != "azud-proxy-shop-api" {
+		t.Fatalf("reverse proxy handler ID = %q, ok = %t", handler.ID, ok)
+	}
+	if got := routeAPIPath("/config/routes", 4, route); got != "/id/azud-route-shop-api" {
+		t.Fatalf("route API path = %q", got)
+	}
+	if got := handlerAPIPath("/config/routes", 4, 1, handler); got != "/id/azud-proxy-shop-api" {
+		t.Fatalf("handler API path = %q", got)
+	}
+}
+
+func TestBuildServiceRouteUsesReducedWeightedUpstreams(t *testing.T) {
+	route := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name: "shop", Host: "shop.example.com",
+		UpstreamWeights: []UpstreamWeight{{Dial: "stable:3000", Weight: 80}, {Dial: "canary:3000", Weight: 20}},
+	})
+	handler, _, ok := reverseProxyHandler(route)
+	if !ok || handler.LoadBalancing.SelectionPolicy.Policy != "random" {
+		t.Fatalf("weighted policy = %#v", handler.LoadBalancing)
+	}
+	want := []*Upstream{{Dial: "stable:3000"}, {Dial: "stable:3000"}, {Dial: "stable:3000"}, {Dial: "stable:3000"}, {Dial: "canary:3000"}}
+	if !reflect.DeepEqual(handler.Upstreams, want) {
+		t.Fatalf("weighted upstreams = %#v, want %#v", handler.Upstreams, want)
+	}
+}
+
+func TestReconcileRouteStatusOnlyOwnsStableIDOrLegacyHost(t *testing.T) {
+	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name: "shop", Host: "shop.example.com", Upstreams: []string{"shop:3000"},
+	})
+	tests := []struct {
+		name       string
+		routes     []*Route
+		hasDesired bool
+		want       ReconcileStatus
+	}{
+		{name: "missing", hasDesired: true, want: ReconcileMissing},
+		{name: "no desired route", routes: []*Route{{ID: "other"}}, want: ReconcileInSync},
+		{name: "owned stale with no upstream", routes: []*Route{desired}, want: ReconcileStale},
+		{name: "owned in sync", routes: []*Route{desired}, hasDesired: true, want: ReconcileInSync},
+		{name: "legacy adoption", routes: []*Route{{Match: []*Match{{Host: []string{"shop.example.com"}}}}}, hasDesired: true, want: ReconcileLegacy},
+		{name: "other ID is not adopted", routes: []*Route{{ID: "manual", Match: []*Match{{Host: []string{"shop.example.com"}}}}}, hasDesired: true, want: ReconcileMissing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, _ := reconcileRouteStatus(tt.routes, desired, "shop.example.com", tt.hasDesired)
+			if got != tt.want {
+				t.Fatalf("status = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouteAppendPayloadCreatesMissingArrayAndAppendsToExistingArray(t *testing.T) {
+	route := &Route{ID: "azud-route-shop"}
+	missing, ok := routeAppendPayload(nil, route).([]*Route)
+	if !ok || len(missing) != 1 || missing[0] != route {
+		t.Fatalf("missing routes payload = %#v", missing)
+	}
+	existing := make([]*Route, 0)
+	if got := routeAppendPayload(existing, route); got != route {
+		t.Fatalf("existing routes payload = %#v, want route", got)
+	}
+}
+
+func TestRoutesEquivalentIgnoresUpstreamOrderAndCompletedCanaryPolicy(t *testing.T) {
+	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name: "shop", Host: "shop.example.com", Upstreams: []string{"shop:3000", "shop-2:3000", "shop-10:3000"},
+	})
+	actual := cloneRoute(desired)
+	handler, _, _ := reverseProxyHandler(actual)
+	handler.Upstreams[1], handler.Upstreams[2] = handler.Upstreams[2], handler.Upstreams[1]
+	handler.LoadBalancing.SelectionPolicy.Policy = "random"
+	if !routesEquivalent(actual, desired) {
+		t.Fatal("uniform random route with reordered upstreams should be equivalent to desired round-robin route")
+	}
+	handler.Upstreams = append(handler.Upstreams, &Upstream{Dial: "shop-10:3000"})
+	if routesEquivalent(actual, desired) {
+		t.Fatal("non-uniform upstream multiplicity should remain drift")
+	}
+}
+
+func TestEnsureNoForeignHostOwnerChecksAllAliases(t *testing.T) {
+	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name: "shop", Host: "shop.example.com", Hosts: []string{"www.example.com"}, Upstreams: []string{"shop:3000"},
+	})
+	foreign := &Route{ID: "manual-route", Match: []*Match{{Host: []string{"www.example.com"}}}}
+	if err := ensureNoForeignHostOwner([]*Route{foreign}, desired); err == nil {
+		t.Fatal("foreign owner of an alias was not detected")
+	}
+	foreign.ID = ""
+	if err := ensureNoForeignHostOwner([]*Route{foreign}, desired); err != nil {
+		t.Fatalf("ID-less legacy route should remain adoptable: %v", err)
+	}
+}
+
+func TestBuildServiceRouteConfiguresUpstreamProtocol(t *testing.T) {
+	tests := []struct {
+		protocol string
+		wantH2C  bool
+		wantTLS  bool
+	}{
+		{protocol: "http"},
+		{protocol: "h2c", wantH2C: true},
+		{protocol: "https", wantTLS: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.protocol, func(t *testing.T) {
+			route := (&Manager{}).buildServiceRoute(&ServiceConfig{
+				Name:             "shop",
+				Host:             "shop.example.com",
+				Upstreams:        []string{"shop:3000"},
+				UpstreamProtocol: tt.protocol,
+			})
+			handler, _, ok := reverseProxyHandler(route)
+			if !ok || handler.Transport == nil || handler.Transport.Protocol != "http" {
+				t.Fatalf("transport = %#v, handler found = %t", handler.Transport, ok)
+			}
+			gotH2C := reflect.DeepEqual(handler.Transport.Versions, []string{"h2c", "2"})
+			if gotH2C != tt.wantH2C || (handler.Transport.TLS != nil) != tt.wantTLS {
+				t.Fatalf("transport = %#v", handler.Transport)
+			}
+		})
+	}
+}
+
 func TestAddUpstreamIfMissingIsIdempotent(t *testing.T) {
 	upstreams := []*Upstream{{Dial: "app:3000"}}
 	got := addUpstreamIfMissing(upstreams, "app:3000")

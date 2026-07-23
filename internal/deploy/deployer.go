@@ -395,8 +395,7 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	}
 
 	// Wait for container to pass readiness check
-	readinessPath := d.cfg.Proxy.Healthcheck.GetReadinessPath()
-	if IsProxyRole(role) && !opts.SkipHealthCheck && readinessPath != "" {
+	if IsProxyRole(role) && !opts.SkipHealthCheck && HasReadinessProbe(d.cfg) {
 		d.log.Host(host, "Waiting for readiness check...")
 
 		// Wait for readiness delay
@@ -701,34 +700,35 @@ func (d *Deployer) waitForHealthy(host, container string) error {
 }
 
 func (d *Deployer) registerWithProxy(host, upstream string) error {
-	// Use liveness path for Caddy's active health checks (continuous monitoring).
-	// The readiness path is only used during deployment to gate proxy registration.
+	return d.proxy.RegisterService(host, BuildProxyServiceConfig(d.cfg, []string{upstream}, nil))
+}
+
+// BuildProxyServiceConfig maps application configuration and discovered
+// upstreams to the complete desired proxy route.
+func BuildProxyServiceConfig(cfg *config.Config, upstreams []string, weights []proxy.UpstreamWeight) *proxy.ServiceConfig {
 	livenessPath := ""
-	if !d.cfg.Proxy.Healthcheck.DisableLiveness {
-		livenessPath = d.cfg.Proxy.Healthcheck.GetLivenessPath()
+	if !cfg.Proxy.Healthcheck.DisableLiveness && strings.TrimSpace(cfg.Proxy.Healthcheck.LivenessCmd) == "" {
+		livenessPath = cfg.Proxy.Healthcheck.GetLivenessPath()
 	}
-	hosts := d.cfg.Proxy.AllHosts()
-	proxyHost := d.cfg.Proxy.PrimaryHost()
-
-	serviceConfig := &proxy.ServiceConfig{
-		Name:                  d.cfg.Service,
-		Host:                  proxyHost,
-		Hosts:                 hosts,
-		Upstreams:             []string{upstream},
+	return &proxy.ServiceConfig{
+		Name:                  cfg.Service,
+		Host:                  cfg.Proxy.PrimaryHost(),
+		Hosts:                 cfg.Proxy.AllHosts(),
+		Upstreams:             upstreams,
+		UpstreamWeights:       weights,
+		UpstreamProtocol:      cfg.Proxy.UpstreamProtocol,
 		HealthPath:            livenessPath,
-		HealthInterval:        d.cfg.Proxy.Healthcheck.Interval,
-		HealthTimeout:         d.cfg.Proxy.Healthcheck.Timeout,
-		ResponseTimeout:       d.cfg.Proxy.ResponseTimeout,
-		ResponseHeaderTimeout: d.cfg.Proxy.ResponseHeaderTimeout,
-		ForwardHeaders:        d.cfg.Proxy.ForwardHeaders,
-		BufferRequests:        d.cfg.Proxy.Buffering.Requests,
-		BufferResponses:       d.cfg.Proxy.Buffering.Responses,
-		MaxRequestBody:        d.cfg.Proxy.Buffering.MaxRequestBody,
-		BufferMemory:          d.cfg.Proxy.Buffering.Memory,
-		HTTPS:                 d.cfg.Proxy.SSL,
+		HealthInterval:        cfg.Proxy.Healthcheck.Interval,
+		HealthTimeout:         cfg.Proxy.Healthcheck.Timeout,
+		ResponseTimeout:       cfg.Proxy.ResponseTimeout,
+		ResponseHeaderTimeout: cfg.Proxy.ResponseHeaderTimeout,
+		ForwardHeaders:        cfg.Proxy.ForwardHeaders,
+		BufferRequests:        cfg.Proxy.Buffering.Requests,
+		BufferResponses:       cfg.Proxy.Buffering.Responses,
+		MaxRequestBody:        cfg.Proxy.Buffering.MaxRequestBody,
+		BufferMemory:          cfg.Proxy.Buffering.Memory,
+		HTTPS:                 cfg.Proxy.SSL,
 	}
-
-	return d.proxy.RegisterService(host, serviceConfig)
 }
 
 func (d *Deployer) upstreamAddr(host, container string) (string, error) {

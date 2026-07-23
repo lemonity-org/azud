@@ -6,7 +6,9 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
-No changes yet.
+- Added stable Caddy route ownership IDs and explicit proxy reconciliation.
+- Added configurable HTTP, h2c, and HTTPS application upstream transports.
+- Added command-based readiness probes for gRPC, TCP, and custom checks.
 
 ## 1.0.0 - 2026-07-20
 

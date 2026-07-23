@@ -182,12 +182,15 @@ proxy:
   # rootful: true
   # Application port inside the container
   app_port: 3000
+  # Protocol from Caddy to the application: http, h2c, or https
+  # upstream_protocol: http
   # Health check configuration
   healthcheck:
     path: /up
     interval: 1s
     timeout: 5s
     # readiness_path: /ready
+    # readiness_cmd: "grpc_health_probe -addr 127.0.0.1:3000"
     # liveness_path: /live
     # disable_liveness: true
     # liveness_cmd: "curl -fsS http://localhost:3000/up"
