@@ -1,6 +1,29 @@
 package podman
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/state"
+)
+
+func TestNewRegistryManagerUsesEffectiveSSHUser(t *testing.T) {
+	sshClient := ssh.NewClient(&ssh.Config{User: "deploy"})
+	t.Cleanup(func() {
+		if err := sshClient.Close(); err != nil {
+			t.Errorf("close SSH client: %v", err)
+		}
+	})
+
+	manager := NewRegistryManager(NewClient(sshClient))
+
+	if manager.user != "deploy" {
+		t.Fatalf("registry manager user = %q, want deploy", manager.user)
+	}
+	if got := state.DirQuoted(manager.user); got != `"${HOME}/.local/share/azud"` {
+		t.Fatalf("registry state directory = %q, want non-root user state directory", got)
+	}
+}
 
 func TestQualifyImage(t *testing.T) {
 	tests := []struct {

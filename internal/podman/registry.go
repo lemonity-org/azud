@@ -34,19 +34,11 @@ type RegistryManager struct {
 	user   string // SSH user for determining state directory paths
 }
 
-// NewRegistryManager creates a new RegistryManager.
-// The user parameter is the SSH user (e.g., "root" or "deploy") used to
-// determine the correct state directory paths on remote hosts.
+// NewRegistryManager creates a RegistryManager whose state paths belong to the
+// effective remote SSH user. Deriving the owner from the transport keeps
+// registry commands and their lock files in the same remote user context.
 func NewRegistryManager(client *Client) *RegistryManager {
-	return &RegistryManager{client: client, user: "root"}
-}
-
-// NewRegistryManagerWithUser creates a new RegistryManager with a specific SSH user.
-func NewRegistryManagerWithUser(client *Client, user string) *RegistryManager {
-	if user == "" {
-		user = "root"
-	}
-	return &RegistryManager{client: client, user: user}
+	return &RegistryManager{client: client, user: client.ssh.User()}
 }
 
 func (m *RegistryManager) Login(host string, config *RegistryConfig) error {

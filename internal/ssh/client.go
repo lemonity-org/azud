@@ -101,6 +101,11 @@ func NewClient(cfg *Config) *Client {
 	}
 }
 
+// User returns the effective username used for remote SSH connections.
+func (c *Client) User() string {
+	return c.config.User
+}
+
 // Connect establishes a connection to the given host
 func (c *Client) Connect(host string) (*Connection, error) {
 	// Check pool for existing connection
