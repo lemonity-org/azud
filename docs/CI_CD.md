@@ -74,6 +74,7 @@ jobs:
 
       - name: Deploy
         env:
+          NO_COLOR: "1"
           AZUD_SECRET_AZUD_REGISTRY_PASSWORD: ${{ secrets.AZUD_REGISTRY_PASSWORD }}
           AZUD_SECRET_DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
         run: azud deploy
@@ -113,7 +114,7 @@ If you prefer not to use the composite action, you can install Azud directly:
 - name: Install Azud
   run: |
     curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/v1/scripts/install.sh | sh
-    echo "$HOME/.azud/bin" >> $GITHUB_PATH
+    printf '%s\n' "$HOME/.azud/bin" >> "$GITHUB_PATH"
 
 - name: Setup SSH
   run: |
@@ -125,6 +126,11 @@ If you prefer not to use the composite action, you can install Azud directly:
 
 The installer requires the GitHub CLI so it can verify the binary's signed
 build provenance before installation.
+
+Azud detects the runner's non-TTY output and emits deterministic ASCII framing
+without ANSI escapes while preserving UTF-8 values. Setting `NO_COLOR: "1"` on
+deploy steps makes that policy explicit. Use `azud version --short` for version
+checks; do not parse the human-readable version report.
 
 ## Durable deployment state
 

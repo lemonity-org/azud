@@ -133,7 +133,7 @@ jobs:
 
       - name: Smoke release-built binary and scaffold
         run: |
-          bin/release/azud-linux-amd64 version | grep -F "Azud ${GITHUB_REF_NAME}"
+          test "$(bin/release/azud-linux-amd64 version --short)" = "${GITHUB_REF_NAME}"
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT
           cd "$smoke_dir"

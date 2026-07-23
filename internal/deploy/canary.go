@@ -170,7 +170,7 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 		return err
 	}
 
-	c.log.Header("Starting canary deployment: %s", image)
+	c.log.Header("Canary / deploy / %s", image)
 
 	// Get initial weight from config if not specified
 	initialWeight := opts.InitialWeight
@@ -410,7 +410,7 @@ func (c *CanaryDeployer) Promote() error {
 	if err := c.saveStateLocked(); err != nil {
 		return err
 	}
-	c.log.Header("Promoting canary to production")
+	c.log.Header("Canary / promote")
 
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Promoting canary...")
@@ -523,7 +523,7 @@ func (c *CanaryDeployer) Rollback() error {
 	if err := c.saveStateLocked(); err != nil {
 		return err
 	}
-	c.log.Header("Rolling back canary deployment")
+	c.log.Header("Canary / rollback")
 
 	for _, host := range c.state.Hosts {
 		c.log.Host(host, "Rolling back canary...")

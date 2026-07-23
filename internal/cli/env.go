@@ -75,7 +75,7 @@ Example:
 }
 
 var envGetCmd = &cobra.Command{
-	Use:   "get [key]",
+	Use:   "get <key>",
 	Short: "Get a secret value",
 	Args:  cobra.ExactArgs(1),
 	Long: `Get the value of a specific secret from the local secrets file.
@@ -86,7 +86,7 @@ Example:
 }
 
 var envSetCmd = &cobra.Command{
-	Use:   "set [key] [value]",
+	Use:   "set <key> <value>",
 	Short: "Set a secret value",
 	Args:  cobra.ExactArgs(2),
 	Long: `Set a secret value in the local secrets file.
@@ -98,7 +98,7 @@ Example:
 }
 
 var envDeleteCmd = &cobra.Command{
-	Use:   "delete [key]",
+	Use:   "delete <key>",
 	Short: "Delete a secret",
 	Args:  cobra.ExactArgs(1),
 	Long: `Delete a secret from the local secrets file.
@@ -178,7 +178,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		content.WriteString(fmt.Sprintf("%s=%s\n", k, secrets[k]))
+		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
 	}
 
 	// Push to each host
@@ -272,7 +272,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		content.WriteString(fmt.Sprintf("%s=%s\n", k, secrets[k]))
+		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
 	}
 
 	tmpFile, err := os.CreateTemp(secretsDir, ".secrets-*.tmp")
@@ -384,11 +384,11 @@ func runEnvEdit(cmd *cobra.Command, args []string) error {
 		editor = "vi"
 	}
 
-	// Open editor
-	fmt.Printf("Opening %s in %s...\n", secretsPath, editor)
-
-	// We can't actually exec here, so just print the command
-	fmt.Printf("Run: %s %s\n", editor, secretsPath)
+	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
+	log.Header("Environment / editor")
+	log.Info("File: %s", secretsPath)
+	// We cannot replace the current process here, so expose the exact command.
+	log.Command(fmt.Sprintf("%s %s", editor, secretsPath))
 
 	return nil
 }
@@ -454,7 +454,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		content.WriteString(fmt.Sprintf("%s=%s\n", k, secrets[k]))
+		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
 	}
 
 	if err := os.WriteFile(secretsPath, []byte(content.String()), 0600); err != nil {
@@ -503,7 +503,7 @@ func runEnvDelete(cmd *cobra.Command, args []string) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		content.WriteString(fmt.Sprintf("%s=%s\n", k, secrets[k]))
+		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
 	}
 
 	if err := os.WriteFile(secretsPath, []byte(content.String()), 0600); err != nil {

@@ -42,7 +42,7 @@ Example:
 }
 
 var rollbackCmd = &cobra.Command{
-	Use:   "rollback [version]",
+	Use:   "rollback <version>",
 	Short: "Rollback to a previous version",
 	Long: `Rollback the application to a previous version.
 
@@ -85,7 +85,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
-	log.Header("Azud Deploy")
+	log.Header("Deploy / %s", cfg.Service)
 
 	// An explicit version refers to an already tagged image. Building the
 	// current checkout under a different generated tag would be misleading.
@@ -135,7 +135,7 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
-	log.Header("Azud Redeploy")
+	log.Header("Redeploy / %s", cfg.Service)
 
 	// Run pre-connect hook
 	hookCtx := newHookContext()

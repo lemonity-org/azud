@@ -285,7 +285,7 @@ func runAppDetails(cmd *cobra.Command, args []string) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 
-	log.Header("Application Details: %s", cfg.Service)
+	log.Header("Application / %s", cfg.Service)
 
 	var rows [][]string
 	var detailErrors []string
@@ -390,7 +390,7 @@ var accessoryCmd = &cobra.Command{
 }
 
 var accessoryBootCmd = &cobra.Command{
-	Use:   "boot [name]",
+	Use:   "boot <name>",
 	Short: "Start an accessory",
 	Long: `Start an accessory container.
 
@@ -402,28 +402,28 @@ Example:
 }
 
 var accessoryStopCmd = &cobra.Command{
-	Use:   "stop [name]",
+	Use:   "stop <name>",
 	Short: "Stop an accessory",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAccessoryStop,
 }
 
 var accessoryLogsCmd = &cobra.Command{
-	Use:   "logs [name]",
+	Use:   "logs <name>",
 	Short: "View accessory logs",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAccessoryLogs,
 }
 
 var accessoryExecCmd = &cobra.Command{
-	Use:   "exec [name] -- command",
+	Use:   "exec <name> -- command",
 	Short: "Execute command in accessory",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runAccessoryExec,
 }
 
 var accessoryRemoveCmd = &cobra.Command{
-	Use:   "remove [name]",
+	Use:   "remove <name>",
 	Short: "Stop and remove an accessory container",
 	Long: `Stop and remove an accessory container from the remote host.
 
@@ -545,8 +545,13 @@ func runAccessoryRemove(cmd *cobra.Command, args []string) error {
 	containerName := fmt.Sprintf("%s-%s", cfg.Service, name)
 
 	if !accessoryRemoveYes {
-		fmt.Printf("This will stop and remove the accessory %q (%s) on %s.\n", name, containerName, strings.Join(hosts, ", "))
-		fmt.Print("Are you sure? [y/N] ")
+		writer := cmd.OutOrStdout()
+		_, _ = fmt.Fprintln(writer, "REMOVE / ACCESSORY")
+		_, _ = fmt.Fprintln(writer, "------------------")
+		_, _ = fmt.Fprintf(writer, "  NAME      %s\n", name)
+		_, _ = fmt.Fprintf(writer, "  CONTAINER %s\n", containerName)
+		_, _ = fmt.Fprintf(writer, "  HOSTS     %s\n", strings.Join(hosts, ", "))
+		_, _ = fmt.Fprint(writer, "  CONFIRM   Remove? [y/N] ")
 
 		var answer string
 		if _, err := fmt.Scanln(&answer); err != nil {

@@ -43,9 +43,14 @@ runs:
         AZUD_VERSION: ${{ inputs.version }}
       run: |
         sh "$ACTION_PATH/scripts/install.sh"
-        echo "$HOME/.azud/bin" >> "$GITHUB_PATH"
-        VERSION=$("$HOME/.azud/bin/azud" version 2>/dev/null | awk 'NR==1{print $2}')
-        echo "version=${VERSION:-$AZUD_VERSION}" >> "$GITHUB_OUTPUT"
+        printf '%s\n' "$HOME/.azud/bin" >> "$GITHUB_PATH"
+        if VERSION=$("$HOME/.azud/bin/azud" version --short 2>/dev/null); then
+          :
+        else
+          VERSION=$("$HOME/.azud/bin/azud" version 2>/dev/null | awk 'NR == 1 { print $2 }')
+        fi
+        test -n "$VERSION"
+        printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Setup SSH key
       if: inputs.ssh-key != ''

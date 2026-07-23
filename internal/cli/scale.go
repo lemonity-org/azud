@@ -16,7 +16,7 @@ import (
 )
 
 var scaleCmd = &cobra.Command{
-	Use:   "scale [role=count]",
+	Use:   "scale <role=count>",
 	Short: "Scale application instances",
 	Long: `Dynamically scale the number of container instances for a role.
 

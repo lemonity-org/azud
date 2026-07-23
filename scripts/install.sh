@@ -1,5 +1,5 @@
 #!/bin/sh
-# Azud installer — downloads a pre-built binary from GitHub Releases.
+# Azud installer - downloads a pre-built binary from GitHub Releases.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/main/scripts/install.sh | sh
@@ -66,31 +66,31 @@ download_and_verify() {
   BINARY_NAME="azud-${OS}-${ARCH}"
   BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
-  TMPDIR=$(mktemp -d)
-  trap 'rm -rf "$TMPDIR"' EXIT
+  AZUD_INSTALL_TMP=$(mktemp -d)
+  trap 'rm -rf "$AZUD_INSTALL_TMP"' EXIT
 
   log "Downloading ${BINARY_NAME}..."
-  curl -fsSL -o "${TMPDIR}/${BINARY_NAME}" "${BASE_URL}/${BINARY_NAME}"
+  curl -fsSL -o "${AZUD_INSTALL_TMP}/${BINARY_NAME}" "${BASE_URL}/${BINARY_NAME}"
 
   log "Downloading checksums..."
-  curl -fsSL -o "${TMPDIR}/checksums.txt" "${BASE_URL}/checksums.txt"
+  curl -fsSL -o "${AZUD_INSTALL_TMP}/checksums.txt" "${BASE_URL}/checksums.txt"
 
   log "Verifying checksum..."
-  EXPECTED=$(grep "${BINARY_NAME}$" "${TMPDIR}/checksums.txt" | awk '{print $1}')
+  EXPECTED=$(grep "${BINARY_NAME}$" "${AZUD_INSTALL_TMP}/checksums.txt" | awk '{print $1}')
   if [ -z "$EXPECTED" ]; then
     fatal "Checksum not found for ${BINARY_NAME}"
   fi
 
   if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL=$(sha256sum "${TMPDIR}/${BINARY_NAME}" | awk '{print $1}')
+    ACTUAL=$(sha256sum "${AZUD_INSTALL_TMP}/${BINARY_NAME}" | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
-    ACTUAL=$(shasum -a 256 "${TMPDIR}/${BINARY_NAME}" | awk '{print $1}')
+    ACTUAL=$(shasum -a 256 "${AZUD_INSTALL_TMP}/${BINARY_NAME}" | awk '{print $1}')
   else
-    fatal "No sha256sum or shasum found — cannot verify checksum"
+    fatal "No sha256sum or shasum found - cannot verify checksum"
   fi
 
   if [ "$EXPECTED" != "$ACTUAL" ]; then
-    fatal "Checksum mismatch!\n  Expected: ${EXPECTED}\n  Actual:   ${ACTUAL}"
+    fatal "Checksum mismatch: expected ${EXPECTED}; got ${ACTUAL}"
   fi
   log "Checksum verified."
 
@@ -98,7 +98,7 @@ download_and_verify() {
     fatal "GitHub CLI (gh) is required to verify release provenance: https://cli.github.com/"
   fi
   log "Verifying GitHub/Sigstore build provenance..."
-  if ! gh attestation verify "${TMPDIR}/${BINARY_NAME}" --repo "$REPO" >/dev/null; then
+  if ! gh attestation verify "${AZUD_INSTALL_TMP}/${BINARY_NAME}" --repo "$REPO" >/dev/null; then
     fatal "Release provenance verification failed for ${BINARY_NAME}"
   fi
   log "Build provenance verified."
@@ -106,32 +106,37 @@ download_and_verify() {
 
 install_binary() {
   mkdir -p "$INSTALL_DIR"
-  mv "${TMPDIR}/${BINARY_NAME}" "${INSTALL_DIR}/azud"
+  mv "${AZUD_INSTALL_TMP}/${BINARY_NAME}" "${INSTALL_DIR}/azud"
   chmod +x "${INSTALL_DIR}/azud"
   log "Installed azud to ${INSTALL_DIR}/azud"
 }
 
 print_success() {
-  INSTALLED_VERSION=$("${INSTALL_DIR}/azud" version 2>/dev/null | awk 'NR == 1 { print $2 }')
+  if INSTALLED_VERSION=$("${INSTALL_DIR}/azud" version --short 2>/dev/null); then
+    :
+  else
+    # Compatibility with binaries released before version --short existed.
+    INSTALLED_VERSION=$("${INSTALL_DIR}/azud" version 2>/dev/null | awk 'NR == 1 { print $2 }')
+  fi
   if [ -z "$INSTALLED_VERSION" ]; then
     INSTALLED_VERSION="$VERSION"
   fi
   cat <<EOF
 
-  azud ${INSTALLED_VERSION} installed successfully!
-
-  Add azud to your PATH (if not already):
-    export PATH="\$HOME/.azud/bin:\$PATH"
-
+AZUD / INSTALL
+--------------------------------------------------------
+  OK     azud ${INSTALLED_VERSION}
+  PATH   ${INSTALL_DIR}/azud
+  NEXT   export PATH="\$HOME/.azud/bin:\$PATH"
 EOF
 }
 
 log() {
-  printf '  → %s\n' "$1"
+  printf '  INFO   %s\n' "$1"
 }
 
 fatal() {
-  printf 'Error: %s\n' "$1" >&2
+  printf '  ERROR  %s\n' "$1" >&2
   exit 1
 }
 

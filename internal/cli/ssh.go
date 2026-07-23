@@ -180,8 +180,11 @@ func runSSHTrust(cmd *cobra.Command, args []string) error {
 func confirmTrust(host, target string, fingerprints []string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Printf("\nHost: %s\nTarget: %s\nFingerprints: %s\n", host, target, strings.Join(fingerprints, ", "))
-	fmt.Print("Type 'yes' to trust and continue: ")
+	fmt.Printf("\nTRUST / HOST KEY\n----------------\n")
+	fmt.Printf("  HOST         %s\n", host)
+	fmt.Printf("  TARGET       %s\n", target)
+	fmt.Printf("  FINGERPRINT  %s\n", strings.Join(fingerprints, ", "))
+	fmt.Print("  CONFIRM      Type 'yes' to trust: ")
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -234,9 +237,9 @@ func printSSHTrust(hosts []string, template bool) error {
 		sb.WriteString("ssh:\n")
 		sb.WriteString("  trusted_host_fingerprints:\n")
 		for _, e := range entries {
-			sb.WriteString(fmt.Sprintf("    %q:\n", e.target))
+			_, _ = fmt.Fprintf(&sb, "    %q:\n", e.target)
 			for _, fp := range e.fps {
-				sb.WriteString(fmt.Sprintf("      - %q\n", fp))
+				_, _ = fmt.Fprintf(&sb, "      - %q\n", fp)
 			}
 		}
 		fmt.Print(sb.String())

@@ -1,26 +1,29 @@
-<p align="center">
-  <img src="azud-logo.png" alt="Azud Logo" width="200">
-</p>
+# AZUD
 
-# Azud
+`DEPLOYMENT CONTROL / PODMAN / SSH`
 
-**Deploy web apps anywhere with zero downtime**
+Azud coordinates zero-downtime deployments of containerized applications to
+one or more Podman hosts.
 
-Azud is a modern deployment tool for containerized web applications. It deploys Podman-based applications to any server with zero-downtime deployments, combining simplicity with multi-server capabilities.
+| Specification | Value |
+|---|---|
+| Interface | Go command-line application |
+| Transport | SSH |
+| Runtime | Podman |
+| Ingress | Caddy |
+| State | Declarative YAML plus a durable operation journal |
+| Automation | GitHub Actions, GitLab CI, and non-interactive shells |
 
-## Why Azud?
+## Operating model
 
-Existing deployment tools have fundamental design issues—limited proxy options, single-host constraints, downtime during upgrades, complex environment management, and no built-in SSL.
-
-Azud solves these with:
-
-- **Battle-tested Caddy** as the reverse proxy with automatic HTTPS via Let's Encrypt
-- **Multi-server support** from day one
-- **Zero-downtime deployments** by default using blue-green pattern
-- **Configuration as code** with simple YAML files
-- **Configuration-led CLI** with version-controlled desired state and a small,
-  durable deployment/canary journal for safe rollback and CI handoff
-- **Clean, structured output** that's easy to read and parse
+| Function | Implementation |
+|---|---|
+| Traffic changes | Blue-green and canary deployment procedures with health checks |
+| Ingress and TLS | Caddy reverse proxy with automatic HTTPS through Let's Encrypt |
+| Host topology | One or more hosts grouped by application role |
+| Desired state | Version-controlled YAML configuration |
+| Recovery state | Durable deployment and canary journal used for rollback and CI handoff |
+| Operator output | Explicit status labels, terminal-aware color, and a stable plain mode |
 
 ## Features
 
@@ -47,6 +50,7 @@ Azud solves these with:
 - `docs/CLI_REFERENCE.md` - Full CLI and config reference
 - `docs/ADVANCED_USAGE.md` - Recipes and advanced configs
 - `docs/CI_CD.md` - CI/CD examples
+- `docs/OUTPUT.md` - Terminal, pipe, and CI output contract
 - `docs/DESIGN_PHILOSOPHY.md` - Why Azud exists
 - `docs/FAQ.md` - Common questions
 
@@ -131,6 +135,23 @@ cannot contain the release metadata injected into official binaries.
    azud deploy
    ```
 
+## Output
+
+Azud renders a compact operations record. Written labels carry state; color is
+secondary and is disabled automatically for pipes and CI.
+
+```text
+  # Deploy / ghcr.io/acme/api:v42
+  --------------------------------------------------------
+  INFO   Deploying to 2 hosts
+  HOST   app-01 / Starting container
+  OK     app-01 / Container started
+  ERROR  app-02 / Readiness check failed
+```
+
+Use `azud version --short` in scripts. See
+[`docs/OUTPUT.md`](docs/OUTPUT.md) for the complete output contract.
+
 ## Build Configuration
 
 You can customize builds with the `builder` section:
@@ -171,7 +192,7 @@ builder:
 |---------|-------------|
 | `azud deploy` | Deploy with zero-downtime |
 | `azud redeploy` | Redeploy without rebuilding |
-| `azud rollback [version]` | Rollback to a previous version |
+| `azud rollback <version>` | Rollback to a previous version |
 | `azud history list` | Show recent deployment history |
 | `azud setup` | Bootstrap servers and deploy |
 | `azud preflight` | Validate hosts and configuration before deploying |
@@ -180,7 +201,7 @@ builder:
 | Command | Description |
 |---------|-------------|
 | `azud app logs` | View application logs |
-| `azud app exec [cmd]` | Execute command in container |
+| `azud app exec -- <command>` | Execute command in container |
 | `azud app start/stop/restart` | Control application lifecycle |
 | `azud app details` | Show container status |
 
@@ -211,22 +232,22 @@ builder:
 ### Accessories
 | Command | Description |
 |---------|-------------|
-| `azud accessory boot [name]` | Start an accessory |
-| `azud accessory stop [name]` | Stop an accessory |
-| `azud accessory logs [name]` | View accessory logs |
+| `azud accessory boot <name>` | Start an accessory |
+| `azud accessory stop <name>` | Stop an accessory |
+| `azud accessory logs <name>` | View accessory logs |
 
 ### Cron Jobs
 | Command | Description |
 |---------|-------------|
 | `azud cron boot` | Start scheduled tasks |
-| `azud cron run [name]` | Run a job immediately |
+| `azud cron run <name>` | Run a job immediately |
 | `azud cron list` | List all cron jobs |
 
 ### Canary
 | Command | Description |
 |---------|-------------|
 | `azud canary deploy` | Deploy to small traffic % |
-| `azud canary weight [%]` | Adjust traffic percentage |
+| `azud canary weight <percentage>` | Adjust traffic percentage |
 | `azud canary promote` | Promote to full production |
 | `azud canary rollback` | Rollback canary |
 
