@@ -76,7 +76,7 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 		podman:     podmanClient,
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
-		registry:   podman.NewRegistryManagerWithUser(podmanClient, cfg.SSH.User),
+		registry:   podman.NewRegistryManager(podmanClient),
 		proxy:      proxyManager,
 		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
 		history:    NewDurableHistoryStore(cfg.Deploy.RetainHistory, log),
