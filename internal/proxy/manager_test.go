@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -75,6 +77,54 @@ func TestWeightedUpstreamsUseStockCaddySchema(t *testing.T) {
 	}
 	if strings.Contains(string(payload), "weight") || strings.Contains(string(payload), "weighted_round_robin") {
 		t.Fatalf("stock Caddy payload contains unsupported weighted fields: %s", payload)
+	}
+}
+
+func TestReverseProxyHeadersUseStockCaddySchema(t *testing.T) {
+	route := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Host:      "app.example.com",
+		Upstreams: []string{"app:3000"},
+		HTTPS:     true,
+	})
+	handler, _, ok := reverseProxyHandler(route)
+	if !ok {
+		t.Fatal("generated route is missing reverse_proxy handler")
+	}
+
+	payload, err := json.Marshal(handler)
+	if err != nil {
+		t.Fatalf("marshal handler: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("unmarshal handler fields: %v", err)
+	}
+	if _, exists := fields["header_up"]; exists {
+		t.Fatalf("payload contains Caddyfile-only header_up field: %s", payload)
+	}
+
+	rawHeaders, exists := fields["headers"]
+	if !exists {
+		t.Fatalf("payload is missing stock Caddy headers field: %s", payload)
+	}
+
+	var got HeadersConfig
+	if err := json.Unmarshal(rawHeaders, &got); err != nil {
+		t.Fatalf("unmarshal stock Caddy headers: %v", err)
+	}
+	if got.Request == nil {
+		t.Fatal("headers.request is nil")
+	}
+	wantSet := map[string][]string{
+		"X-Forwarded-For":   {"{http.request.remote.host}"},
+		"X-Forwarded-Proto": {"{http.request.scheme}"},
+		"X-Forwarded-Host":  {"{http.request.host}"},
+		"X-Forwarded-Port":  {"{http.request.port}"},
+		"X-Real-IP":         {"{http.request.remote.host}"},
+	}
+	if !maps.EqualFunc(got.Request.Set, wantSet, slices.Equal) {
+		t.Fatalf("headers.request.set = %#v, want %#v", got.Request.Set, wantSet)
 	}
 }
 

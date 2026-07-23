@@ -78,18 +78,20 @@ type Handler struct {
 	Upstreams []*Upstream `json:"upstreams,omitempty"`
 
 	// For static_response handler
-	StatusCode    int                 `json:"status_code,omitempty"`
-	StaticHeaders map[string][]string `json:"headers,omitempty"`
-	Body          string              `json:"body,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Body       string `json:"body,omitempty"`
 
 	// For reverse_proxy handler
 	LoadBalancing   *LoadBalancing `json:"load_balancing,omitempty"`
 	HealthChecks    *HealthChecks  `json:"health_checks,omitempty"`
-	ProxyHeaders    *HeadersConfig `json:"header_up,omitempty"`
 	Transport       *Transport     `json:"transport,omitempty"`
 	FlushInterval   string         `json:"flush_interval,omitempty"`
 	BufferRequests  bool           `json:"buffer_requests,omitempty"`
 	BufferResponses bool           `json:"buffer_responses,omitempty"`
+
+	// Headers configures reverse_proxy request and response header operations.
+	// Static response headers are intentionally not modeled on this handler.
+	Headers *HeadersConfig `json:"headers,omitempty"`
 
 	// For request_body handler
 	MaxSize int64 `json:"max_size,omitempty"`
