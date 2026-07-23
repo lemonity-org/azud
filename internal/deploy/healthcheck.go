@@ -60,6 +60,24 @@ func LivenessCommand(cfg *config.Config) string {
 	return BuildHTTPCheckCommand(cfg.Proxy.AppPort, path)
 }
 
+// ReadinessCommand returns the command that should gate traffic admission.
+// A custom command takes precedence over the HTTP readiness path.
+func ReadinessCommand(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Proxy.Healthcheck.ReadinessCmd)
+}
+
+// HasReadinessProbe reports whether deployment should wait for an explicit
+// readiness signal before registering the container with the proxy.
+func HasReadinessProbe(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return ReadinessCommand(cfg) != "" || cfg.Proxy.Healthcheck.GetReadinessPath() != ""
+}
+
 // BuildHTTPCheckExecCandidates builds podman exec commands that do not require a shell.
 func BuildHTTPCheckExecCandidates(container string, port int, path string) []string {
 	if container == "" || port <= 0 || path == "" {

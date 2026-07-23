@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +34,9 @@ const (
 	CaddyLockFileName = "caddy.lock"
 
 	CaddyLockTimeout = 120 * time.Second
+
+	azudRouteIDPrefix   = "azud-route-"
+	azudHandlerIDPrefix = "azud-proxy-"
 
 	// Bridged containers must listen on the container interface so Podman's
 	// loopback-only host port can reach the API. Host-networked containers share
@@ -857,23 +863,33 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 	if err := json.Unmarshal(data, &routes); err != nil {
 		return fmt.Errorf("failed to parse routes: %w", err)
 	}
-
-	for i, r := range routes {
-		if routeMatchesHost(r, serviceHost) {
-			routePath := fmt.Sprintf("%s/%d", routesPath, i)
-			_, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route)
-			if err != nil {
-				return fmt.Errorf("failed to patch route at index %d: %w", i, err)
+	if err := ensureNoForeignHostOwner(routes, route); err != nil {
+		return err
+	}
+	for _, existing := range routes {
+		if existing != nil && route.ID != "" && existing.ID == route.ID {
+			routePath := caddyIDPath(route.ID)
+			if _, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route); err != nil {
+				return fmt.Errorf("failed to patch route %s: %w", route.ID, err)
 			}
 			return nil
 		}
 	}
 
-	// Route doesn't exist — append it by PATCHing the full routes array.
-	// Caddy's POST to routes/... fails with RouteList unmarshal errors,
-	// so we rebuild the array and replace it atomically.
-	routes = append(routes, route)
-	_, err = m.caddyClient.apiRequest(host, "PATCH", routesPath, routes)
+	for i, r := range routes {
+		if routeMatchesHost(r, serviceHost) {
+			routePath := routeAPIPath(routesPath, i, r)
+			_, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route)
+			if err != nil {
+				return fmt.Errorf("failed to patch route %s: %w", routePath, err)
+			}
+			return nil
+		}
+	}
+
+	// Route doesn't exist — POST appends one element to Caddy's routes array
+	// without replacing routes owned by other services or manual operators.
+	_, err = m.caddyClient.apiRequest(host, "POST", routesPath, routeAppendPayload(routes, route))
 	if err != nil {
 		return fmt.Errorf("failed to append route: %w", err)
 	}
@@ -894,9 +910,12 @@ func (m *Manager) registerServiceFull(host string, service *ServiceConfig, route
 	m.applyProxySettings(config)
 
 	server := config.Apps.HTTP.Servers["srv0"]
+	if err := ensureNoForeignHostOwner(server.Routes, route); err != nil {
+		return err
+	}
 	found := false
 	for i, r := range server.Routes {
-		if routeMatchesHost(r, service.Host) {
+		if routesHaveSameOwner(r, route, service.Host) {
 			server.Routes[i] = route
 			found = true
 			break
@@ -926,6 +945,13 @@ type ServiceConfig struct {
 
 	// Upstream addresses (host:port)
 	Upstreams []string
+
+	// Optional weighted upstreams. When set, these replace Upstreams and use
+	// Caddy's stock random policy with reduced repeated entries.
+	UpstreamWeights []UpstreamWeight
+
+	// Protocol used to communicate with upstreams: http, h2c, or https.
+	UpstreamProtocol string
 
 	// Health check path for liveness (used by Caddy active health checks)
 	HealthPath string
@@ -966,13 +992,19 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	for i, addr := range service.Upstreams {
 		upstreams[i] = &Upstream{Dial: addr}
 	}
+	policy := "round_robin"
+	if len(service.UpstreamWeights) > 0 {
+		upstreams = weightedUpstreams(service.UpstreamWeights...)
+		policy = "random"
+	}
 
 	handler := &Handler{
+		ID:        serviceHandlerID(service.Name),
 		Handler:   "reverse_proxy",
 		Upstreams: upstreams,
 		LoadBalancing: &LoadBalancing{
 			SelectionPolicy: &SelectionPolicy{
-				Policy: "round_robin",
+				Policy: policy,
 			},
 		},
 	}
@@ -1007,12 +1039,19 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		}
 	}
 
-	if service.ResponseTimeout != "" || service.ResponseHeaderTimeout != "" {
-		handler.Transport = &Transport{
+	if service.ResponseTimeout != "" || service.ResponseHeaderTimeout != "" || service.UpstreamProtocol != "" {
+		transport := &Transport{
 			Protocol:              "http",
 			ReadTimeout:           service.ResponseTimeout,
 			ResponseHeaderTimeout: service.ResponseHeaderTimeout,
 		}
+		switch service.UpstreamProtocol {
+		case "h2c":
+			transport.Versions = []string{"h2c", "2"}
+		case "https":
+			transport.TLS = &UpstreamTLSConfig{}
+		}
+		handler.Transport = transport
 	}
 
 	if service.ForwardHeaders || service.HTTPS {
@@ -1063,6 +1102,7 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	}
 
 	route := &Route{
+		ID: serviceRouteID(service.Name),
 		Match: []*Match{
 			{Host: hostMatches},
 		},
@@ -1071,6 +1111,193 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	}
 
 	return route
+}
+
+// ReconcileStatus describes the relationship between desired and live route state.
+type ReconcileStatus string
+
+const (
+	ReconcileMissing ReconcileStatus = "missing"
+	ReconcileStale   ReconcileStatus = "stale"
+	ReconcileLegacy  ReconcileStatus = "legacy"
+	ReconcileInSync  ReconcileStatus = "in-sync"
+)
+
+// ReconcileService checks or repairs the single route owned by service.Name.
+// A host-only route is considered only as an adoption candidate when upstreams exist.
+func (m *Manager) ReconcileService(host string, service *ServiceConfig, repair bool) (ReconcileStatus, error) {
+	desired := m.buildServiceRoute(service)
+	config, err := m.caddyClient.GetConfig(host)
+	if err != nil {
+		return "", err
+	}
+	hasDesiredUpstreams := len(service.Upstreams)+len(service.UpstreamWeights) > 0
+	if hasDesiredUpstreams {
+		if ownerErr := ensureNoForeignHostOwner(serviceRoutes(config), desired); ownerErr != nil {
+			return "", ownerErr
+		}
+	}
+	status, _, _ := reconcileRouteStatus(serviceRoutes(config), desired, service.Host, hasDesiredUpstreams)
+	if !repair || status == ReconcileInSync {
+		return status, nil
+	}
+
+	err = m.withPersistedMutation(host, func() error {
+		// Re-read under the mutation lock and alter only the exact owner or an
+		// eligible ID-less legacy route. Path-specific operations preserve every
+		// unrelated Caddy field, including modules Azud does not model.
+		routesPath := "/config/apps/http/servers/srv0/routes"
+		data, getErr := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+		if getErr != nil {
+			return getErr
+		}
+		var liveRoutes []*Route
+		if unmarshalErr := json.Unmarshal(data, &liveRoutes); unmarshalErr != nil {
+			return fmt.Errorf("failed to parse routes: %w", unmarshalErr)
+		}
+		if hasDesiredUpstreams {
+			if ownerErr := ensureNoForeignHostOwner(liveRoutes, desired); ownerErr != nil {
+				return ownerErr
+			}
+		}
+		_, owned, legacy := reconcileRouteStatus(liveRoutes, desired, service.Host, hasDesiredUpstreams)
+		if !hasDesiredUpstreams {
+			if owned >= 0 {
+				_, deleteErr := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(desired.ID), nil)
+				return deleteErr
+			}
+			return nil
+		} else if owned >= 0 {
+			_, patchErr := m.caddyClient.apiRequest(host, "PATCH", caddyIDPath(desired.ID), desired)
+			return patchErr
+		} else if legacy >= 0 {
+			_, patchErr := m.caddyClient.apiRequest(host, "PATCH", fmt.Sprintf("%s/%d", routesPath, legacy), desired)
+			return patchErr
+		}
+		_, postErr := m.caddyClient.apiRequest(host, "POST", routesPath, routeAppendPayload(liveRoutes, desired))
+		return postErr
+	})
+	return status, err
+}
+
+// routeAppendPayload preserves Caddy's routes array shape when the routes key
+// is absent and GET returns JSON null. When the array exists, POSTing one route
+// appends it without replacing unrelated routes.
+func routeAppendPayload(routes []*Route, route *Route) interface{} {
+	if routes == nil {
+		return []*Route{route}
+	}
+	return route
+}
+
+func reconcileRouteStatus(routes []*Route, desired *Route, serviceHost string, hasDesiredUpstreams bool) (ReconcileStatus, int, int) {
+	ownedIndex, legacyIndex := -1, -1
+	for i, route := range routes {
+		if route == nil {
+			continue
+		}
+		if desired != nil && route.ID == desired.ID {
+			ownedIndex = i
+			break
+		}
+		if hasDesiredUpstreams && route.ID == "" && legacyIndex < 0 && routeMatchesHost(route, serviceHost) {
+			legacyIndex = i
+		}
+	}
+	if ownedIndex >= 0 {
+		if hasDesiredUpstreams && routesEquivalent(routes[ownedIndex], desired) {
+			return ReconcileInSync, ownedIndex, legacyIndex
+		}
+		return ReconcileStale, ownedIndex, legacyIndex
+	}
+	if legacyIndex >= 0 {
+		return ReconcileLegacy, ownedIndex, legacyIndex
+	}
+	if !hasDesiredUpstreams {
+		return ReconcileInSync, ownedIndex, legacyIndex
+	}
+	return ReconcileMissing, ownedIndex, legacyIndex
+}
+
+func routesEquivalent(actual, desired *Route) bool {
+	actualCopy := cloneRoute(actual)
+	desiredCopy := cloneRoute(desired)
+	if actualCopy == nil || desiredCopy == nil {
+		return actualCopy == desiredCopy
+	}
+	actualHandler, _, actualOK := reverseProxyHandler(actualCopy)
+	desiredHandler, _, desiredOK := reverseProxyHandler(desiredCopy)
+	if actualOK != desiredOK {
+		return false
+	}
+	if actualOK {
+		if !validUpstreams(actualHandler.Upstreams) || !validUpstreams(desiredHandler.Upstreams) {
+			return false
+		}
+		sort.Slice(actualHandler.Upstreams, func(i, j int) bool { return actualHandler.Upstreams[i].Dial < actualHandler.Upstreams[j].Dial })
+		sort.Slice(desiredHandler.Upstreams, func(i, j int) bool { return desiredHandler.Upstreams[i].Dial < desiredHandler.Upstreams[j].Dial })
+		if selectionPolicy(actualHandler) == "random" && selectionPolicy(desiredHandler) == "round_robin" && uniformUpstreamMultiplicity(actualHandler.Upstreams) {
+			actualHandler.LoadBalancing.SelectionPolicy.Policy = "round_robin"
+		}
+	}
+	return reflect.DeepEqual(actualCopy, desiredCopy)
+}
+
+func validUpstreams(upstreams []*Upstream) bool {
+	for _, upstream := range upstreams {
+		if upstream == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneRoute(route *Route) *Route {
+	if route == nil {
+		return nil
+	}
+	data, err := json.Marshal(route)
+	if err != nil {
+		return nil
+	}
+	var cloned Route
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return nil
+	}
+	return &cloned
+}
+
+func selectionPolicy(handler *Handler) string {
+	if handler == nil || handler.LoadBalancing == nil || handler.LoadBalancing.SelectionPolicy == nil {
+		return ""
+	}
+	return handler.LoadBalancing.SelectionPolicy.Policy
+}
+
+func uniformUpstreamMultiplicity(upstreams []*Upstream) bool {
+	counts := make(map[string]int)
+	for _, upstream := range upstreams {
+		if upstream == nil {
+			return false
+		}
+		counts[upstream.Dial]++
+	}
+	want := 0
+	for _, count := range counts {
+		if want == 0 {
+			want = count
+		} else if count != want {
+			return false
+		}
+	}
+	return len(counts) > 0
+}
+
+func serviceRoutes(config *CaddyConfig) []*Route {
+	if config == nil || config.Apps == nil || config.Apps.HTTP == nil || config.Apps.HTTP.Servers["srv0"] == nil {
+		return nil
+	}
+	return config.Apps.HTTP.Servers["srv0"].Routes
 }
 
 // DeregisterService removes a service from the proxy using route-specific
@@ -1087,7 +1314,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 			if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
 				for i, r := range routes {
 					if routeMatchesHost(r, serviceHost) {
-						routePath := fmt.Sprintf("%s/%d", routesPath, i)
+						routePath := routeAPIPath(routesPath, i, r)
 						if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
 							return nil
 						}
@@ -1223,10 +1450,10 @@ func (m *Manager) modifyUpstreams(host, serviceHost string, transform func([]*Up
 		if handler, handlerIndex, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok {
 			handler.Upstreams = transform(handler.Upstreams)
 
-			upstreamsPath := fmt.Sprintf("%s/%d/handle/%d/upstreams", routesPath, i, handlerIndex)
+			upstreamsPath := handlerAPIPath(routesPath, i, handlerIndex, handler) + "/upstreams"
 			_, err := m.caddyClient.apiRequest(host, "PATCH", upstreamsPath, handler.Upstreams)
 			if err != nil {
-				routePath := fmt.Sprintf("%s/%d", routesPath, i)
+				routePath := routeAPIPath(routesPath, i, route)
 				if _, routeErr := m.caddyClient.apiRequest(host, "PATCH", routePath, route); routeErr != nil {
 					return m.modifyUpstreamsFull(host, serviceHost, transform)
 				}
@@ -1351,7 +1578,13 @@ func (m *Manager) GetUpstreamRequestCount(host, upstream string) (int, error) {
 }
 
 func routeMatchesHost(route *Route, host string) bool {
+	if route == nil {
+		return false
+	}
 	for _, match := range route.Match {
+		if match == nil {
+			continue
+		}
 		for _, h := range match.Host {
 			if h == host {
 				return true
@@ -1359,6 +1592,71 @@ func routeMatchesHost(route *Route, host string) bool {
 		}
 	}
 	return false
+}
+
+func ensureNoForeignHostOwner(routes []*Route, desired *Route) error {
+	if desired == nil {
+		return nil
+	}
+	desiredHosts := make(map[string]struct{})
+	for _, match := range desired.Match {
+		if match == nil {
+			continue
+		}
+		for _, host := range match.Host {
+			desiredHosts[host] = struct{}{}
+		}
+	}
+	for _, route := range routes {
+		if route == nil || route.ID == "" || route.ID == desired.ID {
+			continue
+		}
+		for host := range desiredHosts {
+			if routeMatchesHost(route, host) {
+				return fmt.Errorf("host %s is already owned by Caddy route %s", host, route.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func routesHaveSameOwner(existing, desired *Route, fallbackHost string) bool {
+	if existing != nil && desired != nil && existing.ID != "" && existing.ID == desired.ID {
+		return true
+	}
+	return existing != nil && existing.ID == "" && routeMatchesHost(existing, fallbackHost)
+}
+
+func serviceRouteID(service string) string {
+	if service == "" {
+		return ""
+	}
+	return azudRouteIDPrefix + service
+}
+
+func serviceHandlerID(service string) string {
+	if service == "" {
+		return ""
+	}
+	return azudHandlerIDPrefix + service
+}
+
+func caddyIDPath(id string) string {
+	return "/id/" + url.PathEscape(id)
+}
+
+func routeAPIPath(routesPath string, routeIndex int, route *Route) string {
+	if route != nil && route.ID != "" {
+		return caddyIDPath(route.ID)
+	}
+	return fmt.Sprintf("%s/%d", routesPath, routeIndex)
+}
+
+func handlerAPIPath(routesPath string, routeIndex, handlerIndex int, handler *Handler) string {
+	if handler != nil && handler.ID != "" {
+		return caddyIDPath(handler.ID)
+	}
+	return fmt.Sprintf("%s/%d/handle/%d", routesPath, routeIndex, handlerIndex)
 }
 
 // BootAll starts the proxy on multiple hosts in parallel.
@@ -1500,7 +1798,7 @@ func (m *Manager) modifyRoute(host, serviceHost string, transform func(*Handler)
 		if handler, _, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok {
 			transform(handler)
 
-			routePath := fmt.Sprintf("%s/%d", routesPath, i)
+			routePath := routeAPIPath(routesPath, i, route)
 			if _, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route); err != nil {
 				return m.modifyRouteFull(host, serviceHost, transform)
 			}

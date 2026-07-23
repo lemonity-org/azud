@@ -412,6 +412,20 @@ View proxy logs.
 Show proxy status and route count.
 **Flags:** `--host`
 
+#### `azud proxy reconcile`
+Compare the configured service, running Azud-managed web containers, persisted
+canary state, and the service's ID-owned Caddy route.
+
+```bash
+azud proxy reconcile --check
+azud proxy reconcile --repair
+```
+
+`--check` is read-only and exits nonzero when drift is present. `--repair`
+creates, updates, adopts a legacy ID-less route, or removes a stale ID-owned
+route. Routes owned by other IDs and manual routes are left untouched.
+**Flags:** exactly one of `--check` or `--repair`; optional `--host`.
+
 #### `azud proxy remove`
 Remove the proxy container.
 **Flags:** `--host`, `--force`
@@ -564,8 +578,10 @@ proxy:
   acme_email: ops@example.com   # Required when SSL is enabled
   # rootful: true               # Run proxy with rootful Podman (supports 80/443 with rootless app mode)
   app_port: 3000                # Container port
+  upstream_protocol: http       # http, h2c, or https
   healthcheck:
     path: /up
+    # readiness_cmd: "grpc_health_probe -addr 127.0.0.1:3000"
     interval: 3s
 ```
 

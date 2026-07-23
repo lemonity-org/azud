@@ -228,6 +228,10 @@ type ProxyConfig struct {
 	// Application port inside container
 	AppPort int `yaml:"app_port"`
 
+	// Protocol Caddy uses to communicate with application upstreams.
+	// Supported values are http, h2c, and https.
+	UpstreamProtocol string `yaml:"upstream_protocol"`
+
 	// HTTP port for proxy (default 80)
 	HTTPPort int `yaml:"http_port"`
 
@@ -326,6 +330,10 @@ type HealthcheckConfig struct {
 	// Readiness probe path: determines when the container can accept traffic.
 	// Used during deployment to gate proxy registration. Falls back to Path if empty.
 	ReadinessPath string `yaml:"readiness_path"`
+
+	// Custom readiness command executed inside the container during deployment.
+	// When set, it takes precedence over ReadinessPath.
+	ReadinessCmd string `yaml:"readiness_cmd"`
 
 	// Liveness probe path: determines if the container is still functioning.
 	// Used by Podman HEALTHCHECK and Caddy active health checks. Falls back to Path if empty.

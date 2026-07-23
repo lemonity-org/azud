@@ -366,7 +366,7 @@ func scaleUp(cm *podman.ContainerManager, im *podman.ImageManager, pm *proxy.Man
 		created = append(created, containerName)
 
 		if deploy.IsProxyRole(role) {
-			if cfg.Proxy.Healthcheck.GetReadinessPath() != "" {
+			if deploy.HasReadinessProbe(cfg) {
 				if err := deploy.WaitForContainerReady(cfg, podmanClient, sshClient, host, containerName); err != nil {
 					return failWithCleanup(fmt.Errorf("instance %s is not ready: %w", containerName, err))
 				}

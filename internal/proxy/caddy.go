@@ -61,6 +61,7 @@ type HTTPServer struct {
 
 // Route defines a routing rule
 type Route struct {
+	ID       string     `json:"@id,omitempty"`
 	Match    []*Match   `json:"match,omitempty"`
 	Handle   []*Handler `json:"handle,omitempty"`
 	Terminal bool       `json:"terminal,omitempty"`
@@ -74,6 +75,7 @@ type Match struct {
 
 // Handler defines how to handle matched requests
 type Handler struct {
+	ID        string      `json:"@id,omitempty"`
 	Handler   string      `json:"handler"`
 	Upstreams []*Upstream `json:"upstreams,omitempty"`
 
@@ -149,10 +151,16 @@ type HeaderOps struct {
 
 // Transport configures the HTTP transport
 type Transport struct {
-	Protocol              string `json:"protocol,omitempty"`
-	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty"`
-	ReadTimeout           string `json:"read_timeout,omitempty"`
+	Protocol              string             `json:"protocol,omitempty"`
+	ResponseHeaderTimeout string             `json:"response_header_timeout,omitempty"`
+	ReadTimeout           string             `json:"read_timeout,omitempty"`
+	Versions              []string           `json:"versions,omitempty"`
+	TLS                   *UpstreamTLSConfig `json:"tls,omitempty"`
 }
+
+// UpstreamTLSConfig enables TLS with Caddy's secure defaults. Additional
+// trust and SNI controls can be added here without changing the route shape.
+type UpstreamTLSConfig struct{}
 
 // AutoHTTPSConfig configures automatic HTTPS behavior.
 type AutoHTTPSConfig struct {

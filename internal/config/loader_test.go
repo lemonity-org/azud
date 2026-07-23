@@ -416,6 +416,24 @@ func TestMergeConfigs_ResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestMergeConfigs_UpstreamProtocolAndReadinessCommand(t *testing.T) {
+	base := &Config{}
+	dest := &Config{Proxy: ProxyConfig{
+		UpstreamProtocol: "h2c",
+		Healthcheck: HealthcheckConfig{
+			ReadinessCmd: "grpc_health_probe -addr 127.0.0.1:3000",
+		},
+	}}
+
+	merged := mergeConfigs(base, dest, nil)
+	if merged.Proxy.UpstreamProtocol != "h2c" {
+		t.Fatalf("upstream protocol = %q", merged.Proxy.UpstreamProtocol)
+	}
+	if merged.Proxy.Healthcheck.ReadinessCmd != "grpc_health_probe -addr 127.0.0.1:3000" {
+		t.Fatalf("readiness command = %q", merged.Proxy.Healthcheck.ReadinessCmd)
+	}
+}
+
 func TestMergeConfigs_ReplaceAliasesWithNewValues(t *testing.T) {
 	base := &Config{
 		Aliases: map[string]string{"deploy": "push", "logs": "tail"},

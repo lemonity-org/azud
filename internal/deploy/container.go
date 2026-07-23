@@ -186,10 +186,17 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 	deadline := time.Now().Add(timeout)
 	checkInterval := 2 * time.Second
 
-	// Use readiness path for deployment checks
+	// A custom readiness command runs inside the target container and takes
+	// precedence over the built-in HTTP probe.
+	readinessCmd := ReadinessCommand(cfg)
 	readinessPath := cfg.Proxy.Healthcheck.GetReadinessPath()
-	readinessCandidates := BuildHTTPCheckExecCandidates(container, cfg.Proxy.AppPort, readinessPath)
-	readinessHelper := BuildHTTPCheckHelperCommand(container, cfg.Proxy.AppPort, readinessPath, cfg.Proxy.Healthcheck.HelperImage, cfg.Proxy.Healthcheck.HelperPull)
+	var readinessCandidates []string
+	readinessHelper := ""
+	if readinessCmd == "" {
+		readinessCandidates = BuildHTTPCheckExecCandidates(container, cfg.Proxy.AppPort, readinessPath)
+		readinessHelper = BuildHTTPCheckHelperCommand(container, cfg.Proxy.AppPort, readinessPath, cfg.Proxy.Healthcheck.HelperImage, cfg.Proxy.Healthcheck.HelperPull)
+	}
+	readinessConfigured := readinessCmd != "" || readinessPath != ""
 	livenessEnabled := LivenessCommand(cfg) != ""
 
 	for time.Now().Before(deadline) {
@@ -207,8 +214,8 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 					if !unsupported {
 						return fmt.Errorf("container liveness check failed (unhealthy)")
 					}
-					if readinessPath == "" {
-						return fmt.Errorf("container liveness check failed and readiness path is not configured")
+					if !readinessConfigured {
+						return fmt.Errorf("container liveness check failed and readiness probe is not configured")
 					}
 				}
 			}
@@ -216,10 +223,12 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 
 		// Check readiness probe (can the container accept traffic?)
 		readinessHealthy := false
-		if readinessPath != "" {
+		if readinessCmd != "" {
+			readinessHealthy = readinessCommandProbe(podmanClient, host, container, readinessCmd)
+		} else if readinessPath != "" {
 			readinessHealthy = readinessProbe(sshClient, host, readinessCandidates, readinessHelper)
 		}
-		if probeAdmitsTraffic(readinessPath != "", readinessHealthy, livenessHealthy) {
+		if probeAdmitsTraffic(readinessConfigured, readinessHealthy, livenessHealthy) {
 			return nil
 		}
 
@@ -265,6 +274,16 @@ func readinessProbe(sshClient *ssh.Client, host string, candidates []string, hel
 	}
 
 	return false
+}
+
+func readinessCommandProbe(podmanClient *podman.Client, host, container, command string) bool {
+	commandArgs := parseCommandArgs(command)
+	if len(commandArgs) == 0 {
+		return false
+	}
+	args := append([]string{"exec", container}, commandArgs...)
+	result, err := podmanClient.Execute(host, args...)
+	return err == nil && result.ExitCode == 0
 }
 
 func healthcheckUnsupported(podmanClient *podman.Client, host, container string) bool {

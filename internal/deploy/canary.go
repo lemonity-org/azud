@@ -317,8 +317,7 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 		c.log.HostPhase(host, phases)
 
 		// Wait for readiness check
-		readinessPath := c.cfg.Proxy.Healthcheck.GetReadinessPath()
-		if !opts.SkipHealthCheck && readinessPath != "" {
+		if !opts.SkipHealthCheck && HasReadinessProbe(c.cfg) {
 			c.log.Host(host, "Waiting for canary readiness check...")
 
 			if c.cfg.Deploy.ReadinessDelay > 0 {

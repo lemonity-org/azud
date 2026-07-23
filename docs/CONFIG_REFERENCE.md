@@ -41,9 +41,11 @@ proxy:
   ssl: true
   acme_email: ops@example.com
   app_port: 3000
+  upstream_protocol: http # http, h2c, or https
   healthcheck:
     path: /up
     readiness_path: /ready
+    # readiness_cmd: "grpc_health_probe -addr 127.0.0.1:3000"
     liveness_path: /live
     interval: 3s
 ```
@@ -52,10 +54,22 @@ Other useful fields:
 
 - `ssl_redirect`, `acme_email`, `acme_staging`
 - `http_port`, `https_port`
+- `upstream_protocol` (`http`, `h2c`, or `https`)
 - `rootful` (run proxy container with rootful Podman)
 - `response_timeout`, `response_header_timeout`
 - `buffering`, `forward_headers`
 - `logging` (redaction and toggles)
+
+`readiness_cmd` runs inside the application container and takes precedence
+over `readiness_path`. A zero exit status admits the container to traffic. Use
+it with tools such as `grpc_health_probe` or an application-specific command.
+`liveness_cmd` remains the independent, continuously running Podman health
+check. When it is set, Azud does not configure Caddy's HTTP active health check.
+
+`upstream_protocol` controls only the Caddy-to-application connection. `h2c`
+supports plaintext HTTP/2 applications such as typical gRPC containers;
+`https` requires the application certificate to be trusted and valid for the
+container hostname used as the upstream address.
 
 Note:
 - With `podman.rootless: true` and `proxy.rootful: false`, proxy

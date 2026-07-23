@@ -1243,6 +1243,26 @@ func TestValidate_ResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestValidate_UpstreamProtocol(t *testing.T) {
+	cfg := &Config{
+		Service: "test",
+		Image:   "test:latest",
+		Servers: map[string]RoleConfig{
+			"web": {Hosts: []string{"localhost"}},
+		},
+		Proxy: ProxyConfig{
+			Host:             "test.example.com",
+			UpstreamProtocol: "ftp",
+		},
+		SSH: SSHConfig{Port: 22},
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "upstream_protocol") {
+		t.Fatalf("expected upstream_protocol error, got %v", err)
+	}
+}
+
 func TestValidate_BuilderSecretsFormat(t *testing.T) {
 	cfg := &Config{
 		Service: "test",

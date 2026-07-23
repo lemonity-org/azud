@@ -63,6 +63,30 @@ func TestLivenessCommandModes(t *testing.T) {
 	}
 }
 
+func TestReadinessCommandTakesPrecedenceOverDefaultPath(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Proxy.Healthcheck.Path = "/up"
+	cfg.Proxy.Healthcheck.ReadinessCmd = "grpc_health_probe -addr 127.0.0.1:3000"
+
+	if got := ReadinessCommand(cfg); got != "grpc_health_probe -addr 127.0.0.1:3000" {
+		t.Fatalf("readiness command = %q", got)
+	}
+	if !HasReadinessProbe(cfg) {
+		t.Fatal("custom readiness command was not recognized as a readiness probe")
+	}
+}
+
+func TestHasReadinessProbeModes(t *testing.T) {
+	cfg := &config.Config{}
+	if HasReadinessProbe(cfg) {
+		t.Fatal("empty healthcheck unexpectedly has readiness")
+	}
+	cfg.Proxy.Healthcheck.ReadinessPath = "/ready"
+	if !HasReadinessProbe(cfg) {
+		t.Fatal("readiness path was not recognized")
+	}
+}
+
 func TestCommandNotFoundClassification(t *testing.T) {
 	for _, output := range []string{
 		"curl: not found",
