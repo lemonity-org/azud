@@ -1016,7 +1016,7 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	}
 
 	if service.ForwardHeaders || service.HTTPS {
-		handler.ProxyHeaders = &HeadersConfig{
+		handler.Headers = &HeadersConfig{
 			Request: &HeaderOps{
 				Set: map[string][]string{
 					"X-Forwarded-For":   {"{http.request.remote.host}"},
