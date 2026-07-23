@@ -5,6 +5,7 @@ Start here if you are new:
 - `docs/GETTING_STARTED.md` - first deploy walkthrough
 - `docs/CONFIG_REFERENCE.md` - essential config options
 - `docs/CLI_REFERENCE.md` - full CLI and config reference
+- `docs/OUTPUT.md` - terminal, pipe, and CI output contract
 
 ## By Task
 
@@ -21,5 +22,6 @@ Start here if you are new:
 - Command cheatsheet: `docs/CHEATSHEET.md`
 - Advanced configs and recipes: `docs/ADVANCED_USAGE.md`
 - CI/CD pipelines: `docs/CI_CD.md`
+- Output and automation: `docs/OUTPUT.md`
 - Design philosophy: `docs/DESIGN_PHILOSOPHY.md`
 - FAQs: `docs/FAQ.md`

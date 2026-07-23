@@ -23,19 +23,12 @@ var (
 
 	rootCmd = &cobra.Command{
 		Use:   "azud",
-		Short: "Deploy web apps anywhere with zero downtime",
-		Long: `Azud is a deployment tool for containerized web applications.
+		Short: "Operate Podman applications with zero downtime",
+		Long: `Azud deploys containerized applications to Podman hosts over SSH.
 
-It deploys your application to any server with Podman, providing:
-  - Zero-downtime deployments
-  - Multi-server support with roles
-  - Automatic SSL via Let's Encrypt
-  - Accessory management (databases, caches, etc.)
-
-Get started:
-  azud init       Create a new deployment configuration
-  azud setup      Bootstrap servers and deploy
-  azud deploy     Deploy your application`,
+It coordinates multi-host roles, health-checked traffic changes, Caddy TLS,
+accessories, cron jobs, deployment history, and rollback from one declarative
+configuration.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -56,6 +49,8 @@ Get started:
 )
 
 func init() {
+	configureHelp(rootCmd)
+
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to config file (default: config/deploy.yml)")
 	rootCmd.PersistentFlags().StringVarP(&destination, "destination", "d", "", "Destination environment (e.g., staging, production)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 var initCmd = &cobra.Command{
@@ -43,10 +45,14 @@ func init() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
+	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
+
 	// Check if config already exists
 	if existingConfig := findConfigFile(); existingConfig != "" {
 		return fmt.Errorf("configuration already exists at %s", existingConfig)
 	}
+
+	log.Header("Initialize / configuration")
 
 	// Create directories
 	dirs := []string{
@@ -70,14 +76,14 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if err := os.WriteFile(configPath, []byte(getConfigTemplate(initGitHubActions)), 0644); err != nil {
 		return fmt.Errorf("failed to create %s: %w", configPath, err)
 	}
-	fmt.Printf("Created %s\n", configPath)
+	log.Success("Created %s", configPath)
 
 	// Create secrets file
 	secretsPath := filepath.Join(".azud", "secrets")
 	if err := os.WriteFile(secretsPath, []byte(getSecretsTemplate()), 0600); err != nil {
 		return fmt.Errorf("failed to create %s: %w", secretsPath, err)
 	}
-	fmt.Printf("Created %s\n", secretsPath)
+	log.Success("Created %s", secretsPath)
 
 	// Create sample hook scripts
 	hooks := map[string]string{
@@ -99,7 +105,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to create hook %s: %w", hookPath, err)
 		}
 	}
-	fmt.Printf("Created hooks in .azud/hooks/\n")
+	log.Success("Created hooks in .azud/hooks/")
 
 	// Create GitHub Actions workflow if requested
 	if initGitHubActions {
@@ -107,27 +113,27 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if err := os.WriteFile(workflowPath, []byte(getGitHubActionsWorkflow()), 0644); err != nil {
 			return fmt.Errorf("failed to create %s: %w", workflowPath, err)
 		}
-		fmt.Printf("Created %s\n", workflowPath)
+		log.Success("Created %s", workflowPath)
 	}
 
 	// Protect the generated secrets file even in a brand-new repository.
-	if err := appendToGitignore(); err != nil {
+	if err := appendToGitignore(log); err != nil {
 		return fmt.Errorf("failed to protect .azud/secrets in .gitignore: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Println("Azud configuration initialized!")
-	fmt.Println()
-	fmt.Println("Next steps:")
-	fmt.Println("  1. Edit config/deploy.yml with your settings")
-	fmt.Println("  2. Add your secrets to .azud/secrets")
+	log.Header("Next actions")
+	total := 3
 	if initGitHubActions {
-		fmt.Println("  3. Configure GitHub secrets (AZUD_SSH_KEY, AZUD_REGISTRY_PASSWORD)")
-		fmt.Println("  4. Push to main branch to trigger deployment")
+		total = 4
+	}
+	log.Step(1, total, "Edit config/deploy.yml")
+	log.Step(2, total, "Add secrets to .azud/secrets")
+	if initGitHubActions {
+		log.Step(3, total, "Configure GitHub secrets: AZUD_SSH_KEY, AZUD_REGISTRY_PASSWORD")
+		log.Step(4, total, "Push to main to start the workflow")
 	} else {
-		fmt.Println("  3. Run 'azud setup' to bootstrap servers and deploy")
-		fmt.Println("")
-		fmt.Println("For CI/CD deployment, run 'azud init --github-actions' in a new project")
+		log.Step(3, total, "Run azud setup")
+		log.Info("CI scaffold: run azud init --github-actions in a new project")
 	}
 
 	return nil
@@ -531,7 +537,7 @@ echo "Running post-rollback hook..."
 `
 }
 
-func appendToGitignore() error {
+func appendToGitignore(log *output.Logger) error {
 	content, err := os.ReadFile(".gitignore")
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -554,7 +560,7 @@ func appendToGitignore() error {
 	if _, err := f.WriteString(prefix + "# Azud secrets\n.azud/secrets\n"); err != nil {
 		return err
 	}
-	fmt.Println("Added .azud/secrets to .gitignore")
+	log.Success("Added .azud/secrets to .gitignore")
 	return nil
 }
 
@@ -618,6 +624,7 @@ jobs:
 
       - name: Deploy
         env:
+          NO_COLOR: "1"
           AZUD_SECRET_AZUD_REGISTRY_PASSWORD: ${{ secrets.AZUD_REGISTRY_PASSWORD }}
           AZUD_SECRET_DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
         run: azud deploy

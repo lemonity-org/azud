@@ -10,6 +10,25 @@ The following flags are available for all commands:
 *   `-d, --destination string`: Destination environment (e.g., `staging`, `production`). Merges configuration from `config/deploy.staging.yml`.
 *   `-v, --verbose`: Enable verbose output for debugging.
 
+## Output and Automation
+
+Interactive output uses compact status labels and functional ANSI color when
+the destination supports it. Pipes, files, GitHub Actions logs, `TERM=dumb`,
+and non-TTY destinations receive deterministic ASCII framing without ANSI
+escapes; UTF-8 values remain intact. `NO_COLOR` and `CLICOLOR=0` also disable
+color.
+
+Use stable machine surfaces instead of scraping display output:
+
+```bash
+azud version --short
+azud env get DATABASE_PASSWORD
+azud ssh trust --template
+```
+
+See [`OUTPUT.md`](OUTPUT.md) for render modes, labels, and compatibility
+guarantees.
+
 ## Commands
 
 ### Initialization
@@ -531,6 +550,8 @@ Display the resolved configuration (merging destination-specific configs).
 
 #### `azud version`
 Show the Azud CLI version.
+
+Use `azud version --short` to print only the unstyled version value.
 
 ---
 

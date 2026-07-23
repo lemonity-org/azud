@@ -32,7 +32,7 @@ Example:
 }
 
 var serverExecCmd = &cobra.Command{
-	Use:   "exec [command]",
+	Use:   "exec <command>",
 	Short: "Execute command on servers",
 	Long: `Execute a command on one or more servers.
 
@@ -126,18 +126,18 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 	for _, result := range results {
 		if result.Success() {
 			output.DefaultLogger.HostSuccess(result.Host, "")
-			if result.Stdout != "" {
-				output.DefaultLogger.Output(result.Stdout)
-			}
 		} else {
 			hasErrors = true
 			output.DefaultLogger.HostError(result.Host, "exit code %d", result.ExitCode)
-			if result.Stderr != "" {
-				output.DefaultLogger.Output(result.Stderr)
-			}
-			if result.Error != nil {
-				output.DefaultLogger.Output(result.Error.Error())
-			}
+		}
+		if result.Stdout != "" {
+			output.DefaultLogger.Output(result.Stdout)
+		}
+		if result.Stderr != "" {
+			output.DefaultLogger.OutputError(result.Stderr)
+		}
+		if result.Error != nil {
+			output.DefaultLogger.OutputError(result.Error.Error())
 		}
 	}
 

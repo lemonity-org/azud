@@ -64,7 +64,7 @@ Example:
 }
 
 var cronLogsCmd = &cobra.Command{
-	Use:   "logs [name]",
+	Use:   "logs <name>",
 	Short: "View cron job logs",
 	Args:  cobra.ExactArgs(1),
 	Long: `View logs from a cron job container.
@@ -76,7 +76,7 @@ Example:
 }
 
 var cronRunCmd = &cobra.Command{
-	Use:   "run [name]",
+	Use:   "run <name>",
 	Short: "Run a cron job immediately",
 	Args:  cobra.ExactArgs(1),
 	Long: `Execute a cron job immediately without waiting for its schedule.
@@ -375,7 +375,7 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	log.Header("Running Cron Job: %s", name)
+	log.Header("Cron / run / %s", name)
 	log.Host(host, "Executing: %s", cronConfig.Command)
 
 	// Build container config

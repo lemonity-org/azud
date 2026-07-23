@@ -2,11 +2,12 @@ package output
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
 )
 
@@ -14,132 +15,228 @@ import (
 type ColorProfile int
 
 const (
-	ProfileNone      ColorProfile = iota // No color (NO_COLOR, non-TTY, dumb terminal)
-	ProfileBasic                         // 16 basic ANSI colors
-	ProfileANSI256                       // 256-color palette
-	ProfileTrueColor                     // 24-bit RGB true color
+	ProfileNone      ColorProfile = iota // No ANSI styling.
+	ProfileBasic                         // 16 basic ANSI colors.
+	ProfileANSI256                       // 256-color palette.
+	ProfileTrueColor                     // 24-bit RGB true color.
 )
 
-// Symbols used throughout the CLI output.
+// Symbols retained for compatibility with callers that build custom output.
+// Structured logger output selects an ASCII fallback when Unicode is unsafe.
 const (
 	SymInfo    = "●"
 	SymSuccess = "✓"
 	SymWarn    = "▲"
-	SymError   = "✗"
-	SymDebug   = "◦"
-	SymCommand = "▸"
-	SymHeader  = "◆"
-	SymHost    = "◈"
+	SymError   = "×"
+	SymDebug   = "·"
+	SymCommand = "›"
+	SymHeader  = "■"
+	SymHost    = "◆"
 	SymLine    = "───"
 	SymFilled  = "█"
-	SymPending = "○"
+	SymEmpty   = "░"
+	SymPending = "□"
+	SymRail    = "│"
 )
 
-// PastelColor holds color values for every supported profile level.
+// PastelColor is retained as the public color value type for source
+// compatibility. The active palette is semantic rather than pastel: color
+// classifies state and never carries meaning alone.
 type PastelColor struct {
 	R, G, B   uint8
 	ANSI256   uint8
-	ANSIBasic color.Attribute
+	ANSIBasic uint8
 }
 
-// Sprint returns text colored according to the active profile.
+// Sprint returns text colored according to stdout's active profile.
 func (c PastelColor) Sprint(text string) string {
-	return colorize(c, text, false)
+	return c.render(text, false, Profile())
 }
 
-// Bold returns bold-colored text according to the active profile.
+// Bold returns bold, colored text according to stdout's active profile.
 func (c PastelColor) Bold(text string) string {
-	return colorize(c, text, true)
+	return c.render(text, true, Profile())
 }
 
-// Palette — pastel "Bubblegum" colors.
+func (c PastelColor) render(text string, bold bool, profile ColorProfile) string {
+	if profile == ProfileNone || text == "" {
+		return text
+	}
+
+	weight := ""
+	if bold {
+		weight = "1;"
+	}
+
+	switch profile {
+	case ProfileTrueColor:
+		return fmt.Sprintf("\x1b[%s38;2;%d;%d;%dm%s\x1b[0m", weight, c.R, c.G, c.B, text)
+	case ProfileANSI256:
+		return fmt.Sprintf("\x1b[%s38;5;%dm%s\x1b[0m", weight, c.ANSI256, text)
+	case ProfileBasic:
+		return fmt.Sprintf("\x1b[%s%dm%s\x1b[0m", weight, c.ANSIBasic, text)
+	default:
+		return text
+	}
+}
+
+// Functional palette. Body copy inherits the terminal foreground so it stays
+// legible on both light and dark terminal themes.
 var (
-	Lavender = PastelColor{R: 0xB4, G: 0xA7, B: 0xD6, ANSI256: 146, ANSIBasic: color.FgCyan}
-	Mint     = PastelColor{R: 0xA8, G: 0xE6, B: 0xCF, ANSI256: 158, ANSIBasic: color.FgGreen}
-	Peach    = PastelColor{R: 0xFF, G: 0xDA, B: 0xB9, ANSI256: 223, ANSIBasic: color.FgYellow}
-	Rose     = PastelColor{R: 0xFF, G: 0x6B, B: 0x6B, ANSI256: 210, ANSIBasic: color.FgRed}
-	SkyBlue  = PastelColor{R: 0x89, G: 0xCF, B: 0xF0, ANSI256: 117, ANSIBasic: color.FgCyan}
-	Mauve    = PastelColor{R: 0xC4, G: 0xA7, B: 0xE7, ANSI256: 183, ANSIBasic: color.FgMagenta}
-	Pink     = PastelColor{R: 0xF5, G: 0xA9, B: 0xB8, ANSI256: 218, ANSIBasic: color.FgMagenta}
+	Blue   = PastelColor{R: 0x00, G: 0x2D, B: 0xCE, ANSI256: 20, ANSIBasic: 34}
+	Green  = PastelColor{R: 0x00, G: 0x79, B: 0x4C, ANSI256: 29, ANSIBasic: 32}
+	Yellow = PastelColor{R: 0xFF, G: 0xB7, B: 0x00, ANSI256: 214, ANSIBasic: 33}
+	Red    = PastelColor{R: 0xFF, G: 0x41, B: 0x36, ANSI256: 203, ANSIBasic: 31}
+	Gray   = PastelColor{R: 0x88, G: 0x88, B: 0x88, ANSI256: 102, ANSIBasic: 90}
+
+	// Legacy palette aliases. They now map to functional state colors.
+	Lavender = Blue
+	Mint     = Green
+	Peach    = Yellow
+	Rose     = Red
+	SkyBlue  = Blue
+	Mauve    = Blue
+	Pink     = Red
 )
 
-// activeProfile is the detected color profile (computed once).
-var (
-	activeProfile     ColorProfile
-	activeProfileOnce sync.Once
-)
+var profileOverride struct {
+	sync.RWMutex
+	value *ColorProfile
+}
 
-// Profile returns the cached color profile for the current terminal.
+// Profile returns stdout's current color profile.
 func Profile() ColorProfile {
-	activeProfileOnce.Do(func() {
-		activeProfile = detectProfile()
-	})
-	return activeProfile
+	if profile, ok := overriddenProfile(); ok {
+		return profile
+	}
+	return detectProfile()
 }
 
-// SetProfile overrides the detected profile. Useful for tests.
-func SetProfile(p ColorProfile) {
-	activeProfileOnce.Do(func() {}) // ensure Once fires so future calls are no-ops
-	activeProfile = p
+// SetProfile overrides automatic detection. It is intended for tests and
+// embedders that have already negotiated terminal capabilities.
+func SetProfile(profile ColorProfile) {
+	profileOverride.Lock()
+	defer profileOverride.Unlock()
+	value := profile
+	profileOverride.value = &value
 }
 
-// detectProfile inspects environment variables and TTY state.
+// ResetProfile restores automatic terminal detection.
+func ResetProfile() {
+	profileOverride.Lock()
+	defer profileOverride.Unlock()
+	profileOverride.value = nil
+}
+
+func overriddenProfile() (ColorProfile, bool) {
+	profileOverride.RLock()
+	defer profileOverride.RUnlock()
+	if profileOverride.value == nil {
+		return ProfileNone, false
+	}
+	return *profileOverride.value, true
+}
+
+// detectProfile inspects the environment and stdout's terminal capability.
 func detectProfile() ColorProfile {
-	// NO_COLOR convention (https://no-color.org/)
-	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+	return detectProfileForWriter(os.Stdout)
+}
+
+func detectProfileForWriter(writer io.Writer) ColorProfile {
+	if profile, ok := overriddenProfile(); ok {
+		return profile
+	}
+	return detectProfileForCapabilities(isTTYWriter(writer) && supportsANSIWriter(writer), os.LookupEnv)
+}
+
+func detectProfileForCapabilities(tty bool, lookup func(string) (string, bool)) ColorProfile {
+	if _, ok := lookup("NO_COLOR"); ok {
+		return ProfileNone
+	}
+	if value, _ := lookup("CLICOLOR"); value == "0" {
+		return ProfileNone
+	}
+	if !tty {
 		return ProfileNone
 	}
 
-	// Non-TTY → no color
-	if !isTTY() {
-		return ProfileNone
-	}
-
-	term := os.Getenv("TERM")
+	termValue, _ := lookup("TERM")
+	term := strings.ToLower(termValue)
 	if term == "dumb" {
 		return ProfileNone
 	}
 
-	// True-color detection
-	ct := strings.ToLower(os.Getenv("COLORTERM"))
-	if ct == "truecolor" || ct == "24bit" {
+	colorTermValue, _ := lookup("COLORTERM")
+	colorTerm := strings.ToLower(colorTermValue)
+	if colorTerm == "truecolor" || colorTerm == "24bit" {
 		return ProfileTrueColor
 	}
-
-	// 256-color detection
 	if strings.Contains(term, "256color") {
 		return ProfileANSI256
 	}
-
 	return ProfileBasic
 }
 
-// isTTY returns true when stdout is a terminal.
-func isTTY() bool {
-	return isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+func isTTYWriter(writer io.Writer) bool {
+	file, ok := writer.(*os.File)
+	if !ok {
+		return false
+	}
+	return isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd())
 }
 
-// colorize applies the appropriate escape sequence for the active profile.
-func colorize(c PastelColor, text string, isBold bool) string {
-	p := Profile()
-
-	boldPrefix := ""
-	if isBold {
-		boldPrefix = "\033[1m"
+func supportsANSIWriter(writer io.Writer) bool {
+	if runtime.GOOS != "windows" {
+		return true
 	}
-
-	switch p {
-	case ProfileTrueColor:
-		return fmt.Sprintf("%s\033[38;2;%d;%d;%dm%s\033[0m", boldPrefix, c.R, c.G, c.B, text)
-	case ProfileANSI256:
-		return fmt.Sprintf("%s\033[38;5;%dm%s\033[0m", boldPrefix, c.ANSI256, text)
-	case ProfileBasic:
-		printer := color.New(c.ANSIBasic)
-		if isBold {
-			printer.Add(color.Bold)
-		}
-		return printer.Sprint(text)
-	default: // ProfileNone
-		return text
+	file, ok := writer.(*os.File)
+	if !ok {
+		return false
 	}
+	if isatty.IsCygwinTerminal(file.Fd()) {
+		return true
+	}
+	return os.Getenv("WT_SESSION") != "" ||
+		os.Getenv("ANSICON") != "" ||
+		strings.EqualFold(os.Getenv("ConEmuANSI"), "ON") ||
+		strings.Contains(strings.ToLower(os.Getenv("TERM")), "xterm")
+}
+
+func supportsUnicode(writer io.Writer) bool {
+	locale := os.Getenv("LC_ALL")
+	if locale == "" {
+		locale = os.Getenv("LC_CTYPE")
+	}
+	if locale == "" {
+		locale = os.Getenv("LANG")
+	}
+	return supportsUnicodeForCapabilities(
+		isTTYWriter(writer),
+		runtime.GOOS,
+		os.Getenv("TERM"),
+		locale,
+		supportsANSIWriter(writer),
+	)
+}
+
+func supportsUnicodeForCapabilities(tty bool, platform, termName, locale string, windowsANSI bool) bool {
+	if !tty || strings.EqualFold(termName, "dumb") {
+		return false
+	}
+	if platform == "windows" {
+		return windowsANSI
+	}
+	normalized := strings.ToLower(locale)
+	return strings.Contains(normalized, "utf-8") || strings.Contains(normalized, "utf8")
+}
+
+func styleForWriter(writer io.Writer, color PastelColor, text string, bold bool) string {
+	profile := detectProfileForWriter(writer)
+	if profile != ProfileNone {
+		// Text accents use the terminal's semantic ANSI palette even when
+		// richer color is available. That lets light, dark, and high-contrast
+		// themes choose legible values while preserving Azud's state mapping.
+		profile = ProfileBasic
+	}
+	return color.render(text, bold, profile)
 }

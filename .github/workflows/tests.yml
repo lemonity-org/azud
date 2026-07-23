@@ -44,6 +44,20 @@ jobs:
       - name: Run tests
         run: go test -race ./...
 
+      - name: Verify plain CLI output
+        env:
+          NO_COLOR: "1"
+          TERM: dumb
+        run: |
+          go build -o "$RUNNER_TEMP/azud" ./cmd/azud
+          plain_output=$("$RUNNER_TEMP/azud" --help)
+          printf '%s\n' "$plain_output"
+          if printf '%s\n' "$plain_output" | LC_ALL=C grep "$(printf '\033')" >/dev/null; then
+            printf '::error title=Plain output contract failed::azud --help emitted ANSI control bytes\n'
+            exit 1
+          fi
+          test -n "$("$RUNNER_TEMP/azud" version --short)"
+
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
@@ -150,8 +164,14 @@ jobs:
             sleep 1
           done
           if [ "$actual_environment" != "$expected_environment" ]; then
-            printf '::error title=Unexpected SSH target environment::expected %s, got %s\n' \
-              "$expected_environment" "$actual_environment"
+            printf '  ERROR  SSH target environment mismatch\n'
+            printf '         expected: %s\n' "$expected_environment"
+            printf '         actual:   %s\n' "$actual_environment"
+            annotation="expected ${expected_environment}, got ${actual_environment}"
+            annotation=${annotation//'%'/'%25'}
+            annotation=${annotation//$'\r'/'%0D'}
+            annotation=${annotation//$'\n'/'%0A'}
+            printf '::error title=Unexpected SSH target environment::%.2000s\n' "$annotation"
             exit 1
           fi
           if [ "$TARGET_USER" = "deploy" ]; then
@@ -176,7 +196,7 @@ jobs:
           if go test ./... -run TestSetupIntegration -count=1 2>&1 | tee "$test_log"; then
             exit 0
           fi
-          annotation=$(tail -c 60000 "$test_log")
+          annotation=$(tail -c 12000 "$test_log")
           annotation=${annotation//'%'/'%25'}
           annotation=${annotation//$'\r'/'%0D'}
           annotation=${annotation//$'\n'/'%0A'}

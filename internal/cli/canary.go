@@ -93,7 +93,7 @@ Example:
 }
 
 var canaryWeightCmd = &cobra.Command{
-	Use:   "weight [PERCENTAGE]",
+	Use:   "weight <percentage>",
 	Short: "Adjust canary traffic weight",
 	Long: `Adjust the percentage of traffic routed to the canary.
 
@@ -214,17 +214,14 @@ func runCanaryStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	log.StatusBadge("Status:", string(canaryState.Status))
-	log.Info("Version:         %s %s %s",
-		output.Lavender.Bold(canaryState.StableVersion),
-		output.Pink.Sprint("→"),
-		output.Mint.Bold(canaryState.CanaryVersion))
+	log.Info("Version: %s -> %s", canaryState.StableVersion, canaryState.CanaryVersion)
 	log.TrafficBar(canaryState.CurrentWeight,
 		fmt.Sprintf("canary (%s)", canaryState.CanaryVersion),
 		fmt.Sprintf("stable (%s)", canaryState.StableVersion))
 
 	duration := time.Since(canaryState.StartedAt).Truncate(time.Second)
-	log.Info("Duration:        %s (started %s)", duration, canaryState.StartedAt.Format("15:04:05"))
-	log.Info("Hosts:           %d", len(canaryState.Hosts))
+	log.Info("Duration: %s (started %s)", duration, canaryState.StartedAt.Format("15:04:05"))
+	log.Info("Hosts: %d", len(canaryState.Hosts))
 	for _, host := range canaryState.Hosts {
 		log.Host(host, "")
 	}

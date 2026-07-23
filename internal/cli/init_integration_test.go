@@ -106,6 +106,9 @@ func TestInitCreatesGitHubWorkflowAndGitignoreEntry(t *testing.T) {
 		!strings.Contains(string(workflow), "cancel-in-progress: false") {
 		t.Fatalf("generated workflow must persist and serialize durable deployment state")
 	}
+	if !strings.Contains(string(workflow), "NO_COLOR: \"1\"") {
+		t.Fatalf("generated workflow must declare deterministic plain Azud output")
+	}
 
 	if _, err := config.NewLoader("config/deploy.yml", "").Load(); err != nil {
 		t.Fatalf("generated GitHub Actions configuration must validate: %v", err)

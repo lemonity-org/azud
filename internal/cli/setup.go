@@ -57,7 +57,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
-	log.Header("Azud Setup")
+	log.Header("Setup / %s", cfg.Service)
 
 	hosts := setupRuntimeHosts()
 	if len(hosts) == 0 {
@@ -71,7 +71,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 1: Bootstrap servers
 	if !setupSkipBootstrap {
-		log.Header("Step 1: Bootstrap Servers")
+		log.Header("01 / Bootstrap servers")
 		bootstrapper := server.NewBootstrapper(sshClient, log, cfg.Podman.NetworkBackend)
 		if err := bootstrapper.BootstrapAll(hosts); err != nil {
 			return fmt.Errorf("bootstrap failed: %w", err)
@@ -95,13 +95,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 2: Sync secrets. Setup owns the complete first-deploy contract, so
 	// users must not need a separate env push between bootstrap and deploy.
-	log.Header("Step 2: Sync Secrets")
+	log.Header("02 / Sync secrets")
 	if err := runEnvPush(cmd, args); err != nil {
 		return fmt.Errorf("secret sync failed: %w", err)
 	}
 
 	// Step 3: Registry login
-	log.Header("Step 3: Registry Login")
+	log.Header("03 / Registry login")
 	if cfg.Registry.Username != "" {
 		podmanClient := podman.NewClient(sshClient)
 		registryManager := podman.NewRegistryManager(podmanClient)
@@ -135,7 +135,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 4: Start proxy
 	if !setupSkipProxy {
-		log.Header("Step 4: Start Proxy")
+		log.Header("04 / Start proxy")
 		proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
 		proxyConfig := &proxy.ProxyConfig{
@@ -186,7 +186,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 5: Deploy accessories
 	if len(cfg.Accessories) > 0 {
-		log.Header("Step 5: Deploy Accessories")
+		log.Header("05 / Deploy accessories")
 		if err := deployAccessories(sshClient, log); err != nil {
 			return fmt.Errorf("accessory deployment failed: %w", err)
 		}
@@ -194,7 +194,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 6: Build and push
 	if !setupSkipPush {
-		log.Header("Step 6: Build and Push")
+		log.Header("06 / Build and push")
 		if err := runBuild(cmd, args); err != nil {
 			return fmt.Errorf("build failed: %w", err)
 		}
@@ -203,7 +203,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 7: Deploy application
-	log.Header("Step 7: Deploy Application")
+	log.Header("07 / Deploy application")
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	opts := &deploy.DeployOptions{
@@ -214,8 +214,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("deploy failed: %w", err)
 	}
 
-	log.Header("Setup Complete!")
-	log.Success("Your application is now running at:")
+	log.Header("Setup / complete")
+	log.Success("Application available")
 	proxyHosts := cfg.Proxy.AllHosts()
 	if len(proxyHosts) == 0 {
 		log.Warn("No proxy host configured")
@@ -223,9 +223,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 	for _, host := range proxyHosts {
 		if cfg.Proxy.SSL {
-			log.Println("  https://%s", host)
+			log.Info("URL: https://%s", host)
 		} else {
-			log.Println("  http://%s", host)
+			log.Info("URL: http://%s", host)
 		}
 	}
 

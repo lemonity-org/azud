@@ -202,7 +202,7 @@ func (l *Loader) loadSecretsFromFile(cfg *Config) error {
 
 	// Warn if the secrets file is readable by group or others
 	if perm := info.Mode().Perm(); perm&0077 != 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: secrets file %s has insecure permissions %04o (recommended: 0600)\n", secretsPath, perm)
+		fmt.Fprintf(os.Stderr, "  WARN   secrets file %s has insecure permissions %04o (recommended: 0600)\n", secretsPath, perm)
 	}
 
 	file, err := os.Open(secretsPath)

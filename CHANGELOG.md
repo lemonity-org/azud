@@ -11,6 +11,11 @@ release notes for the corresponding signed tag.
 - Added command-based readiness probes for gRPC, TCP, and custom checks.
 - Fixed proxy listener separation so `ssl_redirect: true` delegates port 80
   redirects to Caddy and HTTP-only services never serve plaintext on port 443.
+- Reworked terminal, pipe, installer, Make, and CI output into a compact
+  technical record with semantic status colors, ASCII fallbacks, per-writer
+  capability detection, and narrow-terminal table reflow.
+- Added the stable, unstyled `azud version --short` automation surface and
+  documented the output compatibility contract.
 
 ## 1.0.0 - 2026-07-20
 

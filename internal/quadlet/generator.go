@@ -59,23 +59,23 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	// [Unit] section
 	sb.WriteString("[Unit]\n")
 	if unit.Description != "" {
-		sb.WriteString(fmt.Sprintf("Description=%s\n", sanitizeINIValue(unit.Description)))
+		_, _ = fmt.Fprintf(&sb, "Description=%s\n", sanitizeINIValue(unit.Description))
 	}
 	for _, after := range unit.After {
-		sb.WriteString(fmt.Sprintf("After=%s\n", sanitizeINIValue(after)))
+		_, _ = fmt.Fprintf(&sb, "After=%s\n", sanitizeINIValue(after))
 	}
 	for _, req := range unit.Requires {
-		sb.WriteString(fmt.Sprintf("Requires=%s\n", sanitizeINIValue(req)))
+		_, _ = fmt.Fprintf(&sb, "Requires=%s\n", sanitizeINIValue(req))
 	}
 	sb.WriteString("\n")
 
 	// [Container] section
 	sb.WriteString("[Container]\n")
 	if unit.Image != "" {
-		sb.WriteString(fmt.Sprintf("Image=%s\n", sanitizeINIValue(unit.Image)))
+		_, _ = fmt.Fprintf(&sb, "Image=%s\n", sanitizeINIValue(unit.Image))
 	}
 	if unit.ContainerName != "" {
-		sb.WriteString(fmt.Sprintf("ContainerName=%s\n", sanitizeINIValue(unit.ContainerName)))
+		_, _ = fmt.Fprintf(&sb, "ContainerName=%s\n", sanitizeINIValue(unit.ContainerName))
 	}
 	envKeys := make([]string, 0, len(unit.Environment))
 	for key := range unit.Environment {
@@ -84,19 +84,19 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	sort.Strings(envKeys)
 	for _, key := range envKeys {
 		assignment := sanitizeINIValue(key) + "=" + unit.Environment[key]
-		sb.WriteString(fmt.Sprintf("Environment=%s\n", quoteSystemdWord(assignment, true)))
+		_, _ = fmt.Fprintf(&sb, "Environment=%s\n", quoteSystemdWord(assignment, true))
 	}
 	for _, file := range unit.EnvironmentFile {
-		sb.WriteString(fmt.Sprintf("EnvironmentFile=%s\n", quoteSystemdWord(file, false)))
+		_, _ = fmt.Fprintf(&sb, "EnvironmentFile=%s\n", quoteSystemdWord(file, false))
 	}
 	for _, port := range unit.PublishPort {
-		sb.WriteString(fmt.Sprintf("PublishPort=%s\n", sanitizeINIValue(port)))
+		_, _ = fmt.Fprintf(&sb, "PublishPort=%s\n", sanitizeINIValue(port))
 	}
 	for _, vol := range unit.Volume {
-		sb.WriteString(fmt.Sprintf("Volume=%s\n", sanitizeINIValue(vol)))
+		_, _ = fmt.Fprintf(&sb, "Volume=%s\n", sanitizeINIValue(vol))
 	}
 	for _, net := range unit.Network {
-		sb.WriteString(fmt.Sprintf("Network=%s\n", sanitizeINIValue(net)))
+		_, _ = fmt.Fprintf(&sb, "Network=%s\n", sanitizeINIValue(net))
 	}
 	labelKeys := make([]string, 0, len(unit.Label))
 	for key := range unit.Label {
@@ -105,38 +105,38 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	sort.Strings(labelKeys)
 	for _, key := range labelKeys {
 		assignment := sanitizeINIValue(key) + "=" + unit.Label[key]
-		sb.WriteString(fmt.Sprintf("Label=%s\n", quoteSystemdWord(assignment, true)))
+		_, _ = fmt.Fprintf(&sb, "Label=%s\n", quoteSystemdWord(assignment, true))
 	}
 	if unit.HealthCmd != "" {
-		sb.WriteString(fmt.Sprintf("HealthCmd=%s\n", sanitizeINIValue(unit.HealthCmd)))
+		_, _ = fmt.Fprintf(&sb, "HealthCmd=%s\n", sanitizeINIValue(unit.HealthCmd))
 	}
 	if unit.HealthInterval != "" {
-		sb.WriteString(fmt.Sprintf("HealthInterval=%s\n", sanitizeINIValue(unit.HealthInterval)))
+		_, _ = fmt.Fprintf(&sb, "HealthInterval=%s\n", sanitizeINIValue(unit.HealthInterval))
 	}
 	if unit.Exec != "" {
-		sb.WriteString(fmt.Sprintf("Exec=%s\n", sanitizeINIValue(unit.Exec)))
+		_, _ = fmt.Fprintf(&sb, "Exec=%s\n", sanitizeINIValue(unit.Exec))
 	}
 	for _, arg := range unit.PodmanArgs {
-		sb.WriteString(fmt.Sprintf("PodmanArgs=%s\n", sanitizeINIValue(arg)))
+		_, _ = fmt.Fprintf(&sb, "PodmanArgs=%s\n", sanitizeINIValue(arg))
 	}
 	sb.WriteString("\n")
 
 	// [Service] section
 	sb.WriteString("[Service]\n")
 	if unit.Restart != "" {
-		sb.WriteString(fmt.Sprintf("Restart=%s\n", unit.Restart))
+		_, _ = fmt.Fprintf(&sb, "Restart=%s\n", unit.Restart)
 	} else {
 		sb.WriteString("Restart=always\n")
 	}
 	if unit.TimeoutStopSec > 0 {
-		sb.WriteString(fmt.Sprintf("TimeoutStopSec=%d\n", unit.TimeoutStopSec))
+		_, _ = fmt.Fprintf(&sb, "TimeoutStopSec=%d\n", unit.TimeoutStopSec)
 	}
 	sb.WriteString("\n")
 
 	// [Install] section
 	sb.WriteString("[Install]\n")
 	if unit.WantedBy != "" {
-		sb.WriteString(fmt.Sprintf("WantedBy=%s\n", unit.WantedBy))
+		_, _ = fmt.Fprintf(&sb, "WantedBy=%s\n", unit.WantedBy)
 	} else {
 		sb.WriteString("WantedBy=default.target\n")
 	}
@@ -150,7 +150,7 @@ func GenerateNetworkFile(name string, dnsEnabled bool) string {
 
 	sb.WriteString("[Network]\n")
 	if name != "" {
-		sb.WriteString(fmt.Sprintf("NetworkName=%s\n", name))
+		_, _ = fmt.Fprintf(&sb, "NetworkName=%s\n", name)
 	}
 	if dnsEnabled {
 		sb.WriteString("DNS=true\n")
@@ -165,7 +165,7 @@ func GenerateVolumeFile(name string) string {
 
 	sb.WriteString("[Volume]\n")
 	if name != "" {
-		sb.WriteString(fmt.Sprintf("VolumeName=%s\n", name))
+		_, _ = fmt.Fprintf(&sb, "VolumeName=%s\n", name)
 	}
 
 	return sb.String()

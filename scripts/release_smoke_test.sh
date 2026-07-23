@@ -16,11 +16,18 @@ mkdir -p "$MOCK_BIN"
 cat > "$MOCK_BINARY" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = "version" ]; then
-  echo "Azud v1.2.3"
-  echo "  Commit: abc1234"
-  echo "  Built:  2026-07-19T00:00:00Z"
-  echo "  Go:     go1.25.0"
-  echo "  OS/Arch: linux/amd64"
+  if [ "${2:-}" = "--short" ]; then
+    if [ "${MOCK_LEGACY_VERSION:-}" = "1" ]; then
+      exit 1
+    fi
+    echo "v1.2.3"
+  else
+    echo "Azud v1.2.3"
+    echo "  COMMIT  abc1234"
+    echo "  BUILT   2026-07-19T00:00:00Z"
+    echo "  GO      go1.25.0"
+    echo "  TARGET  linux/amd64"
+  fi
 fi
 EOF
 chmod +x "$MOCK_BINARY"
@@ -82,19 +89,62 @@ output=$(
   sh scripts/install.sh
 )
 
-printf '%s\n' "$output" | grep -F "azud v1.2.3 installed successfully!" >/dev/null
-if printf '%s\n' "$output" | grep -F "Commit:" >/dev/null; then
+printf '%s\n' "$output" | grep -F "  OK     azud v1.2.3" >/dev/null
+if printf '%s\n' "$output" | grep -F "COMMIT" >/dev/null; then
   echo "installer leaked multiline version output into its success banner" >&2
+  exit 1
+fi
+if printf '%s\n' "$output" | LC_ALL=C grep "$(printf '\033')" >/dev/null; then
+  echo "installer emitted ANSI escapes in captured output" >&2
   exit 1
 fi
 [ -x "$INSTALL_DIR/azud" ]
 grep -F "attestation verify" "$MOCK_GH_ARGS" >/dev/null
+
+# A moving major action tag must still install binaries released before the
+# stable version --short surface existed.
+LEGACY_INSTALL_DIR="$TEST_TMP/legacy-install"
+legacy_output=$(
+  PATH="$MOCK_BIN:$PATH" \
+  AZUD_VERSION=v1.2.3 \
+  AZUD_INSTALL_DIR="$LEGACY_INSTALL_DIR" \
+  MOCK_BINARY="$MOCK_BINARY" \
+  MOCK_GH_ARGS="$MOCK_GH_ARGS" \
+  MOCK_LEGACY_VERSION=1 \
+  sh scripts/install.sh
+)
+printf '%s\n' "$legacy_output" | grep -F "  OK     azud v1.2.3" >/dev/null
 
 if grep -E -- 'login .* (-p|--password)([=[:space:]]|$)' action.yml >/dev/null; then
   echo "registry password is passed through process arguments" >&2
   exit 1
 fi
 grep -F -- '--password-stdin' action.yml >/dev/null
+
+install_script=$(awk '
+  $0 == "    - name: Install Azud" { in_step = 1 }
+  in_step && $0 == "      run: |" { capture = 1; next }
+  capture && /^        / { sub(/^        /, ""); print; next }
+  capture { exit }
+' action.yml | sed 's/\$HOME/\$ACTION_TEST_HOME/g')
+test -n "$install_script"
+ACTION_HOME="$TEST_TMP/action-home"
+ACTION_GITHUB_PATH="$TEST_TMP/github-path"
+ACTION_GITHUB_OUTPUT="$TEST_TMP/github-output"
+mkdir -p "$ACTION_HOME"
+PATH="$MOCK_BIN:$PATH" \
+ACTION_TEST_HOME="$ACTION_HOME" \
+ACTION_PATH="$(pwd)" \
+AZUD_VERSION=v1.2.3 \
+AZUD_INSTALL_DIR="$ACTION_HOME/.azud/bin" \
+GITHUB_PATH="$ACTION_GITHUB_PATH" \
+GITHUB_OUTPUT="$ACTION_GITHUB_OUTPUT" \
+MOCK_BINARY="$MOCK_BINARY" \
+MOCK_GH_ARGS="$MOCK_GH_ARGS" \
+MOCK_LEGACY_VERSION=1 \
+bash -c "$install_script" >/dev/null
+grep -Fx "$ACTION_HOME/.azud/bin" "$ACTION_GITHUB_PATH" >/dev/null
+grep -Fx "version=v1.2.3" "$ACTION_GITHUB_OUTPUT" >/dev/null
 
 cat > "$MOCK_BIN/podman" <<'EOF'
 #!/bin/sh
@@ -129,4 +179,4 @@ if grep -F -- "$registry_secret" "$MOCK_REGISTRY_ARGS" >/dev/null; then
 fi
 [ "$(cat "$MOCK_REGISTRY_STDIN")" = "$registry_secret" ]
 
-echo "release installer and registry-login smoke passed"
+printf '  PASS   release installer and registry-login smoke\n'
