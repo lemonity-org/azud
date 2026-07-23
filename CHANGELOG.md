@@ -9,6 +9,8 @@ release notes for the corresponding signed tag.
 - Added stable Caddy route ownership IDs and explicit proxy reconciliation.
 - Added configurable HTTP, h2c, and HTTPS application upstream transports.
 - Added command-based readiness probes for gRPC, TCP, and custom checks.
+- Fixed proxy listener separation so `ssl_redirect: true` delegates port 80
+  redirects to Caddy and HTTP-only services never serve plaintext on port 443.
 
 ## 1.0.0 - 2026-07-20
 
