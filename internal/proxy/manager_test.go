@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAdminListenMatchesNetworkMode(t *testing.T) {
@@ -66,6 +67,50 @@ func TestBuildServiceRouteAssignsStableAzudIDs(t *testing.T) {
 	}
 	if got := handlerAPIPath("/config/routes", 4, 1, handler); got != "/id/azud-proxy-shop-api" {
 		t.Fatalf("handler API path = %q", got)
+	}
+}
+
+func TestBuildServiceRouteRetriesWhileNoUpstreamIsAvailable(t *testing.T) {
+	// A container swap can leave the route without an available upstream for a
+	// moment, and passive health checking can extend that to a full
+	// fail_duration. Without a try window Caddy answers 503 immediately.
+	route := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name:       "shop",
+		Host:       "shop.example.com",
+		Upstreams:  []string{"shop:3000"},
+		HealthPath: "/up",
+	})
+
+	handler, _, ok := reverseProxyHandler(route)
+	if !ok {
+		t.Fatal("reverse proxy handler missing")
+	}
+	if handler.LoadBalancing.TryDuration == "" || handler.LoadBalancing.TryInterval == "" {
+		t.Fatalf("route does not retry unavailable upstreams: %#v", handler.LoadBalancing)
+	}
+
+	tryDuration, err := time.ParseDuration(handler.LoadBalancing.TryDuration)
+	if err != nil {
+		t.Fatalf("try_duration is not a valid duration: %v", err)
+	}
+	failDuration, err := time.ParseDuration(handler.HealthChecks.Passive.FailDuration)
+	if err != nil {
+		t.Fatalf("fail_duration is not a valid duration: %v", err)
+	}
+	// Long enough to absorb a swap gap, short enough that a real outage fails
+	// instead of queueing requests for the whole fail_duration.
+	if tryDuration < time.Second || tryDuration >= failDuration {
+		t.Fatalf("try_duration %s must be at least 1s and shorter than fail_duration %s", tryDuration, failDuration)
+	}
+
+	encoded, err := json.Marshal(handler.LoadBalancing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"try_duration":`, `"try_interval":`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("load balancing JSON missing %s: %s", want, encoded)
+		}
 	}
 }
 

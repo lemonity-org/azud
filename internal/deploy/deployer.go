@@ -619,6 +619,11 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 		if oldPreserved {
 			if err := d.containers.Rename(host, backupName, oldContainerName); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restore old container name: %v", err))
+			} else if err := d.startContainerConfirmed(host, oldContainerName); err != nil {
+				// The preserved container is stopped before the final upstream
+				// swap, so it has to be running again before it takes traffic.
+				// This is a no-op when the rollback happens earlier than that.
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restart old container: %v", err))
 			}
 			if err := d.proxy.AddUpstream(host, proxyHost, oldUpstream); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restore old route: %v", err))
@@ -656,6 +661,22 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 		}
 		d.reapStaleTempContainers(host, oldContainerName)
 		return nil
+	}
+
+	// Every app container carries the stable role name as a network alias, so
+	// the preserved container keeps answering DNS for that name after it has
+	// been renamed. Left running, the final upstream address below would
+	// resolve to it as well, and removing it moments later would break the
+	// connections Caddy had already opened — which passive health checking
+	// escalates into a route-wide outage for a whole fail_duration window.
+	// Stop it here instead: it is already out of the route, the temporary
+	// upstream still carries traffic, and a stopped container leaves Podman's
+	// DNS immediately. Stopping is also gentler than the forced removal that
+	// followed, because it honors the configured stop timeout.
+	if oldPreserved {
+		if err := d.containers.Stop(host, backupName, d.cfg.GetRoleStopTimeout(role)); err != nil {
+			return rollbackSwap(fmt.Errorf("failed to stop preserved old container: %w", err), true)
+		}
 	}
 
 	// Swap the upstream from the temporary name to the final service name.

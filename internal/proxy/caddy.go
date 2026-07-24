@@ -107,6 +107,13 @@ type Upstream struct {
 // LoadBalancing configures load balancing
 type LoadBalancing struct {
 	SelectionPolicy *SelectionPolicy `json:"selection_policy,omitempty"`
+
+	// TryDuration bounds how long Caddy keeps retrying a request while no
+	// upstream is available, instead of answering 503 immediately.
+	TryDuration string `json:"try_duration,omitempty"`
+
+	// TryInterval is the pause between those retries.
+	TryInterval string `json:"try_interval,omitempty"`
 }
 
 // SelectionPolicy defines how to select upstreams
