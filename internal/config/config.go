@@ -10,6 +10,23 @@ import (
 // bookkeeping after the container's graceful-stop window expires.
 const StopTimeoutOverhead = 5 * time.Second
 
+// WebRoleName is the role whose containers are served by the Caddy proxy.
+const WebRoleName = "web"
+
+// Supported role deployment strategies. Comparing against these constants
+// instead of bare literals keeps the validator, the deployer, and the scale
+// guard from drifting apart: a typo in any one of them would silently disable
+// a singleton safety check.
+const (
+	// StrategyRolling starts the replacement container before retiring the
+	// previous one. It is the default when strategy is unset.
+	StrategyRolling = "rolling"
+
+	// StrategyStopFirst guarantees that the previous and replacement
+	// containers never run at the same time.
+	StrategyStopFirst = "stop_first"
+)
+
 // Config represents the main deployment configuration
 type Config struct {
 	// Service name (used as container name prefix)
@@ -119,7 +136,8 @@ type RoleConfig struct {
 
 	// Deployment strategy. Empty/default uses Azud's rolling replacement.
 	// stop_first is intended for singleton non-web processes that must never
-	// overlap with their previous container.
+	// overlap with their previous container. See StrategyRolling and
+	// StrategyStopFirst.
 	Strategy string `yaml:"strategy"`
 
 	// Command to run (overrides default)
@@ -180,19 +198,31 @@ type RoleTmpfsConfig struct {
 }
 
 // ContainerSpec returns the validated Podman tmpfs mount representation.
+// Options are assembled from named values rather than by index so that adding
+// a mount option later cannot silently rewrite an unrelated security flag.
 func (t RoleTmpfsConfig) ContainerSpec() string {
-	options := []string{"rw", "noexec", "nosuid", "nodev", "size=" + t.Size}
+	write := "rw"
 	if t.ReadOnly {
-		options[0] = "ro"
+		write = "ro"
 	}
+	exec := "noexec"
 	if t.AllowExec {
-		options[1] = "exec"
+		exec = "exec"
 	}
+	suid := "nosuid"
 	if t.AllowSUID {
-		options[2] = "suid"
+		suid = "suid"
 	}
+	devices := "nodev"
 	if t.AllowDevices {
-		options[3] = "dev"
+		devices = "dev"
+	}
+
+	options := []string{write, exec, suid, devices}
+	// Validation rejects an empty size, but the method is exported: emitting
+	// a bare "size=" would produce an unusable Podman argument.
+	if t.Size != "" {
+		options = append(options, "size="+t.Size)
 	}
 	if t.Mode != "" {
 		options = append(options, "mode="+t.Mode)
@@ -625,6 +655,13 @@ func (c *Config) GetRoleStopTimeout(role string) int {
 	return c.Deploy.GetStopTimeout()
 }
 
+// UsesStopFirst reports whether the role is configured as a stop-first
+// singleton. Callers should prefer this over comparing Strategy directly.
+func (c *Config) UsesStopFirst(role string) bool {
+	roleConfig, ok := c.Servers[role]
+	return ok && roleConfig.Strategy == StrategyStopFirst
+}
+
 // MaxStopTimeout returns the largest effective role stop timeout.
 func (c *Config) MaxStopTimeout() time.Duration {
 	maxTimeout := time.Duration(c.Deploy.GetStopTimeout()) * time.Second
@@ -867,7 +904,7 @@ func (c *Config) GetCronHosts(name string) []string {
 	}
 
 	// Default to first host from web role, or first host overall
-	if hosts := c.GetRoleHosts("web"); len(hosts) > 0 {
+	if hosts := c.GetRoleHosts(WebRoleName); len(hosts) > 0 {
 		return []string{hosts[0]}
 	}
 

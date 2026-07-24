@@ -173,6 +173,17 @@ have exactly one host and cannot be managed with `azud scale`; use
 `azud app start/stop --role <role>` for its zero/one lifecycle. Azud also
 reconciles interrupted `-old-*` and `-new-*` transitions before the next deploy.
 
+Two conditions make the singleton guarantee enforceable, and Azud fails the
+deployment rather than proceeding without them:
+
+- The role's generated systemd unit must be inactive. Units use
+  `Restart=always`, so systemd would start a replacement from the unit the
+  moment Azud stops the previous container. Stop the unit before deploying and
+  start it afterwards; it stays the supported cold-start path after a reboot.
+- Every container of the role must carry Azud's management labels. A container
+  occupying the role's stable name without them cannot be reconciled, and Azud
+  refuses to start a second process beside it.
+
 ### Multiple Services on the Same Server
 
 When deploying multiple services to the same host, each service must have its own

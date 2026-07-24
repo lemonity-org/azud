@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -98,6 +99,11 @@ func TestNewAppContainerConfigAppliesRoleSemantics(t *testing.T) {
 	}
 	if web.HealthCmd == "" {
 		t.Fatal("web role should have a liveness health command")
+	}
+	// Roles without a runtime block still pin Podman's graceful-stop window to
+	// the deployment-wide timeout instead of Podman's 10s default.
+	if web.StopTimeout != cfg.Deploy.GetStopTimeout() {
+		t.Fatalf("web stop timeout = %d, want the deploy default %d", web.StopTimeout, cfg.Deploy.GetStopTimeout())
 	}
 	if got := RoleContainerName(cfg, "web"); got != "shop" {
 		t.Fatalf("web stable name = %q", got)
@@ -202,6 +208,9 @@ type fakeContainerLifecycle struct {
 	failWait   bool
 	failBefore map[string]bool
 	failAfter  map[string]bool
+	// unlabeled containers exist on the host but carry no azud labels, so they
+	// never appear in a label-filtered listing.
+	unlabeled  map[string]bool
 	maxRunning int
 }
 
@@ -211,6 +220,7 @@ func newFakeContainerLifecycle(runningNames ...string) *fakeContainerLifecycle {
 		running:    make(map[string]bool),
 		failBefore: make(map[string]bool),
 		failAfter:  make(map[string]bool),
+		unlabeled:  make(map[string]bool),
 	}
 	for _, name := range runningNames {
 		fake.exists[name] = true
@@ -382,6 +392,9 @@ func (f *fakeContainerLifecycle) List(_ string, _ bool, _ map[string]string) ([]
 	sort.Strings(names)
 	containers := make([]podman.Container, 0, len(names))
 	for _, name := range names {
+		if f.unlabeled[name] {
+			continue
+		}
 		containers = append(containers, podman.Container{
 			Name: name,
 			Labels: map[string]string{
@@ -694,6 +707,95 @@ func TestReconcileStopFirstRejectsUnrecognizedManagedInstance(t *testing.T) {
 	_, err := deployer.reconcileStopFirstStandaloneRole("host", "worker", "shop-worker")
 	if err == nil || !strings.Contains(err.Error(), "unrecognized managed container") {
 		t.Fatalf("expected scaled singleton instance rejection, got %v", err)
+	}
+}
+
+func TestReconcileStopFirstRejectsUnlabeledStableContainer(t *testing.T) {
+	// A container holding the stable name without azud labels is invisible to
+	// the label-filtered listing. Reconciliation must not report "no previous
+	// container" and let a second singleton start beside it.
+	fake := newFakeContainerLifecycle("shop-worker")
+	fake.unlabeled["shop-worker"] = true
+	deployer, _ := stopFirstTestDeployer(fake)
+
+	oldExists, err := deployer.reconcileStopFirstStandaloneRole("host", "worker", "shop-worker")
+	if err == nil || !strings.Contains(err.Error(), "not labeled as a managed") {
+		t.Fatalf("expected unlabeled stable container rejection, got exists=%v err=%v", oldExists, err)
+	}
+	if !fake.running["shop-worker"] {
+		t.Fatalf("unlabeled previous container must be left untouched: running=%v", fake.running)
+	}
+}
+
+func TestDeployToTargetLockedSelectsStopFirstForSingletonRoles(t *testing.T) {
+	tests := []struct {
+		name          string
+		role          string
+		strategy      string
+		wantStopFirst bool
+	}{
+		{name: "stop_first worker", role: "worker", strategy: config.StrategyStopFirst, wantStopFirst: true},
+		{name: "rolling worker", role: "worker", strategy: config.StrategyRolling, wantStopFirst: false},
+		{name: "default worker", role: "worker", strategy: "", wantStopFirst: false},
+		// IsProxyRole guards the web role even if validation is bypassed.
+		{name: "web is never stop_first", role: "web", strategy: config.StrategyStopFirst, wantStopFirst: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stableName := "shop-" + tt.role
+			if tt.role == "web" {
+				stableName = "shop"
+			}
+			fake := newFakeContainerLifecycle(stableName)
+			if tt.role == "web" {
+				// Stop the rolling path before it reaches proxy registration,
+				// which this fake does not model.
+				fake.failRun = true
+			}
+			deployer, _ := stopFirstTestDeployer(fake)
+			deployer.cfg.Servers[tt.role] = config.RoleConfig{
+				Hosts:    []string{"host"},
+				Strategy: tt.strategy,
+			}
+			deployer.hooks = NewHookRunner("", 0, output.DefaultLogger)
+
+			// The rolling path continues into proxy work that this fake cannot
+			// serve, so only the branch taken before that point is asserted.
+			_ = deployer.deployToTargetLocked(
+				context.Background(),
+				deploymentTarget{Host: "host", Role: tt.role},
+				"shop:latest",
+				"latest",
+				&DeployOptions{SkipHealthCheck: true},
+			)
+
+			validated := operationIndex(fake.operations, "create "+stableName+"-new") >= 0
+			if validated != tt.wantStopFirst {
+				t.Fatalf("stop_first dispatch = %v, want %v; operations=%v", validated, tt.wantStopFirst, fake.operations)
+			}
+		})
+	}
+}
+
+func TestEnsureSingletonUnitInactiveBlocksActiveUnit(t *testing.T) {
+	deployer, _ := stopFirstTestDeployer(newFakeContainerLifecycle("shop-worker"))
+
+	deployer.unitActive = func(_, _ string) (bool, error) { return true, nil }
+	err := deployer.ensureSingletonUnitInactive("host", "shop-worker")
+	if err == nil || !strings.Contains(err.Error(), "stop it before deploying this stop_first role") {
+		t.Fatalf("active unit was not rejected: %v", err)
+	}
+
+	deployer.unitActive = func(_, _ string) (bool, error) { return false, nil }
+	if err := deployer.ensureSingletonUnitInactive("host", "shop-worker"); err != nil {
+		t.Fatalf("inactive unit blocked the deployment: %v", err)
+	}
+
+	// An inconclusive probe must not block the deployment.
+	deployer.unitActive = func(_, _ string) (bool, error) { return false, errors.New("no systemd") }
+	if err := deployer.ensureSingletonUnitInactive("host", "shop-worker"); err != nil {
+		t.Fatalf("inconclusive unit probe blocked the deployment: %v", err)
 	}
 }
 

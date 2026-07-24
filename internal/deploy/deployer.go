@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -13,11 +14,14 @@ import (
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/proxy"
+	"github.com/lemonity-org/azud/internal/quadlet"
 	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
 
-// Deployer orchestrates zero-downtime application deployments across hosts.
+// containerLifecycle is the subset of podman.ContainerManager the deployer
+// depends on. It exists so lifecycle sequencing can be exercised against a
+// fake that records ordering and enforces the singleton invariant.
 type containerLifecycle interface {
 	Create(host string, config *podman.ContainerConfig) (string, error)
 	Run(host string, config *podman.ContainerConfig) (string, error)
@@ -33,6 +37,7 @@ type containerLifecycle interface {
 	HostPort(host, container string, containerPort int) (int, error)
 }
 
+// Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
 	cfg         *config.Config
 	sshClient   *ssh.Client
@@ -40,6 +45,7 @@ type Deployer struct {
 	containers  containerLifecycle
 	images      *podman.ImageManager
 	imageDigest func(host, image string) (string, error)
+	unitActive  func(host, unit string) (bool, error)
 	registry    *podman.RegistryManager
 	proxy       *proxy.Manager
 	hooks       *HookRunner
@@ -85,17 +91,33 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 	proxyManager.SetProxyConfig(newProxyConfigFromCfg(cfg))
 
+	// Mirrors the scope `azud systemd enable` uses for application units.
+	quadletDeployer := quadlet.NewQuadletDeployerWithOptions(
+		sshClient,
+		log,
+		cfg.Podman.QuadletPath,
+		cfg.Podman.Rootless,
+		!cfg.Podman.Rootless && cfg.SSH.User != "root",
+	)
+
 	return &Deployer{
 		cfg:        cfg,
 		sshClient:  sshClient,
 		podman:     podmanClient,
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
-		registry:   podman.NewRegistryManager(podmanClient),
-		proxy:      proxyManager,
-		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
-		history:    NewDurableHistoryStore(cfg.Deploy.RetainHistory, log),
-		log:        log,
+		unitActive: func(host, unit string) (bool, error) {
+			status, err := quadletDeployer.Status(host, unit)
+			if err != nil {
+				return false, err
+			}
+			return strings.TrimSpace(status) == "active", nil
+		},
+		registry: podman.NewRegistryManager(podmanClient),
+		proxy:    proxyManager,
+		hooks:    NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
+		history:  NewDurableHistoryStore(cfg.Deploy.RetainHistory, log),
+		log:      log,
 	}
 }
 
@@ -382,16 +404,22 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	d.log.Host(host, "Starting %s role deployment...", role)
 
 	oldContainerName := RoleContainerName(d.cfg, role)
-	stopFirst := !IsProxyRole(role) && d.cfg.Servers[role].Strategy == "stop_first"
+	stopFirst := !IsProxyRole(role) && d.cfg.UsesStopFirst(role)
 	var oldExists bool
 	var err error
 	if stopFirst {
+		if err := d.ensureSingletonUnitInactive(host, oldContainerName); err != nil {
+			return err
+		}
 		oldExists, err = d.reconcileStopFirstStandaloneRole(host, role, oldContainerName)
+		if err != nil {
+			return fmt.Errorf("failed to reconcile current container state: %w", err)
+		}
 	} else {
 		oldExists, err = d.containers.Exists(host, oldContainerName)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to reconcile current container state: %w", err)
+		if err != nil {
+			return fmt.Errorf("failed to determine whether current container exists: %w", err)
+		}
 	}
 	newContainerName := d.generateContainerName(oldContainerName, "new")
 	containerConfig := d.buildContainerConfig(image, newContainerName, role)
@@ -793,16 +821,13 @@ func (d *Deployer) startContainerConfirmed(host, name string) error {
 }
 
 func (d *Deployer) stopSingletonContainers(host string, containers []string, stopTimeout int) error {
-	var stopErrors []string
+	var stopErrors []error
 	for _, container := range containers {
 		if err := d.stopContainerConfirmed(host, container, stopTimeout); err != nil {
-			stopErrors = append(stopErrors, err.Error())
+			stopErrors = append(stopErrors, err)
 		}
 	}
-	if len(stopErrors) > 0 {
-		return fmt.Errorf("%s", strings.Join(stopErrors, "; "))
-	}
-	return nil
+	return errors.Join(stopErrors...)
 }
 
 func (d *Deployer) removeSingletonContainers(host string, containers []string, stopTimeout int) error {
@@ -811,16 +836,40 @@ func (d *Deployer) removeSingletonContainers(host string, containers []string, s
 	if err := d.stopSingletonContainers(host, containers, stopTimeout); err != nil {
 		return err
 	}
-	var removeErrors []string
+	var removeErrors []error
 	for _, container := range containers {
 		if err := d.removeContainerConfirmed(host, container, true); err != nil {
-			removeErrors = append(removeErrors, err.Error())
+			removeErrors = append(removeErrors, err)
 		}
 	}
-	if len(removeErrors) > 0 {
-		return fmt.Errorf("%s", strings.Join(removeErrors, "; "))
+	return errors.Join(removeErrors...)
+}
+
+// ensureSingletonUnitInactive refuses a stop-first deployment while the role's
+// generated systemd unit is running. Those units carry Restart=always, so
+// stopping the renamed previous container would prompt systemd to start a fresh
+// one from the unit while the candidate is booting — precisely the overlap this
+// strategy exists to prevent.
+func (d *Deployer) ensureSingletonUnitInactive(host, unit string) error {
+	if d.unitActive == nil {
+		return nil
 	}
-	return nil
+	active, err := d.unitActive(host, unit)
+	if err != nil {
+		// An inconclusive probe (no systemd, no unit installed, transport
+		// hiccup) must not block deployments; the podman calls that follow run
+		// over the same connection and will surface a real connectivity fault.
+		d.log.Debug("Could not determine %s unit state on %s: %v", unit, host, err)
+		return nil
+	}
+	if !active {
+		return nil
+	}
+	return fmt.Errorf(
+		"systemd unit %s.service is active on %s; stop it before deploying this stop_first role "+
+			"(the unit restarts the previous container automatically and would run beside the replacement)",
+		unit, host,
+	)
 }
 
 // reconcileStopFirstStandaloneRole recovers an interrupted singleton swap
@@ -850,8 +899,30 @@ func (d *Deployer) reconcileStopFirstStandaloneRole(host, role, stableName strin
 		case strings.HasPrefix(container.Name, stableName+"-new-"):
 			candidates = append(candidates, container.Name)
 		default:
-			return false, fmt.Errorf("unrecognized managed container %s prevents singleton deployment", container.Name)
+			return false, fmt.Errorf(
+				"unrecognized managed container %s prevents singleton deployment; remove it (podman rm -f %s) or switch the role back to the rolling strategy",
+				container.Name, container.Name,
+			)
 		}
+	}
+
+	// The label listing is the only source for the classification above, so a
+	// container occupying the stable name without the expected azud labels
+	// would be invisible here and the deployment would start a second process
+	// beside it. Cross-check the name directly and fail closed on a mismatch.
+	namedStableExists, err := d.containers.Exists(host, stableName)
+	if err != nil {
+		return false, fmt.Errorf("confirm %s exists: %w", stableName, err)
+	}
+	if namedStableExists && !stableExists {
+		return false, fmt.Errorf(
+			"container %s exists but is not labeled as a managed %s/%s container; "+
+				"remove or relabel it before deploying a singleton role",
+			stableName, d.cfg.Service, role,
+		)
+	}
+	if stableExists && !namedStableExists {
+		return false, fmt.Errorf("container %s disappeared while reconciling the singleton role; retry the deployment", stableName)
 	}
 
 	stopTimeout := d.cfg.GetRoleStopTimeout(role)

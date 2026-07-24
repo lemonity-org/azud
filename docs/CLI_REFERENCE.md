@@ -608,7 +608,10 @@ singleton that must not overlap its previous process. The typed `runtime`
 mapping supports `user`, `read_only`, `cap_drop`, `no_new_privileges`,
 bounded `tmpfs`, `disable_healthcheck`, and `stop_timeout`; Azud validates
 these fields before constructing Podman commands. `stop_first` requires exactly
-one host and cannot be managed with `azud scale`.
+one host, cannot be managed with `azud scale`, and is refused while the role's
+systemd unit is active. See
+[Stop timeouts](CONFIG_REFERENCE.md#stop-timeouts) for how `stop_timeout`
+interacts with `ssh.command_timeout`.
 
 ### `proxy`
 Configuration for the Caddy reverse proxy.

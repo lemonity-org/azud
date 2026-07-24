@@ -9,6 +9,18 @@ release notes for the corresponding signed tag.
 - Added typed per-role container hardening and a rollback-safe `stop_first`
   strategy for singleton non-web workloads, including interrupted-deploy
   reconciliation and scale protection.
+- **Breaking:** `ssh.command_timeout` must now be at least five seconds longer
+  than the largest effective container stop timeout, so an SSH command can
+  never be cut off mid-stop. Configurations that set it explicitly below that
+  floor (with the default 30s stop timeout, anything under `35s`) now fail
+  validation; raise the value or lower `deploy.stop_timeout`. When
+  `ssh.command_timeout` is unset, the default is raised automatically.
+- **Breaking:** `deploy.stop_timeout` and `servers.<role>.runtime.stop_timeout`
+  must be whole seconds and at least `1s`; Podman expresses stop timeouts in
+  seconds, and sub-second values were silently truncated to zero before.
+- Changed application containers to run with an explicit `--stop-timeout`
+  (default 30s) instead of relying on Podman's 10s default, so a graceful
+  shutdown gets the configured window on `azud app stop`, deploys, and reboots.
 - Added stable Caddy route ownership IDs and explicit proxy reconciliation.
 - Added configurable HTTP, h2c, and HTTPS application upstream transports.
 - Added command-based readiness probes for gRPC, TCP, and custom checks.

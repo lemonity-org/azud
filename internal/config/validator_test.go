@@ -1454,7 +1454,7 @@ func TestValidate_RoleRuntimeHardening(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.Servers["worker"] = RoleConfig{
 		Hosts:    []string{"localhost"},
-		Strategy: "stop_first",
+		Strategy: StrategyStopFirst,
 		Runtime: RoleRuntimeConfig{
 			User:            "10001:10001",
 			ReadOnly:        true,
@@ -1477,6 +1477,7 @@ func TestValidate_RoleRuntimeHardening(t *testing.T) {
 func TestValidate_RoleRuntimeRejectsUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name    string
+		role    string
 		mutate  func(*RoleConfig)
 		wantErr string
 	}{
@@ -1489,10 +1490,19 @@ func TestValidate_RoleRuntimeRejectsUnsafeValues(t *testing.T) {
 		},
 		{
 			name: "stop first web",
+			role: WebRoleName,
 			mutate: func(role *RoleConfig) {
-				role.Strategy = "stop_first"
+				role.Strategy = StrategyStopFirst
 			},
 			wantErr: "supported only for non-web roles",
+		},
+		{
+			name: "disable healthcheck on web",
+			role: WebRoleName,
+			mutate: func(role *RoleConfig) {
+				role.Runtime.DisableHealthcheck = true
+			},
+			wantErr: "disable_healthcheck is supported only for non-web roles",
 		},
 		{
 			name: "user injection",
@@ -1548,9 +1558,9 @@ func TestValidate_RoleRuntimeRejectsUnsafeValues(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := baseValidConfig()
-			roleName := "worker"
-			if tt.name == "stop first web" {
-				roleName = "web"
+			roleName := tt.role
+			if roleName == "" {
+				roleName = "worker"
 			}
 			role := RoleConfig{Hosts: []string{"localhost"}}
 			tt.mutate(&role)
@@ -1567,7 +1577,7 @@ func TestValidate_StopFirstRequiresOneHost(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.Servers["worker"] = RoleConfig{
 		Hosts:    []string{"worker-a", "worker-b"},
-		Strategy: "stop_first",
+		Strategy: StrategyStopFirst,
 	}
 
 	err := Validate(cfg)
@@ -1613,7 +1623,7 @@ func TestValidate_NonWebOnlyConfigDoesNotRequireProxy(t *testing.T) {
 	cfg.Servers = map[string]RoleConfig{
 		"worker": {
 			Hosts:    []string{"localhost"},
-			Strategy: "stop_first",
+			Strategy: StrategyStopFirst,
 		},
 	}
 	cfg.Proxy = ProxyConfig{}
@@ -1633,5 +1643,51 @@ func TestValidate_RoleNameInjection(t *testing.T) {
 	err := Validate(cfg)
 	if err == nil || !strings.Contains(err.Error(), "role name") {
 		t.Fatalf("expected role name validation error, got %v", err)
+	}
+}
+
+func TestRoleTmpfsContainerSpec(t *testing.T) {
+	tests := []struct {
+		name  string
+		mount RoleTmpfsConfig
+		want  string
+	}{
+		{
+			name:  "hardened defaults",
+			mount: RoleTmpfsConfig{Path: "/tmp", Size: "64m"},
+			want:  "/tmp:rw,noexec,nosuid,nodev,size=64m",
+		},
+		{
+			name:  "mode is appended last",
+			mount: RoleTmpfsConfig{Path: "/tmp", Size: "64m", Mode: "1777"},
+			want:  "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+		},
+		{
+			name: "each relaxation maps to its own flag",
+			mount: RoleTmpfsConfig{
+				Path:         "/run",
+				Size:         "8m",
+				ReadOnly:     true,
+				AllowExec:    true,
+				AllowSUID:    true,
+				AllowDevices: true,
+			},
+			want: "/run:ro,exec,suid,dev,size=8m",
+		},
+		{
+			// Validation rejects this, but the exported method must not emit a
+			// dangling "size=" that Podman would reject at runtime.
+			name:  "missing size is omitted",
+			mount: RoleTmpfsConfig{Path: "/tmp"},
+			want:  "/tmp:rw,noexec,nosuid,nodev",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.mount.ContainerSpec(); got != tt.want {
+				t.Fatalf("ContainerSpec() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

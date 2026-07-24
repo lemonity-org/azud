@@ -220,6 +220,20 @@ func TestSetupIntegration(t *testing.T) {
 	assertContainerRunning(t, client, host, "azud-it")
 	assertContainerRunning(t, client, host, "azud-it-worker")
 	assertHTTPAvailable(t, client, host, httpPort)
+
+	// A singleton deployment must refuse to run while the role's unit is
+	// active: Restart=always would recreate the previous container as soon as
+	// Azud stopped it, running it beside the replacement.
+	singletonUnitFailure := runAzudExpectFailure(t, binaryPath, configPath, stateDir, tempDir,
+		"deploy", "--version", "latest", "--role", "worker")
+	if !strings.Contains(singletonUnitFailure, "stop it before deploying this stop_first role") {
+		t.Fatalf("singleton deploy did not report the active unit conflict: %s", singletonUnitFailure)
+	}
+	assertContainerRunning(t, client, host, "azud-it-worker")
+
+	assertRemoteSuccess(t, client, host, appSystemctl+" stop azud-it-worker.service")
+	runAzud(t, binaryPath, configPath, stateDir, tempDir, "deploy", "--version", "latest", "--role", "worker")
+	assertContainerRunning(t, client, host, "azud-it-worker")
 }
 
 func renderIntegrationConfig(host, user, keyPath string, port int, rootless, proxyRootful bool) string {
