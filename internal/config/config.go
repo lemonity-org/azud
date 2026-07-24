@@ -2,8 +2,13 @@ package config
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
+
+// StopTimeoutOverhead leaves time for Podman and its caller to finish
+// bookkeeping after the container's graceful-stop window expires.
+const StopTimeoutOverhead = 5 * time.Second
 
 // Config represents the main deployment configuration
 type Config struct {
@@ -112,6 +117,11 @@ type RoleConfig struct {
 	// List of host addresses
 	Hosts []string `yaml:"hosts"`
 
+	// Deployment strategy. Empty/default uses Azud's rolling replacement.
+	// stop_first is intended for singleton non-web processes that must never
+	// overlap with their previous container.
+	Strategy string `yaml:"strategy"`
+
 	// Command to run (overrides default)
 	Cmd string `yaml:"cmd"`
 
@@ -126,6 +136,68 @@ type RoleConfig struct {
 
 	// Environment variables specific to this role
 	Env map[string]string `yaml:"env"`
+
+	// Typed container runtime hardening for this role.
+	Runtime RoleRuntimeConfig `yaml:"runtime"`
+}
+
+// RoleRuntimeConfig contains security-sensitive Podman settings exposed as
+// typed configuration instead of arbitrary command-line options.
+type RoleRuntimeConfig struct {
+	// User (or user:group) to run as inside the container.
+	User string `yaml:"user"`
+
+	// Mount the image root filesystem read-only.
+	ReadOnly bool `yaml:"read_only"`
+
+	// Linux capabilities to remove (for example, ["ALL"]).
+	CapDrop []string `yaml:"cap_drop"`
+
+	// Prevent the container process and its children from gaining privileges.
+	NoNewPrivileges bool `yaml:"no_new_privileges"`
+
+	// Bounded tmpfs mounts. Security-sensitive flags default to their hardened
+	// form unless explicitly allowed.
+	Tmpfs []RoleTmpfsConfig `yaml:"tmpfs"`
+
+	// Disable a HEALTHCHECK inherited from the image.
+	DisableHealthcheck bool `yaml:"disable_healthcheck"`
+
+	// Container-level graceful stop timeout.
+	StopTimeout time.Duration `yaml:"stop_timeout"`
+}
+
+// RoleTmpfsConfig describes a bounded in-memory mount without exposing raw
+// Podman option syntax in application configuration.
+type RoleTmpfsConfig struct {
+	Path         string `yaml:"path"`
+	Size         string `yaml:"size"`
+	Mode         string `yaml:"mode"`
+	ReadOnly     bool   `yaml:"read_only"`
+	AllowExec    bool   `yaml:"allow_exec"`
+	AllowSUID    bool   `yaml:"allow_suid"`
+	AllowDevices bool   `yaml:"allow_devices"`
+}
+
+// ContainerSpec returns the validated Podman tmpfs mount representation.
+func (t RoleTmpfsConfig) ContainerSpec() string {
+	options := []string{"rw", "noexec", "nosuid", "nodev", "size=" + t.Size}
+	if t.ReadOnly {
+		options[0] = "ro"
+	}
+	if t.AllowExec {
+		options[1] = "exec"
+	}
+	if t.AllowSUID {
+		options[2] = "suid"
+	}
+	if t.AllowDevices {
+		options[3] = "dev"
+	}
+	if t.Mode != "" {
+		options = append(options, "mode="+t.Mode)
+	}
+	return t.Path + ":" + strings.Join(options, ",")
 }
 
 // BuilderConfig holds build settings
@@ -542,6 +614,27 @@ func (d *DeployConfig) GetStopTimeout() int {
 		return int(d.StopTimeout.Seconds())
 	}
 	return 30
+}
+
+// GetRoleStopTimeout returns the role-specific stop timeout when configured,
+// otherwise the deployment-wide timeout.
+func (c *Config) GetRoleStopTimeout(role string) int {
+	if roleConfig, ok := c.Servers[role]; ok && roleConfig.Runtime.StopTimeout > 0 {
+		return int(roleConfig.Runtime.StopTimeout.Seconds())
+	}
+	return c.Deploy.GetStopTimeout()
+}
+
+// MaxStopTimeout returns the largest effective role stop timeout.
+func (c *Config) MaxStopTimeout() time.Duration {
+	maxTimeout := time.Duration(c.Deploy.GetStopTimeout()) * time.Second
+	for role := range c.Servers {
+		timeout := time.Duration(c.GetRoleStopTimeout(role)) * time.Second
+		if timeout > maxTimeout {
+			maxTimeout = timeout
+		}
+	}
+	return maxTimeout
 }
 
 // CanaryConfig holds canary deployment settings

@@ -46,6 +46,11 @@ var resourceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 var memoryLimitRegex = regexp.MustCompile(`^[1-9][0-9]*[bBkKmMgGtTpP]?$`)
 var sshUserRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 var remotePathRegex = regexp.MustCompile(`^[a-zA-Z0-9_./@+,: -]+$`)
+var containerUserRegex = regexp.MustCompile(`^(?:[0-9]+(?::[0-9]+)?|[a-z_][a-z0-9_-]{0,31}(?::[a-z_][a-z0-9_-]{0,31})?)$`)
+var capabilityRegex = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+var tmpfsPathRegex = regexp.MustCompile(`^/[a-zA-Z0-9._/-]+$`)
+var tmpfsSizeRegex = regexp.MustCompile(`^[1-9][0-9]*[bBkKmMgGtTpP]?$`)
+var tmpfsModeRegex = regexp.MustCompile(`^[0-7]{3,4}$`)
 
 // healthPathRegex validates HTTP healthcheck paths. Paths are embedded into
 // curl/wget commands (inside shell double quotes), so the character set is
@@ -146,6 +151,76 @@ func Validate(cfg *Config) error {
 					})
 				}
 			}
+
+			switch rc.Strategy {
+			case "", "rolling":
+			case "stop_first":
+				if role == "web" {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("servers.%s.strategy", role),
+						Message: "stop_first is supported only for non-web roles",
+					})
+				}
+				if len(rc.Hosts) != 1 {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("servers.%s.hosts", role),
+						Message: "stop_first requires exactly one host to preserve the singleton guarantee",
+					})
+				}
+			default:
+				errs = append(errs, ValidationError{
+					Field:   fmt.Sprintf("servers.%s.strategy", role),
+					Message: "strategy must be rolling or stop_first",
+				})
+			}
+
+			runtimeField := fmt.Sprintf("servers.%s.runtime", role)
+			if rc.Runtime.User != "" && !containerUserRegex.MatchString(rc.Runtime.User) {
+				errs = append(errs, ValidationError{
+					Field:   runtimeField + ".user",
+					Message: "user must be a numeric UID[:GID] or POSIX user[:group]",
+				})
+			}
+			for i, capability := range rc.Runtime.CapDrop {
+				if !capabilityRegex.MatchString(capability) {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("%s.cap_drop[%d]", runtimeField, i),
+						Message: "capability must use uppercase letters, digits, and underscores",
+					})
+				}
+			}
+			tmpfsPaths := make(map[string]struct{}, len(rc.Runtime.Tmpfs))
+			for i, mount := range rc.Runtime.Tmpfs {
+				if err := validateRoleTmpfs(mount); err != nil {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("%s.tmpfs[%d]", runtimeField, i),
+						Message: err.Error(),
+					})
+				}
+				if _, duplicated := tmpfsPaths[mount.Path]; duplicated && mount.Path != "" {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("%s.tmpfs[%d].path", runtimeField, i),
+						Message: "tmpfs path is duplicated",
+					})
+				}
+				tmpfsPaths[mount.Path] = struct{}{}
+			}
+			if rc.Runtime.StopTimeout < 0 {
+				errs = append(errs, ValidationError{
+					Field:   runtimeField + ".stop_timeout",
+					Message: "stop_timeout must be non-negative",
+				})
+			} else if rc.Runtime.StopTimeout > 0 && rc.Runtime.StopTimeout < time.Second {
+				errs = append(errs, ValidationError{
+					Field:   runtimeField + ".stop_timeout",
+					Message: "stop_timeout must be at least 1s",
+				})
+			} else if rc.Runtime.StopTimeout%time.Second != 0 {
+				errs = append(errs, ValidationError{
+					Field:   runtimeField + ".stop_timeout",
+					Message: "stop_timeout must use whole seconds",
+				})
+			}
 		}
 	}
 
@@ -162,7 +237,7 @@ func Validate(cfg *Config) error {
 	}
 
 	// Validate proxy configuration
-	if cfg.Proxy.Host == "" && len(cfg.Proxy.Hosts) == 0 {
+	if cfg.HasRole("web") && cfg.Proxy.Host == "" && len(cfg.Proxy.Hosts) == 0 {
 		errs = append(errs, ValidationError{
 			Field:   "proxy.host",
 			Message: "proxy.host or proxy.hosts is required",
@@ -456,6 +531,14 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.SSH.CommandTimeout < 0 {
 		errs = append(errs, ValidationError{Field: "ssh.command_timeout", Message: "must be non-negative"})
+	} else if cfg.SSH.CommandTimeout > 0 {
+		minCommandTimeout := cfg.MaxStopTimeout() + StopTimeoutOverhead
+		if cfg.SSH.CommandTimeout < minCommandTimeout {
+			errs = append(errs, ValidationError{
+				Field:   "ssh.command_timeout",
+				Message: fmt.Sprintf("must be at least %s to exceed the largest container stop timeout", minCommandTimeout),
+			})
+		}
 	}
 	if cfg.Security.RequireNonRootSSH && cfg.SSH.User == "root" {
 		errs = append(errs, ValidationError{
@@ -620,7 +703,7 @@ func Validate(cfg *Config) error {
 			Message: "rootless Podman required (set podman.rootless: true)",
 		})
 	}
-	if cfg.Podman.Rootless && !cfg.Proxy.Rootful {
+	if cfg.HasRole("web") && cfg.Podman.Rootless && !cfg.Proxy.Rootful {
 		if cfg.Proxy.EffectiveHTTPPort() < 1024 {
 			errs = append(errs, ValidationError{
 				Field:   "proxy.http_port",
@@ -634,7 +717,7 @@ func Validate(cfg *Config) error {
 			})
 		}
 	}
-	if cfg.UseHostPortUpstreams() {
+	if cfg.HasRole("web") && cfg.UseHostPortUpstreams() {
 		if cfg.Proxy.EffectiveHTTPPort() != DefaultHTTPPort {
 			errs = append(errs, ValidationError{
 				Field:   "proxy.http_port",
@@ -698,6 +781,13 @@ func Validate(cfg *Config) error {
 			Message: "retain_containers must be non-negative",
 		})
 	}
+	if cfg.Deploy.StopTimeout < 0 {
+		errs = append(errs, ValidationError{Field: "deploy.stop_timeout", Message: "must be non-negative"})
+	} else if cfg.Deploy.StopTimeout > 0 && cfg.Deploy.StopTimeout < time.Second {
+		errs = append(errs, ValidationError{Field: "deploy.stop_timeout", Message: "must be at least 1s"})
+	} else if cfg.Deploy.StopTimeout%time.Second != 0 {
+		errs = append(errs, ValidationError{Field: "deploy.stop_timeout", Message: "must use whole seconds"})
+	}
 
 	// Validate minimum_version format
 	if cfg.MinimumVersion != "" && !isValidSemver(cfg.MinimumVersion) {
@@ -717,6 +807,24 @@ func Validate(cfg *Config) error {
 		return errs
 	}
 
+	return nil
+}
+
+func validateRoleTmpfs(mount RoleTmpfsConfig) error {
+	if !tmpfsPathRegex.MatchString(mount.Path) || strings.Contains(mount.Path, "//") {
+		return fmt.Errorf("tmpfs path must be an absolute path without shell metacharacters")
+	}
+	for _, segment := range strings.Split(mount.Path, "/") {
+		if segment == ".." {
+			return fmt.Errorf("tmpfs path must not contain traversal")
+		}
+	}
+	if !tmpfsSizeRegex.MatchString(mount.Size) {
+		return fmt.Errorf("tmpfs size must be a positive integer with an optional unit")
+	}
+	if mount.Mode != "" && !tmpfsModeRegex.MatchString(mount.Mode) {
+		return fmt.Errorf("tmpfs mode must be a three- or four-digit octal mode")
+	}
 	return nil
 }
 

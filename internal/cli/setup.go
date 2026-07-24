@@ -134,7 +134,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 4: Start proxy
-	if !setupSkipProxy {
+	if setupProxyEnabled(cfg, setupSkipProxy) {
 		log.Header("04 / Start proxy")
 		proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
@@ -168,9 +168,6 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 		var proxyErrors []string
 		proxyHosts := cfg.GetRoleHosts("web")
-		if len(proxyHosts) == 0 {
-			return fmt.Errorf("proxy setup requires a web role")
-		}
 		for _, host := range proxyHosts {
 			if err := proxyManager.Boot(host, proxyConfig); err != nil {
 				log.HostError(host, "proxy boot failed: %v", err)
@@ -180,8 +177,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		if len(proxyErrors) > 0 {
 			return fmt.Errorf("proxy setup failed: %s", strings.Join(proxyErrors, "; "))
 		}
-	} else {
+	} else if setupSkipProxy {
 		log.Info("Skipping proxy setup (--skip-proxy)")
+	} else {
+		log.Info("Skipping proxy setup (no web role)")
 	}
 
 	// Step 5: Deploy accessories
@@ -216,9 +215,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	log.Header("Setup / complete")
 	log.Success("Application available")
+	if !cfg.HasRole("web") {
+		return nil
+	}
 	proxyHosts := cfg.Proxy.AllHosts()
 	if len(proxyHosts) == 0 {
-		log.Warn("No proxy host configured")
 		return nil
 	}
 	for _, host := range proxyHosts {
@@ -244,6 +245,10 @@ func setupRuntimeHosts() []string {
 		}
 	}
 	return hosts
+}
+
+func setupProxyEnabled(appConfig *config.Config, skipProxy bool) bool {
+	return !skipProxy && appConfig.HasRole("web")
 }
 
 func getRegistryPassword() string {

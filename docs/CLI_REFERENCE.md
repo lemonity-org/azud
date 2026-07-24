@@ -323,6 +323,8 @@ Logout from the configured registry on all servers.
 #### `azud scale`
 
 Dynamically scale the number of container instances for a role.
+Roles configured with `strategy: stop_first` are intentionally rejected because
+their lifecycle is limited to zero or one process.
 
 **Usage:**
 ```bash
@@ -587,7 +589,26 @@ servers:
     hosts:
       - 192.168.1.3
     cmd: bin/jobs
+    strategy: stop_first
+    runtime:
+      user: "10001:10001"
+      read_only: true
+      cap_drop: [ALL]
+      no_new_privileges: true
+      disable_healthcheck: true
+      stop_timeout: 30s
+      tmpfs:
+        - path: /tmp
+          size: 64m
+          mode: "1777"
 ```
+
+Role `strategy` defaults to `rolling`. Use `stop_first` for a non-web
+singleton that must not overlap its previous process. The typed `runtime`
+mapping supports `user`, `read_only`, `cap_drop`, `no_new_privileges`,
+bounded `tmpfs`, `disable_healthcheck`, and `stop_timeout`; Azud validates
+these fields before constructing Podman commands. `stop_first` requires exactly
+one host and cannot be managed with `azud scale`.
 
 ### `proxy`
 Configuration for the Caddy reverse proxy.

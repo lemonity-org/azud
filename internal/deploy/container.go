@@ -109,6 +109,9 @@ func NewAppContainerConfig(cfg *config.Config, image, name, role string, extraLa
 		Detach:  true,
 		Restart: "unless-stopped",
 		Network: "azud",
+		// Keep Podman's own graceful-stop window aligned with the timeout used
+		// by imperative lifecycle commands and generated systemd units.
+		StopTimeout: cfg.GetRoleStopTimeout(role),
 		// Register the stable role name as a network alias so DNS continues to
 		// resolve while a temporary deployment container is renamed.
 		NetworkAliases: aliases,
@@ -128,6 +131,14 @@ func NewAppContainerConfig(cfg *config.Config, image, name, role string, extraLa
 		}
 		containerCfg.Memory = roleConfig.Options["memory"]
 		containerCfg.CPUs = roleConfig.Options["cpus"]
+		containerCfg.User = roleConfig.Runtime.User
+		containerCfg.ReadOnly = roleConfig.Runtime.ReadOnly
+		containerCfg.CapDrop = append([]string(nil), roleConfig.Runtime.CapDrop...)
+		containerCfg.NoNewPrivileges = roleConfig.Runtime.NoNewPrivileges
+		for _, mount := range roleConfig.Runtime.Tmpfs {
+			containerCfg.Tmpfs = append(containerCfg.Tmpfs, mount.ContainerSpec())
+		}
+		containerCfg.NoHealthcheck = roleConfig.Runtime.DisableHealthcheck
 		if roleConfig.Cmd != "" {
 			containerCfg.Command = parseCommandArgs(roleConfig.Cmd)
 		}
@@ -141,6 +152,9 @@ func NewAppContainerConfig(cfg *config.Config, image, name, role string, extraLa
 
 	// HTTP liveness/readiness settings only belong to the proxy-serving role.
 	if !IsProxyRole(role) {
+		return containerCfg
+	}
+	if containerCfg.NoHealthcheck {
 		return containerCfg
 	}
 

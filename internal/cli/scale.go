@@ -70,6 +70,9 @@ func runScale(cmd *cobra.Command, args []string) error {
 		if !cfg.HasRole(role) {
 			return fmt.Errorf("role %s not found", role)
 		}
+		if cfg.Servers[role].Strategy == "stop_first" {
+			return fmt.Errorf("role %s uses stop_first and cannot be scaled; use app start/stop for singleton roles", role)
+		}
 
 		op, err := parseScaleOperation(parts[1])
 		if err != nil {

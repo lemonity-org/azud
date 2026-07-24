@@ -277,6 +277,17 @@ servers:
     hosts:
       - 192.168.1.3
     cmd: bin/jobs
+    strategy: stop_first
+    runtime:
+      user: "10001:10001"
+      read_only: true
+      cap_drop: [ALL]
+      no_new_privileges: true
+      disable_healthcheck: true
+      tmpfs:
+        - path: /tmp
+          size: 64m
+          mode: "1777"
 
 proxy:
   hosts:

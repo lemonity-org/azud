@@ -24,6 +24,18 @@ servers:
     hosts:
       - 203.0.113.11
     cmd: bundle exec sidekiq
+    strategy: stop_first
+    runtime:
+      user: "10001:10001"
+      read_only: true
+      cap_drop: [ALL]
+      no_new_privileges: true
+      disable_healthcheck: true
+      stop_timeout: 30s
+      tmpfs:
+        - path: /tmp
+          size: 64m
+          mode: "1777"
 ```
 
 Role options:
@@ -31,6 +43,30 @@ Role options:
 - `cmd`: override container command
 - `options`: Podman options like `memory`, `cpus`
 - `labels`, `env`: role-level metadata
+- `strategy`: `rolling` (default) or `stop_first` for singleton non-web roles
+- `runtime`: typed, validated Podman runtime hardening:
+  - `user`: numeric `UID[:GID]` or POSIX `user[:group]`
+  - `read_only`: mount the image root filesystem read-only
+  - `cap_drop`: capabilities to remove, normally `[ALL]`
+  - `no_new_privileges`: prevent privilege gains by the process tree
+  - `tmpfs`: bounded mounts with required `path` and `size`; mounts default to
+    `rw,noexec,nosuid,nodev`, with optional `mode`, `read_only`, `allow_exec`,
+    `allow_suid`, and `allow_devices`
+  - `disable_healthcheck`: ignore a HEALTHCHECK inherited from the image
+  - `stop_timeout`: container-level graceful stop timeout
+
+`stop_first` validates the complete candidate container configuration with
+`podman create` while the current container is still running. It then stops the
+old process before starting the candidate. If the replacement fails to start or
+cannot be activated, Azud stops it before restoring and restarting the previous
+container. This strategy deliberately trades a short service gap for a strict
+no-overlap guarantee. It requires exactly one host, is rejected for the
+proxy-serving `web` role, and cannot be used with `azud scale`. Before every
+deployment, Azud reconciles an interrupted transition and restores the previous
+container before attempting another replacement.
+
+A configuration containing only non-web roles does not require a `proxy`
+section. `azud setup` automatically skips proxy setup in that configuration.
 
 ## Proxy and Health Checks
 

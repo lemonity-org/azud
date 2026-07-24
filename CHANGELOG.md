@@ -6,6 +6,9 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added typed per-role container hardening and a rollback-safe `stop_first`
+  strategy for singleton non-web workloads, including interrupted-deploy
+  reconciliation and scale protection.
 - Added stable Caddy route ownership IDs and explicit proxy reconciliation.
 - Added configurable HTTP, h2c, and HTTPS application upstream transports.
 - Added command-based readiness probes for gRPC, TCP, and custom checks.

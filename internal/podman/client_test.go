@@ -156,6 +156,63 @@ func TestBuildRunCommand_WithResources(t *testing.T) {
 	}
 }
 
+func TestBuildRunCommand_WithTypedRuntimeHardening(t *testing.T) {
+	cfg := &ContainerConfig{
+		Image:             "worker:latest",
+		User:              "10001:10001",
+		ReadOnly:          true,
+		CapDrop:           []string{"ALL"},
+		NoNewPrivileges:   true,
+		Tmpfs:             []string{"/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"},
+		NoHealthcheck:     true,
+		StopTimeout:       30,
+		HealthCmd:         "should-not-disable-explicit-command-generation",
+		HealthInterval:    "10s",
+		HealthTimeout:     "5s",
+		HealthRetries:     3,
+		HealthStartPeriod: "1m",
+	}
+
+	cmd := cfg.BuildRunCommand()
+	for _, want := range []string{
+		"--user 10001:10001",
+		"--read-only",
+		"--cap-drop ALL",
+		"--security-opt no-new-privileges",
+		"--tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777'",
+		"--no-healthcheck",
+		"--stop-timeout 30",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("expected %q in %q", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "--health-cmd") {
+		t.Fatalf("disabled healthcheck still emitted a command: %q", cmd)
+	}
+}
+
+func TestBuildCreateCommandOmitsRunOnlyFlags(t *testing.T) {
+	cfg := &ContainerConfig{
+		Name:    "candidate",
+		Image:   "worker:latest",
+		Detach:  true,
+		Remove:  true,
+		EnvFile: "$HOME/.azud/worker.env",
+	}
+
+	cmd := cfg.BuildCreateCommand()
+	if !strings.HasPrefix(cmd, "podman create ") {
+		t.Fatalf("expected create command, got %q", cmd)
+	}
+	if strings.Contains(cmd, " -d ") || strings.Contains(cmd, " --rm ") {
+		t.Fatalf("create command contains run-only flags: %q", cmd)
+	}
+	if !strings.Contains(cmd, `--env-file ${HOME}/.azud/worker.env`) {
+		t.Fatalf("create command lost env file: %q", cmd)
+	}
+}
+
 func TestBuildRunCommand_WithRemove(t *testing.T) {
 	cfg := &ContainerConfig{
 		Image:  "nginx:latest",
