@@ -2,7 +2,29 @@ package config
 
 import (
 	"sort"
+	"strings"
 	"time"
+)
+
+// StopTimeoutOverhead leaves time for Podman and its caller to finish
+// bookkeeping after the container's graceful-stop window expires.
+const StopTimeoutOverhead = 5 * time.Second
+
+// WebRoleName is the role whose containers are served by the Caddy proxy.
+const WebRoleName = "web"
+
+// Supported role deployment strategies. Comparing against these constants
+// instead of bare literals keeps the validator, the deployer, and the scale
+// guard from drifting apart: a typo in any one of them would silently disable
+// a singleton safety check.
+const (
+	// StrategyRolling starts the replacement container before retiring the
+	// previous one. It is the default when strategy is unset.
+	StrategyRolling = "rolling"
+
+	// StrategyStopFirst guarantees that the previous and replacement
+	// containers never run at the same time.
+	StrategyStopFirst = "stop_first"
 )
 
 // Config represents the main deployment configuration
@@ -112,6 +134,12 @@ type RoleConfig struct {
 	// List of host addresses
 	Hosts []string `yaml:"hosts"`
 
+	// Deployment strategy. Empty/default uses Azud's rolling replacement.
+	// stop_first is intended for singleton non-web processes that must never
+	// overlap with their previous container. See StrategyRolling and
+	// StrategyStopFirst.
+	Strategy string `yaml:"strategy"`
+
 	// Command to run (overrides default)
 	Cmd string `yaml:"cmd"`
 
@@ -126,6 +154,80 @@ type RoleConfig struct {
 
 	// Environment variables specific to this role
 	Env map[string]string `yaml:"env"`
+
+	// Typed container runtime hardening for this role.
+	Runtime RoleRuntimeConfig `yaml:"runtime"`
+}
+
+// RoleRuntimeConfig contains security-sensitive Podman settings exposed as
+// typed configuration instead of arbitrary command-line options.
+type RoleRuntimeConfig struct {
+	// User (or user:group) to run as inside the container.
+	User string `yaml:"user"`
+
+	// Mount the image root filesystem read-only.
+	ReadOnly bool `yaml:"read_only"`
+
+	// Linux capabilities to remove (for example, ["ALL"]).
+	CapDrop []string `yaml:"cap_drop"`
+
+	// Prevent the container process and its children from gaining privileges.
+	NoNewPrivileges bool `yaml:"no_new_privileges"`
+
+	// Bounded tmpfs mounts. Security-sensitive flags default to their hardened
+	// form unless explicitly allowed.
+	Tmpfs []RoleTmpfsConfig `yaml:"tmpfs"`
+
+	// Disable a HEALTHCHECK inherited from the image.
+	DisableHealthcheck bool `yaml:"disable_healthcheck"`
+
+	// Container-level graceful stop timeout.
+	StopTimeout time.Duration `yaml:"stop_timeout"`
+}
+
+// RoleTmpfsConfig describes a bounded in-memory mount without exposing raw
+// Podman option syntax in application configuration.
+type RoleTmpfsConfig struct {
+	Path         string `yaml:"path"`
+	Size         string `yaml:"size"`
+	Mode         string `yaml:"mode"`
+	ReadOnly     bool   `yaml:"read_only"`
+	AllowExec    bool   `yaml:"allow_exec"`
+	AllowSUID    bool   `yaml:"allow_suid"`
+	AllowDevices bool   `yaml:"allow_devices"`
+}
+
+// ContainerSpec returns the validated Podman tmpfs mount representation.
+// Options are assembled from named values rather than by index so that adding
+// a mount option later cannot silently rewrite an unrelated security flag.
+func (t RoleTmpfsConfig) ContainerSpec() string {
+	write := "rw"
+	if t.ReadOnly {
+		write = "ro"
+	}
+	exec := "noexec"
+	if t.AllowExec {
+		exec = "exec"
+	}
+	suid := "nosuid"
+	if t.AllowSUID {
+		suid = "suid"
+	}
+	devices := "nodev"
+	if t.AllowDevices {
+		devices = "dev"
+	}
+
+	options := []string{write, exec, suid, devices}
+	// Validation rejects an empty size, but the method is exported: emitting
+	// a bare "size=" would produce an unusable Podman argument.
+	if t.Size != "" {
+		options = append(options, "size="+t.Size)
+	}
+	if t.Mode != "" {
+		options = append(options, "mode="+t.Mode)
+	}
+	return t.Path + ":" + strings.Join(options, ",")
 }
 
 // BuilderConfig holds build settings
@@ -544,6 +646,34 @@ func (d *DeployConfig) GetStopTimeout() int {
 	return 30
 }
 
+// GetRoleStopTimeout returns the role-specific stop timeout when configured,
+// otherwise the deployment-wide timeout.
+func (c *Config) GetRoleStopTimeout(role string) int {
+	if roleConfig, ok := c.Servers[role]; ok && roleConfig.Runtime.StopTimeout > 0 {
+		return int(roleConfig.Runtime.StopTimeout.Seconds())
+	}
+	return c.Deploy.GetStopTimeout()
+}
+
+// UsesStopFirst reports whether the role is configured as a stop-first
+// singleton. Callers should prefer this over comparing Strategy directly.
+func (c *Config) UsesStopFirst(role string) bool {
+	roleConfig, ok := c.Servers[role]
+	return ok && roleConfig.Strategy == StrategyStopFirst
+}
+
+// MaxStopTimeout returns the largest effective role stop timeout.
+func (c *Config) MaxStopTimeout() time.Duration {
+	maxTimeout := time.Duration(c.Deploy.GetStopTimeout()) * time.Second
+	for role := range c.Servers {
+		timeout := time.Duration(c.GetRoleStopTimeout(role)) * time.Second
+		if timeout > maxTimeout {
+			maxTimeout = timeout
+		}
+	}
+	return maxTimeout
+}
+
 // CanaryConfig holds canary deployment settings
 type CanaryConfig struct {
 	// Enable canary deployment mode
@@ -774,7 +904,7 @@ func (c *Config) GetCronHosts(name string) []string {
 	}
 
 	// Default to first host from web role, or first host overall
-	if hosts := c.GetRoleHosts("web"); len(hosts) > 0 {
+	if hosts := c.GetRoleHosts(WebRoleName); len(hosts) > 0 {
 		return []string{hosts[0]}
 	}
 

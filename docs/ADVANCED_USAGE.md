@@ -147,9 +147,42 @@ servers:
   worker:
     hosts: [192.168.1.2] # Can be same as web
     cmd: bundle exec sidekiq
+    # Use stop_first when only one scheduler/consumer may run at a time.
+    strategy: stop_first
     options:
       memory: 1g
+    runtime:
+      user: "10001:10001"
+      read_only: true
+      cap_drop: [ALL]
+      no_new_privileges: true
+      disable_healthcheck: true
+      stop_timeout: 30s
+      tmpfs:
+        - path: /tmp
+          size: 64m
+          mode: "1777"
 ```
+
+The default `rolling` strategy starts a replacement non-web role before
+retiring the previous container. `stop_first` validates the candidate
+configuration first, then guarantees that the previous and replacement
+processes never run simultaneously. On activation failure, Azud stops the
+candidate before restarting the preserved previous container. The role must
+have exactly one host and cannot be managed with `azud scale`; use
+`azud app start/stop --role <role>` for its zero/one lifecycle. Azud also
+reconciles interrupted `-old-*` and `-new-*` transitions before the next deploy.
+
+Two conditions make the singleton guarantee enforceable, and Azud fails the
+deployment rather than proceeding without them:
+
+- The role's generated systemd unit must be inactive. Units use
+  `Restart=always`, so systemd would start a replacement from the unit the
+  moment Azud stops the previous container. Stop the unit before deploying and
+  start it afterwards; it stays the supported cold-start path after a reboot.
+- Every container of the role must carry Azud's management labels. A container
+  occupying the role's stable name without them cannot be reconciled, and Azud
+  refuses to start a second process beside it.
 
 ### Multiple Services on the Same Server
 

@@ -109,6 +109,13 @@ type ContainerConfig struct {
 	Memory          string // e.g., "512m"
 	CPUs            string // e.g., "0.5"
 	Restart         string // no, always, unless-stopped, on-failure[:max-retries]
+	User            string
+	ReadOnly        bool
+	CapDrop         []string
+	NoNewPrivileges bool
+	Tmpfs           []string
+	NoHealthcheck   bool
+	StopTimeout     int
 	Detach          bool
 	Remove          bool
 	Pull            bool
@@ -124,13 +131,23 @@ type ContainerConfig struct {
 }
 
 func (c *ContainerConfig) BuildRunCommand() string {
-	args := []string{"run"}
+	return c.buildContainerCommand("run")
+}
 
-	if c.Detach {
+// BuildCreateCommand builds a Podman create command for validating a complete
+// container configuration without starting its process.
+func (c *ContainerConfig) BuildCreateCommand() string {
+	return c.buildContainerCommand("create")
+}
+
+func (c *ContainerConfig) buildContainerCommand(subcommand string) string {
+	args := []string{subcommand}
+
+	if subcommand == "run" && c.Detach {
 		args = append(args, "-d")
 	}
 
-	if c.Remove {
+	if subcommand == "run" && c.Remove {
 		args = append(args, "--rm")
 	}
 
@@ -184,6 +201,28 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		args = append(args, "--network-alias", shell.Quote(alias))
 	}
 
+	if c.User != "" {
+		args = append(args, "--user", shell.Quote(c.User))
+	}
+	if c.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	for _, capability := range c.CapDrop {
+		args = append(args, "--cap-drop", shell.Quote(capability))
+	}
+	if c.NoNewPrivileges {
+		args = append(args, "--security-opt", "no-new-privileges")
+	}
+	for _, mount := range c.Tmpfs {
+		args = append(args, "--tmpfs", shell.Quote(mount))
+	}
+	if c.NoHealthcheck {
+		args = append(args, "--no-healthcheck")
+	}
+	if c.StopTimeout > 0 {
+		args = append(args, "--stop-timeout", fmt.Sprintf("%d", c.StopTimeout))
+	}
+
 	if c.Memory != "" {
 		args = append(args, "--memory", shell.Quote(c.Memory))
 	}
@@ -198,7 +237,7 @@ func (c *ContainerConfig) BuildRunCommand() string {
 		args = append(args, "--entrypoint", shell.Quote(c.Entrypoint))
 	}
 
-	if c.HealthCmd != "" {
+	if c.HealthCmd != "" && !c.NoHealthcheck {
 		args = append(args, "--health-cmd", shell.Quote(c.HealthCmd))
 		if c.HealthInterval != "" {
 			args = append(args, "--health-interval", shell.Quote(c.HealthInterval))

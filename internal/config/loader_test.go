@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -35,6 +36,45 @@ deploy:
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err, want)
 		}
+	}
+}
+
+func TestLoaderParsesHardenedWorkerOnlyRole(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deploy.yml")
+	content := `
+service: test
+image: test:latest
+servers:
+  worker:
+    hosts: [localhost]
+    strategy: stop_first
+    runtime:
+      user: "10001:10001"
+      read_only: true
+      cap_drop: [ALL]
+      no_new_privileges: true
+      tmpfs:
+        - path: /tmp
+          size: 64m
+          mode: "1777"
+      disable_healthcheck: true
+      stop_timeout: 30s
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := NewLoader(path, "").Load()
+	if err != nil {
+		t.Fatalf("worker-only runtime config failed to load: %v", err)
+	}
+	worker := cfg.Servers["worker"]
+	if worker.Strategy != "stop_first" || worker.Runtime.User != "10001:10001" ||
+		worker.Runtime.StopTimeout.String() != "30s" {
+		t.Fatalf("worker runtime config was not preserved: %#v", worker)
+	}
+	if cfg.SSH.CommandTimeout != 35*time.Second {
+		t.Fatalf("default SSH command timeout does not leave stop overhead: %s", cfg.SSH.CommandTimeout)
 	}
 }
 

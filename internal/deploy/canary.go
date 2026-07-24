@@ -559,7 +559,9 @@ func (c *CanaryDeployer) Rollback() error {
 
 		// Stop and remove canary container
 		c.log.Host(host, "Removing canary container...")
-		stopTimeout := c.cfg.Deploy.GetStopTimeout()
+		// The canary always runs the web role, so honour that role's runtime
+		// stop timeout rather than the deployment-wide default.
+		stopTimeout := c.cfg.GetRoleStopTimeout(config.WebRoleName)
 		if err := c.containers.Stop(host, c.state.CanaryContainer, stopTimeout); err != nil {
 			return fmt.Errorf("failed to stop canary container on %s: %w", host, err)
 		}

@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidate_RequiredFields(t *testing.T) {
@@ -1449,6 +1450,190 @@ func TestValidate_RoleOptionsAreAllowlisted(t *testing.T) {
 	}
 }
 
+func TestValidate_RoleRuntimeHardening(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Servers["worker"] = RoleConfig{
+		Hosts:    []string{"localhost"},
+		Strategy: StrategyStopFirst,
+		Runtime: RoleRuntimeConfig{
+			User:            "10001:10001",
+			ReadOnly:        true,
+			CapDrop:         []string{"ALL"},
+			NoNewPrivileges: true,
+			Tmpfs: []RoleTmpfsConfig{{
+				Path: "/tmp",
+				Size: "64m",
+				Mode: "1777",
+			}},
+			DisableHealthcheck: true,
+			StopTimeout:        30 * time.Second,
+		},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("valid hardened worker config failed: %v", err)
+	}
+}
+
+func TestValidate_RoleRuntimeRejectsUnsafeValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    string
+		mutate  func(*RoleConfig)
+		wantErr string
+	}{
+		{
+			name: "unknown strategy",
+			mutate: func(role *RoleConfig) {
+				role.Strategy = "replace; reboot"
+			},
+			wantErr: "servers.worker.strategy",
+		},
+		{
+			name: "stop first web",
+			role: WebRoleName,
+			mutate: func(role *RoleConfig) {
+				role.Strategy = StrategyStopFirst
+			},
+			wantErr: "supported only for non-web roles",
+		},
+		{
+			name: "disable healthcheck on web",
+			role: WebRoleName,
+			mutate: func(role *RoleConfig) {
+				role.Runtime.DisableHealthcheck = true
+			},
+			wantErr: "disable_healthcheck is supported only for non-web roles",
+		},
+		{
+			name: "user injection",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.User = "10001; id"
+			},
+			wantErr: "runtime.user",
+		},
+		{
+			name: "capability injection",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.CapDrop = []string{"ALL; reboot"}
+			},
+			wantErr: "runtime.cap_drop[0]",
+		},
+		{
+			name: "tmpfs size command substitution",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.Tmpfs = []RoleTmpfsConfig{{Path: "/tmp", Size: "$(id)"}}
+			},
+			wantErr: "runtime.tmpfs[0]",
+		},
+		{
+			name: "tmpfs traversal",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.Tmpfs = []RoleTmpfsConfig{{Path: "/tmp/../host", Size: "64m"}}
+			},
+			wantErr: "must not contain traversal",
+		},
+		{
+			name: "unbounded tmpfs",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.Tmpfs = []RoleTmpfsConfig{{Path: "/tmp"}}
+			},
+			wantErr: "tmpfs size",
+		},
+		{
+			name: "fractional timeout",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.StopTimeout = 1500 * time.Millisecond
+			},
+			wantErr: "whole seconds",
+		},
+		{
+			name: "subsecond timeout",
+			mutate: func(role *RoleConfig) {
+				role.Runtime.StopTimeout = 500 * time.Millisecond
+			},
+			wantErr: "must be at least 1s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseValidConfig()
+			roleName := tt.role
+			if roleName == "" {
+				roleName = "worker"
+			}
+			role := RoleConfig{Hosts: []string{"localhost"}}
+			tt.mutate(&role)
+			cfg.Servers[roleName] = role
+			err := Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidate_StopFirstRequiresOneHost(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Servers["worker"] = RoleConfig{
+		Hosts:    []string{"worker-a", "worker-b"},
+		Strategy: StrategyStopFirst,
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "requires exactly one host") {
+		t.Fatalf("expected singleton host validation error, got %v", err)
+	}
+}
+
+func TestValidate_RoleTmpfsRejectsDuplicatePaths(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Servers["worker"] = RoleConfig{
+		Hosts: []string{"localhost"},
+		Runtime: RoleRuntimeConfig{Tmpfs: []RoleTmpfsConfig{
+			{Path: "/tmp", Size: "64m"},
+			{Path: "/tmp", Size: "32m"},
+		}},
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "tmpfs path is duplicated") {
+		t.Fatalf("expected duplicate tmpfs validation error, got %v", err)
+	}
+}
+
+func TestValidate_RoleStopTimeoutRequiresSSHOverhead(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.SSH.CommandTimeout = 30 * time.Second
+	cfg.Servers["worker"] = RoleConfig{
+		Hosts: []string{"localhost"},
+		Runtime: RoleRuntimeConfig{
+			StopTimeout: 30 * time.Second,
+		},
+	}
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "must be at least 35s") {
+		t.Fatalf("expected SSH timeout overhead validation error, got %v", err)
+	}
+}
+
+func TestValidate_NonWebOnlyConfigDoesNotRequireProxy(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Servers = map[string]RoleConfig{
+		"worker": {
+			Hosts:    []string{"localhost"},
+			Strategy: StrategyStopFirst,
+		},
+	}
+	cfg.Proxy = ProxyConfig{}
+	cfg.Podman.Rootless = true
+
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("worker-only config should not require proxy fields: %v", err)
+	}
+}
+
 func TestValidate_RoleNameInjection(t *testing.T) {
 	cfg := baseValidConfig()
 	cfg.Servers = map[string]RoleConfig{
@@ -1458,5 +1643,51 @@ func TestValidate_RoleNameInjection(t *testing.T) {
 	err := Validate(cfg)
 	if err == nil || !strings.Contains(err.Error(), "role name") {
 		t.Fatalf("expected role name validation error, got %v", err)
+	}
+}
+
+func TestRoleTmpfsContainerSpec(t *testing.T) {
+	tests := []struct {
+		name  string
+		mount RoleTmpfsConfig
+		want  string
+	}{
+		{
+			name:  "hardened defaults",
+			mount: RoleTmpfsConfig{Path: "/tmp", Size: "64m"},
+			want:  "/tmp:rw,noexec,nosuid,nodev,size=64m",
+		},
+		{
+			name:  "mode is appended last",
+			mount: RoleTmpfsConfig{Path: "/tmp", Size: "64m", Mode: "1777"},
+			want:  "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+		},
+		{
+			name: "each relaxation maps to its own flag",
+			mount: RoleTmpfsConfig{
+				Path:         "/run",
+				Size:         "8m",
+				ReadOnly:     true,
+				AllowExec:    true,
+				AllowSUID:    true,
+				AllowDevices: true,
+			},
+			want: "/run:ro,exec,suid,dev,size=8m",
+		},
+		{
+			// Validation rejects this, but the exported method must not emit a
+			// dangling "size=" that Podman would reject at runtime.
+			name:  "missing size is omitted",
+			mount: RoleTmpfsConfig{Path: "/tmp"},
+			want:  "/tmp:rw,noexec,nosuid,nodev",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.mount.ContainerSpec(); got != tt.want {
+				t.Fatalf("ContainerSpec() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

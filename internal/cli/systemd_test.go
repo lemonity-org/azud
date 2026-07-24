@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/proxy"
@@ -55,6 +56,19 @@ func TestBuildAppQuadletUnitWorkerMatchesRole(t *testing.T) {
 				Env:     map[string]string{"QUEUE": "critical"},
 				Labels:  map[string]string{"team": "jobs"},
 				Options: map[string]string{"memory": "512M", "cpus": "0.5"},
+				Runtime: config.RoleRuntimeConfig{
+					User:            "10001:10001",
+					ReadOnly:        true,
+					CapDrop:         []string{"ALL"},
+					NoNewPrivileges: true,
+					Tmpfs: []config.RoleTmpfsConfig{{
+						Path: "/tmp",
+						Size: "64m",
+						Mode: "1777",
+					}},
+					DisableHealthcheck: true,
+					StopTimeout:        45 * time.Second,
+				},
 			},
 		},
 		Env: config.EnvConfig{Secret: []string{"TOKEN"}},
@@ -74,8 +88,21 @@ func TestBuildAppQuadletUnitWorkerMatchesRole(t *testing.T) {
 	if unit.Environment["QUEUE"] != "critical" || unit.Label["team"] != "jobs" {
 		t.Fatalf("worker environment/labels missing: env=%v labels=%v", unit.Environment, unit.Label)
 	}
-	if !reflect.DeepEqual(unit.PodmanArgs, []string{"--memory=512M", "--cpus=0.5"}) {
+	if !reflect.DeepEqual(unit.PodmanArgs, []string{
+		"--memory=512M",
+		"--cpus=0.5",
+		"--user=10001:10001",
+		"--read-only",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges",
+		"--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+		"--no-healthcheck",
+		"--stop-timeout=45",
+	}) {
 		t.Fatalf("worker resources = %v", unit.PodmanArgs)
+	}
+	if unit.TimeoutStopSec != 50 {
+		t.Fatalf("worker stop timeout = %d", unit.TimeoutStopSec)
 	}
 	if !reflect.DeepEqual(unit.EnvironmentFile, []string{"%h/.azud/secrets"}) {
 		t.Fatalf("worker secrets path = %v", unit.EnvironmentFile)

@@ -6,6 +6,30 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added typed per-role container hardening and a rollback-safe `stop_first`
+  strategy for singleton non-web workloads, including interrupted-deploy
+  reconciliation and scale protection.
+- **Breaking:** `ssh.command_timeout` must now be at least five seconds longer
+  than the largest effective container stop timeout, so an SSH command can
+  never be cut off mid-stop. Configurations that set it explicitly below that
+  floor (with the default 30s stop timeout, anything under `35s`) now fail
+  validation; raise the value or lower `deploy.stop_timeout`. When
+  `ssh.command_timeout` is unset, the default is raised automatically.
+- **Breaking:** `deploy.stop_timeout` and `servers.<role>.runtime.stop_timeout`
+  must be whole seconds and at least `1s`; Podman expresses stop timeouts in
+  seconds, and sub-second values were silently truncated to zero before.
+- Changed application containers to run with an explicit `--stop-timeout`
+  (default 30s) instead of relying on Podman's 10s default, so a graceful
+  shutdown gets the configured window on `azud app stop`, deploys, and reboots.
+- Fixed a rolling deploy leaving the previous container running under the
+  stable role name's network alias while the final upstream was registered.
+  The proxy could dial it and then lose the connection when it was removed,
+  which passive health checking escalated into a route-wide 503 for the whole
+  30s `fail_duration`. The previous container is now stopped, gracefully and
+  while it is already out of the route, before the final upstream is added.
+- Added a bounded upstream retry window to generated Caddy routes, so a route
+  that momentarily has no available upstream retries instead of answering 503
+  on the first request.
 - Added stable Caddy route ownership IDs and explicit proxy reconciliation.
 - Added configurable HTTP, h2c, and HTTPS application upstream transports.
 - Added command-based readiness probes for gRPC, TCP, and custom checks.

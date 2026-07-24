@@ -50,6 +50,23 @@ func (m *ContainerManager) Run(host string, config *ContainerConfig) (string, er
 	return strings.TrimSpace(result.Stdout), nil
 }
 
+// Create validates and creates a container without starting it.
+func (m *ContainerManager) Create(host string, config *ContainerConfig) (string, error) {
+	if err := ValidateOptions(config.Options); err != nil {
+		return "", err
+	}
+	cmd := config.BuildCreateCommand()
+	cmd = m.client.RewriteCommand(cmd)
+	result, err := m.client.ssh.Execute(host, cmd)
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("failed to create container: %s", result.Stderr)
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}
+
 func (m *ContainerManager) Start(host, container string) error {
 	result, err := m.client.Execute(host, "start", container)
 	if err != nil {

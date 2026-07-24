@@ -121,6 +121,20 @@ func TestSetupIntegration(t *testing.T) {
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "rollback", "alpine")
 	assertHTTPAvailable(t, client, host, httpPort)
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "history", "list")
+	assertRemoteContains(t, client, host,
+		"podman ps --filter label=azud.service=azud-it --filter label=azud.role=worker --format '{{.Names}}' | wc -l",
+		"1")
+	runAzudExpectFailure(t, binaryPath, configPath, stateDir, tempDir, "scale", "worker=2", "--host", host)
+
+	// Simulate a process interruption immediately after preserving the current
+	// singleton under its backup name. The next deployment must reconcile the
+	// interrupted phase before replacing it.
+	assertRemoteSuccess(t, client, host, "podman rename azud-it-worker azud-it-worker-old-interrupted")
+	runAzud(t, binaryPath, configPath, stateDir, tempDir, "deploy", "--version", "latest", "--role", "worker")
+	assertContainerRunning(t, client, host, "azud-it-worker")
+	assertRemoteContains(t, client, host,
+		"podman ps -a --filter label=azud.service=azud-it --filter label=azud.role=worker --format '{{.Names}}' | grep -E '^azud-it-worker-(old|new)-' | wc -l",
+		"0")
 
 	// Scaling uses the exact managed labels and must return to one stable web
 	// instance before canary traffic tests begin.
@@ -183,7 +197,8 @@ func TestSetupIntegration(t *testing.T) {
 	// Install per-role Quadlets, remove the imperative containers, then start
 	// the generated units. This is the same cold-start path used after reboot.
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "systemd", "enable", "--no-start")
-	assertRemoteSuccess(t, client, host, "podman rm -f azud-it azud-it-worker")
+	assertRemoteSuccess(t, client, host,
+		"podman rm -f azud-it azud-it-worker || { ! podman container exists azud-it && ! podman container exists azud-it-worker; }")
 	proxyPodman := "podman"
 	proxySystemctl := "systemctl"
 	if rootless && !proxyRootful {
@@ -198,12 +213,27 @@ func TestSetupIntegration(t *testing.T) {
 	} else if user != "root" {
 		appSystemctl = "sudo -n systemctl"
 	}
-	assertRemoteSuccess(t, client, host, proxyPodman+" rm -f azud-proxy")
+	assertRemoteSuccess(t, client, host,
+		proxyPodman+" rm -f azud-proxy || ! "+proxyPodman+" container exists azud-proxy")
 	assertRemoteSuccess(t, client, host, appSystemctl+" start azud-it.service azud-it-worker.service")
 	assertRemoteSuccess(t, client, host, proxySystemctl+" start azud-proxy.service")
 	assertContainerRunning(t, client, host, "azud-it")
 	assertContainerRunning(t, client, host, "azud-it-worker")
 	assertHTTPAvailable(t, client, host, httpPort)
+
+	// A singleton deployment must refuse to run while the role's unit is
+	// active: Restart=always would recreate the previous container as soon as
+	// Azud stopped it, running it beside the replacement.
+	singletonUnitFailure := runAzudExpectFailure(t, binaryPath, configPath, stateDir, tempDir,
+		"deploy", "--version", "latest", "--role", "worker")
+	if !strings.Contains(singletonUnitFailure, "stop it before deploying this stop_first role") {
+		t.Fatalf("singleton deploy did not report the active unit conflict: %s", singletonUnitFailure)
+	}
+	assertContainerRunning(t, client, host, "azud-it-worker")
+
+	assertRemoteSuccess(t, client, host, appSystemctl+" stop azud-it-worker.service")
+	runAzud(t, binaryPath, configPath, stateDir, tempDir, "deploy", "--version", "latest", "--role", "worker")
+	assertContainerRunning(t, client, host, "azud-it-worker")
 }
 
 func renderIntegrationConfig(host, user, keyPath string, port int, rootless, proxyRootful bool) string {
@@ -222,7 +252,10 @@ servers:
   worker:
     hosts:
       - %s
+    strategy: stop_first
     cmd: "nginx -g 'daemon off;'"
+    runtime:
+      stop_timeout: 5s
     labels:
       azud.integration: worker
     env:
@@ -475,6 +508,7 @@ func cleanupRemote(t *testing.T, host, user, keyPath string, port int) {
 
 	_, _ = client.Execute(host, "systemctl --user stop azud-it.service azud-it-worker.service azud-proxy.service 2>/dev/null || true")
 	_, _ = client.Execute(host, "sudo -n systemctl stop azud-it.service azud-it-worker.service azud-proxy.service 2>/dev/null || true")
+	_, _ = client.Execute(host, "podman ps -aq --filter label=azud.service=azud-it | xargs -r podman rm -f 2>/dev/null || true")
 	_, _ = client.Execute(host, "podman rm -f azud-proxy azud-it azud-it-worker azud-it-cache azud-it-cron-heartbeat 2>/dev/null || true")
 	_, _ = client.Execute(host, "podman network rm azud 2>/dev/null || true")
 	_, _ = client.Execute(host, "sudo -n podman rm -f azud-proxy 2>/dev/null || true")

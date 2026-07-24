@@ -38,6 +38,15 @@ const (
 	azudRouteIDPrefix   = "azud-route-"
 	azudHandlerIDPrefix = "azud-proxy-"
 
+	// upstreamTryDuration and upstreamTryInterval keep a request alive while a
+	// route momentarily has no available upstream, which is what a container
+	// swap looks like from Caddy's side. Without them Caddy answers 503 on the
+	// first such request. The window is deliberately much larger than a swap
+	// gap and much smaller than the passive-health fail_duration: during a real
+	// outage requests should fail rather than pile up.
+	upstreamTryDuration = "5s"
+	upstreamTryInterval = "250ms"
+
 	// Bridged containers must listen on the container interface so Podman's
 	// loopback-only host port can reach the API. Host-networked containers share
 	// the host namespace and therefore stay bound to host loopback.
@@ -1027,6 +1036,12 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 			SelectionPolicy: &SelectionPolicy{
 				Policy: policy,
 			},
+			// A deploy can leave a sub-second window in which the route has no
+			// available upstream, and passive health checking can extend that
+			// to a full fail_duration. Retrying briefly turns what would be a
+			// hard 503 into a slightly slower response.
+			TryDuration: upstreamTryDuration,
+			TryInterval: upstreamTryInterval,
 		},
 	}
 

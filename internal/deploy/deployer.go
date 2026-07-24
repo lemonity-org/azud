@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -13,18 +14,38 @@ import (
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/proxy"
+	"github.com/lemonity-org/azud/internal/quadlet"
 	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
+
+// containerLifecycle is the subset of podman.ContainerManager the deployer
+// depends on. It exists so lifecycle sequencing can be exercised against a
+// fake that records ordering and enforces the singleton invariant.
+type containerLifecycle interface {
+	Create(host string, config *podman.ContainerConfig) (string, error)
+	Run(host string, config *podman.ContainerConfig) (string, error)
+	Start(host, container string) error
+	Stop(host, container string, timeout int) error
+	Remove(host, container string, force bool) error
+	Restart(host, container string, timeout int) error
+	Exists(host, container string) (bool, error)
+	IsRunning(host, container string) (bool, error)
+	WaitRunning(host, container string, stabilize time.Duration) error
+	Rename(host, oldName, newName string) error
+	List(host string, all bool, filters map[string]string) ([]podman.Container, error)
+	HostPort(host, container string, containerPort int) (int, error)
+}
 
 // Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
 	cfg         *config.Config
 	sshClient   *ssh.Client
 	podman      *podman.Client
-	containers  *podman.ContainerManager
+	containers  containerLifecycle
 	images      *podman.ImageManager
 	imageDigest func(host, image string) (string, error)
+	unitActive  func(host, unit string) (bool, error)
 	registry    *podman.RegistryManager
 	proxy       *proxy.Manager
 	hooks       *HookRunner
@@ -70,17 +91,33 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 	proxyManager.SetProxyConfig(newProxyConfigFromCfg(cfg))
 
+	// Mirrors the scope `azud systemd enable` uses for application units.
+	quadletDeployer := quadlet.NewQuadletDeployerWithOptions(
+		sshClient,
+		log,
+		cfg.Podman.QuadletPath,
+		cfg.Podman.Rootless,
+		!cfg.Podman.Rootless && cfg.SSH.User != "root",
+	)
+
 	return &Deployer{
 		cfg:        cfg,
 		sshClient:  sshClient,
 		podman:     podmanClient,
 		containers: podman.NewContainerManager(podmanClient),
 		images:     podman.NewImageManager(podmanClient),
-		registry:   podman.NewRegistryManager(podmanClient),
-		proxy:      proxyManager,
-		hooks:      NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
-		history:    NewDurableHistoryStore(cfg.Deploy.RetainHistory, log),
-		log:        log,
+		unitActive: func(host, unit string) (bool, error) {
+			status, err := quadletDeployer.Status(host, unit)
+			if err != nil {
+				return false, err
+			}
+			return strings.TrimSpace(status) == "active", nil
+		},
+		registry: podman.NewRegistryManager(podmanClient),
+		proxy:    proxyManager,
+		hooks:    NewHookRunner(cfg.HooksPath, cfg.Hooks.Timeout, log),
+		history:  NewDurableHistoryStore(cfg.Deploy.RetainHistory, log),
+		log:      log,
 	}
 }
 
@@ -367,11 +404,24 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	d.log.Host(host, "Starting %s role deployment...", role)
 
 	oldContainerName := RoleContainerName(d.cfg, role)
-	newContainerName := d.generateContainerName(oldContainerName, "new")
-	oldExists, err := d.containers.Exists(host, oldContainerName)
-	if err != nil {
-		return fmt.Errorf("failed to determine whether current container exists: %w", err)
+	stopFirst := !IsProxyRole(role) && d.cfg.UsesStopFirst(role)
+	var oldExists bool
+	var err error
+	if stopFirst {
+		if err := d.ensureSingletonUnitInactive(host, oldContainerName); err != nil {
+			return err
+		}
+		oldExists, err = d.reconcileStopFirstStandaloneRole(host, role, oldContainerName)
+		if err != nil {
+			return fmt.Errorf("failed to reconcile current container state: %w", err)
+		}
+	} else {
+		oldExists, err = d.containers.Exists(host, oldContainerName)
+		if err != nil {
+			return fmt.Errorf("failed to determine whether current container exists: %w", err)
+		}
 	}
+	newContainerName := d.generateContainerName(oldContainerName, "new")
 	containerConfig := d.buildContainerConfig(image, newContainerName, role)
 
 	// Run pre-app-boot hook
@@ -380,6 +430,23 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	bootCtx.Role = role
 	if err := d.hooks.Run(ctx, "pre-app-boot", bootCtx); err != nil {
 		return fmt.Errorf("pre-app-boot hook failed: %w", err)
+	}
+
+	if stopFirst {
+		return d.deployStopFirstStandaloneRole(
+			host,
+			role,
+			oldContainerName,
+			newContainerName,
+			containerConfig,
+			oldExists,
+			opts.SkipHealthCheck,
+			func() {
+				if err := d.hooks.Run(ctx, "post-app-boot", bootCtx); err != nil {
+					d.log.Warn("post-app-boot hook failed: %v", err)
+				}
+			},
+		)
 	}
 
 	d.log.Host(host, "Starting new container...")
@@ -552,6 +619,11 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 		if oldPreserved {
 			if err := d.containers.Rename(host, backupName, oldContainerName); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restore old container name: %v", err))
+			} else if err := d.startContainerConfirmed(host, oldContainerName); err != nil {
+				// The preserved container is stopped before the final upstream
+				// swap, so it has to be running again before it takes traffic.
+				// This is a no-op when the rollback happens earlier than that.
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restart old container: %v", err))
 			}
 			if err := d.proxy.AddUpstream(host, proxyHost, oldUpstream); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Sprintf("restore old route: %v", err))
@@ -591,6 +663,22 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 		return nil
 	}
 
+	// Every app container carries the stable role name as a network alias, so
+	// the preserved container keeps answering DNS for that name after it has
+	// been renamed. Left running, the final upstream address below would
+	// resolve to it as well, and removing it moments later would break the
+	// connections Caddy had already opened — which passive health checking
+	// escalates into a route-wide outage for a whole fail_duration window.
+	// Stop it here instead: it is already out of the route, the temporary
+	// upstream still carries traffic, and a stopped container leaves Podman's
+	// DNS immediately. Stopping is also gentler than the forced removal that
+	// followed, because it honors the configured stop timeout.
+	if oldPreserved {
+		if err := d.containers.Stop(host, backupName, d.cfg.GetRoleStopTimeout(role)); err != nil {
+			return rollbackSwap(fmt.Errorf("failed to stop preserved old container: %w", err), true)
+		}
+	}
+
 	// Swap the upstream from the temporary name to the final service name.
 	// Add the final upstream first, then remove the temporary one. This
 	// ensures there is always at least one healthy upstream in the route,
@@ -621,6 +709,393 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	}
 	d.reapStaleTempContainers(host, oldContainerName)
 
+	return nil
+}
+
+func (d *Deployer) createContainerConfirmed(host string, containerConfig *podman.ContainerConfig) error {
+	_, createErr := d.containers.Create(host, containerConfig)
+	if createErr == nil {
+		return nil
+	}
+	exists, inspectErr := d.containers.Exists(host, containerConfig.Name)
+	if inspectErr == nil && exists {
+		return nil
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("create %s: %v (state confirmation failed: %v)", containerConfig.Name, createErr, inspectErr)
+	}
+	return fmt.Errorf("create %s: %w", containerConfig.Name, createErr)
+}
+
+func (d *Deployer) runContainerConfirmed(host string, containerConfig *podman.ContainerConfig) error {
+	_, runErr := d.containers.Run(host, containerConfig)
+	if runErr == nil {
+		return nil
+	}
+	running, inspectErr := d.containers.IsRunning(host, containerConfig.Name)
+	if inspectErr == nil && running {
+		return nil
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("run %s: %v (state confirmation failed: %v)", containerConfig.Name, runErr, inspectErr)
+	}
+	return fmt.Errorf("run %s: %w", containerConfig.Name, runErr)
+}
+
+func (d *Deployer) stopContainerConfirmed(host, name string, timeout int) error {
+	exists, err := d.containers.Exists(host, name)
+	if err != nil {
+		return fmt.Errorf("inspect %s before stop: %w", name, err)
+	}
+	if !exists {
+		return nil
+	}
+	running, err := d.containers.IsRunning(host, name)
+	if err != nil {
+		return fmt.Errorf("inspect %s running state: %w", name, err)
+	}
+	if !running {
+		return nil
+	}
+
+	stopErr := d.containers.Stop(host, name, timeout)
+	running, inspectErr := d.containers.IsRunning(host, name)
+	if inspectErr != nil {
+		if stopErr != nil {
+			return fmt.Errorf("stop %s: %v (state confirmation failed: %v)", name, stopErr, inspectErr)
+		}
+		return fmt.Errorf("confirm %s stopped: %w", name, inspectErr)
+	}
+	if running {
+		if stopErr != nil {
+			return fmt.Errorf("stop %s: %w", name, stopErr)
+		}
+		return fmt.Errorf("container %s is still running after stop", name)
+	}
+	return nil
+}
+
+func (d *Deployer) removeContainerConfirmed(host, name string, force bool) error {
+	exists, err := d.containers.Exists(host, name)
+	if err != nil {
+		return fmt.Errorf("inspect %s before removal: %w", name, err)
+	}
+	if !exists {
+		return nil
+	}
+	removeErr := d.containers.Remove(host, name, force)
+	exists, inspectErr := d.containers.Exists(host, name)
+	if inspectErr != nil {
+		if removeErr != nil {
+			return fmt.Errorf("remove %s: %v (state confirmation failed: %v)", name, removeErr, inspectErr)
+		}
+		return fmt.Errorf("confirm %s removed: %w", name, inspectErr)
+	}
+	if exists {
+		if removeErr != nil {
+			return fmt.Errorf("remove %s: %w", name, removeErr)
+		}
+		return fmt.Errorf("container %s still exists after removal", name)
+	}
+	return nil
+}
+
+func (d *Deployer) renameContainerConfirmed(host, oldName, newName string) error {
+	renameErr := d.containers.Rename(host, oldName, newName)
+	if renameErr == nil {
+		return nil
+	}
+	oldExists, oldInspectErr := d.containers.Exists(host, oldName)
+	newExists, newInspectErr := d.containers.Exists(host, newName)
+	if oldInspectErr == nil && newInspectErr == nil && !oldExists && newExists {
+		return nil
+	}
+	if oldInspectErr != nil || newInspectErr != nil {
+		return fmt.Errorf("rename %s to %s: %v (state confirmation failed: old=%v, new=%v)", oldName, newName, renameErr, oldInspectErr, newInspectErr)
+	}
+	return fmt.Errorf("rename %s to %s: %w", oldName, newName, renameErr)
+}
+
+func (d *Deployer) startContainerConfirmed(host, name string) error {
+	running, err := d.containers.IsRunning(host, name)
+	if err != nil {
+		return fmt.Errorf("inspect %s before start: %w", name, err)
+	}
+	if running {
+		return nil
+	}
+	startErr := d.containers.Start(host, name)
+	running, inspectErr := d.containers.IsRunning(host, name)
+	if inspectErr != nil {
+		if startErr != nil {
+			return fmt.Errorf("start %s: %v (state confirmation failed: %v)", name, startErr, inspectErr)
+		}
+		return fmt.Errorf("confirm %s started: %w", name, inspectErr)
+	}
+	if running {
+		return nil
+	}
+	if startErr != nil {
+		return fmt.Errorf("start %s: %w", name, startErr)
+	}
+	return fmt.Errorf("container %s is not running after start", name)
+}
+
+func (d *Deployer) stopSingletonContainers(host string, containers []string, stopTimeout int) error {
+	var stopErrors []error
+	for _, container := range containers {
+		if err := d.stopContainerConfirmed(host, container, stopTimeout); err != nil {
+			stopErrors = append(stopErrors, err)
+		}
+	}
+	return errors.Join(stopErrors...)
+}
+
+func (d *Deployer) removeSingletonContainers(host string, containers []string, stopTimeout int) error {
+	// Stop every container first. If one removal then fails, no later
+	// temporary container can remain running and violate the singleton.
+	if err := d.stopSingletonContainers(host, containers, stopTimeout); err != nil {
+		return err
+	}
+	var removeErrors []error
+	for _, container := range containers {
+		if err := d.removeContainerConfirmed(host, container, true); err != nil {
+			removeErrors = append(removeErrors, err)
+		}
+	}
+	return errors.Join(removeErrors...)
+}
+
+// ensureSingletonUnitInactive refuses a stop-first deployment while the role's
+// generated systemd unit is running. Those units carry Restart=always, so
+// stopping the renamed previous container would prompt systemd to start a fresh
+// one from the unit while the candidate is booting — precisely the overlap this
+// strategy exists to prevent.
+func (d *Deployer) ensureSingletonUnitInactive(host, unit string) error {
+	if d.unitActive == nil {
+		return nil
+	}
+	active, err := d.unitActive(host, unit)
+	if err != nil {
+		// An inconclusive probe (no systemd, no unit installed, transport
+		// hiccup) must not block deployments; the podman calls that follow run
+		// over the same connection and will surface a real connectivity fault.
+		d.log.Debug("Could not determine %s unit state on %s: %v", unit, host, err)
+		return nil
+	}
+	if !active {
+		return nil
+	}
+	return fmt.Errorf(
+		"systemd unit %s.service is active on %s; stop it before deploying this stop_first role "+
+			"(the unit restarts the previous container automatically and would run beside the replacement)",
+		unit, host,
+	)
+}
+
+// reconcileStopFirstStandaloneRole recovers an interrupted singleton swap
+// before another deployment starts. The previous container is authoritative
+// until the replacement has received the stable name.
+func (d *Deployer) reconcileStopFirstStandaloneRole(host, role, stableName string) (bool, error) {
+	containers, err := d.containers.List(host, true, map[string]string{
+		"label": fmt.Sprintf("azud.service=%s", d.cfg.Service),
+	})
+	if err != nil {
+		return false, fmt.Errorf("list managed role containers: %w", err)
+	}
+	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
+
+	stableExists := false
+	var backups []string
+	var candidates []string
+	for _, container := range containers {
+		if container.Labels["azud.service"] != d.cfg.Service || container.Labels["azud.role"] != role {
+			continue
+		}
+		switch {
+		case container.Name == stableName:
+			stableExists = true
+		case strings.HasPrefix(container.Name, stableName+"-old-"):
+			backups = append(backups, container.Name)
+		case strings.HasPrefix(container.Name, stableName+"-new-"):
+			candidates = append(candidates, container.Name)
+		default:
+			return false, fmt.Errorf(
+				"unrecognized managed container %s prevents singleton deployment; remove it (podman rm -f %s) or switch the role back to the rolling strategy",
+				container.Name, container.Name,
+			)
+		}
+	}
+
+	// The label listing is the only source for the classification above, so a
+	// container occupying the stable name without the expected azud labels
+	// would be invisible here and the deployment would start a second process
+	// beside it. Cross-check the name directly and fail closed on a mismatch.
+	namedStableExists, err := d.containers.Exists(host, stableName)
+	if err != nil {
+		return false, fmt.Errorf("confirm %s exists: %w", stableName, err)
+	}
+	if namedStableExists && !stableExists {
+		return false, fmt.Errorf(
+			"container %s exists but is not labeled as a managed %s/%s container; "+
+				"remove or relabel it before deploying a singleton role",
+			stableName, d.cfg.Service, role,
+		)
+	}
+	if stableExists && !namedStableExists {
+		return false, fmt.Errorf("container %s disappeared while reconciling the singleton role; retry the deployment", stableName)
+	}
+
+	stopTimeout := d.cfg.GetRoleStopTimeout(role)
+	if stableExists {
+		temporary := append(backups, candidates...)
+		if err := d.removeSingletonContainers(host, temporary, stopTimeout); err != nil {
+			return false, fmt.Errorf("clean interrupted singleton containers: %w", err)
+		}
+		return true, nil
+	}
+
+	if err := d.removeSingletonContainers(host, candidates, stopTimeout); err != nil {
+		return false, fmt.Errorf("remove interrupted singleton replacement: %w", err)
+	}
+	if len(backups) > 1 {
+		if err := d.stopSingletonContainers(host, backups, stopTimeout); err != nil {
+			return false, fmt.Errorf("stop ambiguous previous singleton containers: %w", err)
+		}
+		return false, fmt.Errorf("multiple previous singleton containers require manual reconciliation: %v", backups)
+	}
+	if len(backups) == 0 {
+		return false, nil
+	}
+
+	backupName := backups[0]
+	if err := d.renameContainerConfirmed(host, backupName, stableName); err != nil {
+		return false, fmt.Errorf("restore previous singleton name: %w", err)
+	}
+	if err := d.startContainerConfirmed(host, stableName); err != nil {
+		return false, fmt.Errorf("restart restored singleton: %w", err)
+	}
+	return true, nil
+}
+
+// deployStopFirstStandaloneRole replaces a reconciled singleton non-web role
+// without running the previous and candidate containers at the same time.
+func (d *Deployer) deployStopFirstStandaloneRole(
+	host, roleName, stableName, newName string,
+	containerConfig *podman.ContainerConfig,
+	oldExists, skipHealthCheck bool,
+	postBoot func(),
+) error {
+	d.log.Host(host, "Validating %s singleton container configuration...", stableName)
+	if err := d.createContainerConfirmed(host, containerConfig); err != nil {
+		cause := fmt.Errorf("failed to validate singleton container configuration: %w", err)
+		if cleanupErr := d.removeContainerConfirmed(host, newName, true); cleanupErr != nil {
+			return fmt.Errorf("%w (candidate cleanup incomplete: %v)", cause, cleanupErr)
+		}
+		return cause
+	}
+	if err := d.removeContainerConfirmed(host, newName, false); err != nil {
+		return fmt.Errorf("failed to remove validated singleton candidate: %w", err)
+	}
+
+	stopTimeout := d.cfg.GetRoleStopTimeout(roleName)
+
+	cleanupWithoutPrevious := func(cause error) error {
+		var cleanupErrors []string
+		if err := d.stopContainerConfirmed(host, newName, stopTimeout); err != nil {
+			cleanupErrors = append(cleanupErrors, err.Error())
+		}
+		if len(cleanupErrors) == 0 {
+			if err := d.removeContainerConfirmed(host, newName, true); err != nil {
+				cleanupErrors = append(cleanupErrors, err.Error())
+			}
+		}
+		if len(cleanupErrors) > 0 {
+			return fmt.Errorf("%w (candidate cleanup incomplete: %s)", cause, strings.Join(cleanupErrors, "; "))
+		}
+		return cause
+	}
+
+	if !oldExists {
+		d.log.Host(host, "Starting first %s singleton container...", stableName)
+		if err := d.runContainerConfirmed(host, containerConfig); err != nil {
+			return cleanupWithoutPrevious(fmt.Errorf("failed to start singleton container: %w", err))
+		}
+		if !skipHealthCheck {
+			if err := d.containers.WaitRunning(host, newName, d.cfg.Deploy.ReadinessDelay); err != nil {
+				return cleanupWithoutPrevious(fmt.Errorf("singleton startup check failed: %w", err))
+			}
+		}
+		if postBoot != nil {
+			postBoot()
+		}
+		if err := d.renameContainerConfirmed(host, newName, stableName); err != nil {
+			return cleanupWithoutPrevious(fmt.Errorf("failed to assign singleton stable name: %w", err))
+		}
+		d.reapStaleTempContainers(host, stableName)
+		return nil
+	}
+
+	backupName := d.generateContainerName(stableName, "old")
+	if err := d.renameContainerConfirmed(host, stableName, backupName); err != nil {
+		return fmt.Errorf("failed to preserve current singleton container: %w", err)
+	}
+	if err := d.stopContainerConfirmed(host, backupName, stopTimeout); err != nil {
+		restoreErr := d.renameContainerConfirmed(host, backupName, stableName)
+		if restoreErr == nil {
+			restoreErr = d.startContainerConfirmed(host, stableName)
+		}
+		if restoreErr != nil {
+			return fmt.Errorf("failed to stop current singleton container: %v (restore failed: %v)", err, restoreErr)
+		}
+		return fmt.Errorf("failed to stop current singleton container; restored previous container: %w", err)
+	}
+
+	restorePrevious := func(cause error, activeCandidateName string) error {
+		var restoreErrors []string
+		if err := d.stopContainerConfirmed(host, activeCandidateName, stopTimeout); err != nil {
+			return fmt.Errorf("%w (singleton restore blocked until candidate state is known: %v)", cause, err)
+		}
+		if err := d.removeContainerConfirmed(host, activeCandidateName, true); err != nil {
+			restoreErrors = append(restoreErrors, fmt.Sprintf("remove stopped candidate: %v", err))
+		}
+		if err := d.renameContainerConfirmed(host, backupName, stableName); err != nil {
+			restoreErrors = append(restoreErrors, fmt.Sprintf("restore previous name: %v", err))
+			if startErr := d.startContainerConfirmed(host, backupName); startErr != nil {
+				restoreErrors = append(restoreErrors, fmt.Sprintf("restart previous backup: %v", startErr))
+			}
+		} else if err := d.startContainerConfirmed(host, stableName); err != nil {
+			restoreErrors = append(restoreErrors, fmt.Sprintf("restart previous container: %v", err))
+		}
+		if len(restoreErrors) > 0 {
+			return fmt.Errorf("%w (singleton restore incomplete: %s)", cause, strings.Join(restoreErrors, "; "))
+		}
+		return fmt.Errorf("%w (previous singleton container restored)", cause)
+	}
+
+	d.log.Host(host, "Starting replacement %s singleton container...", stableName)
+	if err := d.runContainerConfirmed(host, containerConfig); err != nil {
+		return restorePrevious(fmt.Errorf("failed to start replacement singleton container: %w", err), newName)
+	}
+	if !skipHealthCheck {
+		if err := d.containers.WaitRunning(host, newName, d.cfg.Deploy.ReadinessDelay); err != nil {
+			return restorePrevious(fmt.Errorf("singleton startup check failed: %w", err), newName)
+		}
+	}
+	if postBoot != nil {
+		postBoot()
+	}
+	if err := d.renameContainerConfirmed(host, newName, stableName); err != nil {
+		return restorePrevious(fmt.Errorf("failed to activate replacement singleton container: %w", err), newName)
+	}
+	if err := d.removeContainerConfirmed(host, backupName, false); err != nil {
+		if renameErr := d.renameContainerConfirmed(host, stableName, newName); renameErr != nil {
+			return fmt.Errorf("failed to remove previous singleton container: %v (could not prepare restore: %v)", err, renameErr)
+		}
+		return restorePrevious(fmt.Errorf("failed to remove previous singleton container: %w", err), newName)
+	}
+
+	d.reapStaleTempContainers(host, stableName)
 	return nil
 }
 
@@ -951,9 +1426,8 @@ func (d *Deployer) Stop(hosts []string) error {
 }
 
 func (d *Deployer) StopRoles(hosts, roles []string) error {
-	stopTimeout := d.cfg.Deploy.GetStopTimeout()
 	return d.runOnTargets("stop", hosts, roles, func(target deploymentTarget) error {
-		return d.containers.Stop(target.Host, RoleContainerName(d.cfg, target.Role), stopTimeout)
+		return d.containers.Stop(target.Host, RoleContainerName(d.cfg, target.Role), d.cfg.GetRoleStopTimeout(target.Role))
 	})
 }
 
@@ -972,9 +1446,8 @@ func (d *Deployer) Restart(hosts []string) error {
 }
 
 func (d *Deployer) RestartRoles(hosts, roles []string) error {
-	stopTimeout := d.cfg.Deploy.GetStopTimeout()
 	return d.runOnTargets("restart", hosts, roles, func(target deploymentTarget) error {
-		return d.containers.Restart(target.Host, RoleContainerName(d.cfg, target.Role), stopTimeout)
+		return d.containers.Restart(target.Host, RoleContainerName(d.cfg, target.Role), d.cfg.GetRoleStopTimeout(target.Role))
 	})
 }
 

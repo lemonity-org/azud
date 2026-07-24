@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
@@ -277,7 +279,7 @@ func buildAppQuadletUnit(image, role string) *quadlet.ContainerUnit {
 		Network:        []string{"azud.network"},
 		Label:          containerCfg.Labels,
 		Restart:        "always",
-		TimeoutStopSec: cfg.Deploy.GetStopTimeout(),
+		TimeoutStopSec: containerCfg.StopTimeout + int(config.StopTimeoutOverhead/time.Second),
 		WantedBy:       "default.target",
 	}
 
@@ -293,6 +295,27 @@ func buildAppQuadletUnit(image, role string) *quadlet.ContainerUnit {
 		}
 		if cpus := roleCfg.Options["cpus"]; cpus != "" {
 			unit.PodmanArgs = append(unit.PodmanArgs, "--cpus="+cpus)
+		}
+		if containerCfg.User != "" {
+			unit.PodmanArgs = append(unit.PodmanArgs, "--user="+containerCfg.User)
+		}
+		if containerCfg.ReadOnly {
+			unit.PodmanArgs = append(unit.PodmanArgs, "--read-only")
+		}
+		for _, capability := range containerCfg.CapDrop {
+			unit.PodmanArgs = append(unit.PodmanArgs, "--cap-drop="+capability)
+		}
+		if containerCfg.NoNewPrivileges {
+			unit.PodmanArgs = append(unit.PodmanArgs, "--security-opt=no-new-privileges")
+		}
+		for _, mount := range containerCfg.Tmpfs {
+			unit.PodmanArgs = append(unit.PodmanArgs, "--tmpfs="+mount)
+		}
+		if containerCfg.NoHealthcheck {
+			unit.PodmanArgs = append(unit.PodmanArgs, "--no-healthcheck")
+		}
+		if containerCfg.StopTimeout > 0 {
+			unit.PodmanArgs = append(unit.PodmanArgs, fmt.Sprintf("--stop-timeout=%d", containerCfg.StopTimeout))
 		}
 	}
 

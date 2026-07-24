@@ -803,6 +803,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.SSH.CommandTimeout == 0 {
 		cfg.SSH.CommandTimeout = cfg.Deploy.DeployTimeout
+		minCommandTimeout := cfg.MaxStopTimeout() + StopTimeoutOverhead
+		if cfg.SSH.CommandTimeout < minCommandTimeout {
+			cfg.SSH.CommandTimeout = minCommandTimeout
+		}
 	}
 	if cfg.Deploy.DrainTimeout == 0 {
 		cfg.Deploy.DrainTimeout = 30 * time.Second
