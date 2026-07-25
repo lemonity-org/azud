@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.1.0 - 2026-07-25
+
 - Added typed per-role container hardening and a rollback-safe `stop_first`
   strategy for singleton non-web workloads, including interrupted-deploy
   reconciliation and scale protection.
@@ -42,6 +44,9 @@ release notes for the corresponding signed tag.
   capability detection, and narrow-terminal table reflow.
 - Added the stable, unstyled `azud version --short` automation surface and
   documented the output compatibility contract.
+- Updated Go module dependencies to `github.com/mattn/go-isatty v0.0.24`,
+  `github.com/spf13/pflag v1.0.10`, `golang.org/x/crypto v0.54.0`,
+  `golang.org/x/term v0.45.0`, and `golang.org/x/sys v0.47.0`.
 
 ## 1.0.0 - 2026-07-20
 
