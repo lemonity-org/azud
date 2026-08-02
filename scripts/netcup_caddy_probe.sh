@@ -46,6 +46,12 @@ readonly caddy_image='docker.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01
 readonly admin_listen='127.0.0.1:2019'
 readonly runtime_revision='2'
 readonly probe_id="azud-caddy-probe-$(id -u)-$$-$(date +%s)"
+probe_owner=""
+if ! IFS= read -r probe_owner </proc/sys/kernel/random/uuid || [ -z "$probe_owner" ]; then
+	echo "FAIL: cannot generate the disposable probe ownership token" >&2
+	exit 1
+fi
+readonly probe_owner
 readonly container="${probe_id}"
 readonly writer="${probe_id}-writer"
 readonly upstream="${probe_id}-upstream"
@@ -54,6 +60,19 @@ readonly network="${probe_id}-network"
 readonly data_volume="${probe_id}-data"
 readonly config_volume="${probe_id}-config"
 inspect_file=""
+container_ref=""
+writer_ref=""
+upstream_ref=""
+network_ref=""
+network_id=""
+data_volume_ref=""
+config_volume_ref=""
+container_attempted=0
+writer_attempted=0
+upstream_attempted=0
+network_attempted=0
+data_volume_attempted=0
+config_volume_attempted=0
 
 if ! command -v podman >/dev/null 2>&1; then
 	echo "FAIL: podman is not installed" >&2
@@ -83,37 +102,134 @@ fi
 
 p() { podman "$@"; }
 
+container_has_exact_ownership() {
+	local reference="$1"
+	local expected_id="$2"
+	local actual_id actual_probe actual_owner
+	actual_id="$(p container inspect "$reference" --format '{{.Id}}' 2>/dev/null)" || return 1
+	actual_probe="$(p container inspect "$reference" --format '{{ index .Config.Labels "io.azud.probe" }}' 2>/dev/null)" || return 1
+	actual_owner="$(p container inspect "$reference" --format '{{ index .Config.Labels "io.azud.probe.owner" }}' 2>/dev/null)" || return 1
+	[ -z "$expected_id" ] || [ "$actual_id" = "$expected_id" ] || return 1
+	[ "$actual_probe" = "$probe_id" ] && [ "$actual_owner" = "$probe_owner" ]
+}
+
+volume_has_exact_ownership() {
+	local name="$1"
+	local actual_probe actual_owner
+	actual_probe="$(p volume inspect "$name" --format '{{ index .Labels "io.azud.probe" }}' 2>/dev/null)" || return 1
+	actual_owner="$(p volume inspect "$name" --format '{{ index .Labels "io.azud.probe.owner" }}' 2>/dev/null)" || return 1
+	[ "$actual_probe" = "$probe_id" ] && [ "$actual_owner" = "$probe_owner" ]
+}
+
+network_has_exact_ownership() {
+	local name="$1"
+	local expected_id="$2"
+	local actual_id actual_probe actual_owner
+	actual_id="$(p network inspect "$name" --format '{{.ID}}' 2>/dev/null)" || return 1
+	actual_probe="$(p network inspect "$name" --format '{{ index .Labels "io.azud.probe" }}' 2>/dev/null)" || return 1
+	actual_owner="$(p network inspect "$name" --format '{{ index .Labels "io.azud.probe.owner" }}' 2>/dev/null)" || return 1
+	[ -z "$expected_id" ] || [ "$actual_id" = "$expected_id" ] || return 1
+	[ "$actual_probe" = "$probe_id" ] && [ "$actual_owner" = "$probe_owner" ]
+}
+
+remove_owned_container() {
+	local name="$1"
+	local reference="$2"
+	local attempted="$3"
+	local target expected_id actual_id
+	[ "$attempted" -eq 1 ] || return 0
+	if [ -n "$reference" ] && p container exists "$reference" >/dev/null 2>&1; then
+		target="$reference"
+		expected_id="$reference"
+	elif p container exists "$name" >/dev/null 2>&1; then
+		target="$name"
+		expected_id=""
+	else
+		return 0
+	fi
+	if ! container_has_exact_ownership "$target" "$expected_id"; then
+		echo "FAIL: refusing to delete container $name without its exact probe ID and ownership labels" >&2
+		cleanup_failed=1
+		return 0
+	fi
+	actual_id="$(p container inspect "$target" --format '{{.Id}}' 2>/dev/null)"
+	if [ -z "$actual_id" ] || ! p rm -f "$actual_id" >/dev/null 2>&1; then
+		echo "FAIL: could not remove owned container $name" >&2
+		cleanup_failed=1
+		return 0
+	fi
+	if p container exists "$actual_id" >/dev/null 2>&1; then
+		echo "FAIL: cleanup left owned container $name" >&2
+		cleanup_failed=1
+	fi
+}
+
+remove_owned_volume() {
+	local name="$1"
+	local reference="$2"
+	local attempted="$3"
+	[ "$attempted" -eq 1 ] || return 0
+	if ! p volume exists "$name" >/dev/null 2>&1; then
+		return 0
+	fi
+	if ! volume_has_exact_ownership "$name"; then
+		echo "FAIL: refusing to delete volume $name without its exact probe ownership labels" >&2
+		cleanup_failed=1
+		return 0
+	fi
+	if ! p volume rm "$name" >/dev/null 2>&1; then
+		echo "FAIL: could not remove owned volume $name" >&2
+		cleanup_failed=1
+		return 0
+	fi
+	if p volume exists "$name" >/dev/null 2>&1; then
+		echo "FAIL: cleanup left owned volume $name" >&2
+		cleanup_failed=1
+	fi
+}
+
+remove_owned_network() {
+	local name="$1"
+	local reference="$2"
+	local expected_id="$3"
+	local attempted="$4"
+	[ "$attempted" -eq 1 ] || return 0
+	if ! p network exists "$name" >/dev/null 2>&1; then
+		return 0
+	fi
+	if ! network_has_exact_ownership "$name" "$expected_id"; then
+		echo "FAIL: refusing to delete network $name without its exact probe ID and ownership labels" >&2
+		cleanup_failed=1
+		return 0
+	fi
+	if ! p network rm "$name" >/dev/null 2>&1; then
+		echo "FAIL: could not remove owned network $name" >&2
+		cleanup_failed=1
+		return 0
+	fi
+	if p network exists "$name" >/dev/null 2>&1; then
+		echo "FAIL: cleanup left owned network $name" >&2
+		cleanup_failed=1
+	fi
+}
+
 cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	set +e
 
-	p rm -f "$writer" "$upstream" "$container" >/dev/null 2>&1
 	[ -z "$inspect_file" ] || rm -f -- "$inspect_file"
-	p volume rm "$data_volume" "$config_volume" >/dev/null 2>&1
-	p network rm "$network" >/dev/null 2>&1
-
 	cleanup_failed=0
-	for name in "$writer" "$upstream" "$container"; do
-		if p container exists "$name" >/dev/null 2>&1; then
-			echo "FAIL: cleanup left container $name" >&2
-			cleanup_failed=1
-		fi
-	done
-	for name in "$data_volume" "$config_volume"; do
-		if p volume exists "$name" >/dev/null 2>&1; then
-			echo "FAIL: cleanup left volume $name" >&2
-			cleanup_failed=1
-		fi
-	done
-	if p network exists "$network" >/dev/null 2>&1; then
-		echo "FAIL: cleanup left network $network" >&2
-		cleanup_failed=1
-	fi
+	remove_owned_container "$container" "$container_ref" "$container_attempted"
+	remove_owned_container "$writer" "$writer_ref" "$writer_attempted"
+	remove_owned_container "$upstream" "$upstream_ref" "$upstream_attempted"
+	remove_owned_volume "$data_volume" "$data_volume_ref" "$data_volume_attempted"
+	remove_owned_volume "$config_volume" "$config_volume_ref" "$config_volume_attempted"
+	remove_owned_network "$network" "$network_ref" "$network_id" "$network_attempted"
 	if [ "$cleanup_failed" -ne 0 ] && [ "$status" -eq 0 ]; then
 		status=1
 	fi
-	if [ "$cleanup_failed" -eq 0 ]; then
+	if [ "$cleanup_failed" -eq 0 ] && { [ "$container_attempted" -eq 1 ] || [ "$writer_attempted" -eq 1 ] || [ "$upstream_attempted" -eq 1 ] || [ "$network_attempted" -eq 1 ] || [ "$data_volume_attempted" -eq 1 ] || [ "$config_volume_attempted" -eq 1 ]; }; then
 		echo "PASS: disposable probe resources removed (immutable image cache retained)"
 	fi
 	exit "$status"
@@ -155,18 +271,63 @@ if ss -H -ltn | awk '$4 ~ /:8080$/ || $4 ~ /:8443$/ || $4 ~ /:2019$/ {found=1} E
 	exit 1
 fi
 
+collision_found=0
+for name in "$writer" "$upstream" "$container"; do
+	if p container exists "$name" >/dev/null 2>&1; then
+		echo "FAIL: disposable container name already exists: $name" >&2
+		collision_found=1
+	fi
+done
+for name in "$data_volume" "$config_volume"; do
+	if p volume exists "$name" >/dev/null 2>&1; then
+		echo "FAIL: disposable volume name already exists: $name" >&2
+		collision_found=1
+	fi
+done
+if p network exists "$network" >/dev/null 2>&1; then
+	echo "FAIL: disposable network name already exists: $network" >&2
+	collision_found=1
+fi
+if [ "$collision_found" -ne 0 ]; then
+	echo "FAIL: refusing to reuse or remove any pre-existing same-named probe resource" >&2
+	exit 1
+fi
+
 echo "== exact image =="
 p pull "$caddy_image"
 p image inspect "$caddy_image" --format 'id={{.Id}} digest={{.Digest}} repo_digests={{json .RepoDigests}}'
 
-p network create --label "io.azud.probe=${probe_id}" "$network" >/dev/null
-p volume create --label "io.azud.probe=${probe_id}" "$data_volume" >/dev/null
-p volume create --label "io.azud.probe=${probe_id}" "$config_volume" >/dev/null
+network_attempted=1
+network_ref="$(p network create --label "io.azud.probe=${probe_id}" --label "io.azud.probe.owner=${probe_owner}" "$network")"
+[ -n "$network_ref" ] || { echo "FAIL: Podman did not return the created network reference" >&2; exit 1; }
+network_id="$(p network inspect "$network" --format '{{.ID}}')"
+if ! network_has_exact_ownership "$network" "$network_id"; then
+	echo "FAIL: created network does not have the exact probe ID and ownership labels" >&2
+	exit 1
+fi
+
+data_volume_attempted=1
+data_volume_ref="$(p volume create --label "io.azud.probe=${probe_id}" --label "io.azud.probe.owner=${probe_owner}" "$data_volume")"
+[ -n "$data_volume_ref" ] || { echo "FAIL: Podman did not return the created data-volume reference" >&2; exit 1; }
+if ! volume_has_exact_ownership "$data_volume"; then
+	echo "FAIL: created data volume does not have the exact probe ownership labels" >&2
+	exit 1
+fi
+
+config_volume_attempted=1
+config_volume_ref="$(p volume create --label "io.azud.probe=${probe_id}" --label "io.azud.probe.owner=${probe_owner}" "$config_volume")"
+[ -n "$config_volume_ref" ] || { echo "FAIL: Podman did not return the created config-volume reference" >&2; exit 1; }
+if ! volume_has_exact_ownership "$config_volume"; then
+	echo "FAIL: created config volume does not have the exact probe ownership labels" >&2
+	exit 1
+fi
 
 echo "== disposable rootless bridge DNS upstream =="
-p run -d \
+upstream_attempted=1
+upstream_ref="$(p create \
 	--name "$upstream" \
 	--label "io.azud.probe=${probe_id}" \
+	--label "io.azud.probe.owner=${probe_owner}" \
 	--restart no \
 	--network "$network" \
 	--network-alias "$upstream_alias" \
@@ -183,12 +344,19 @@ p run -d \
 	--user 1000:1000 \
 	--entrypoint /bin/sh \
 	"$caddy_image" \
-	-eu -c 'while :; do printf "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nazud-netcup-upstream" | busybox nc -l -p 8081; done' >/dev/null
+	-eu -c 'while :; do printf "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nazud-netcup-upstream" | busybox nc -l -p 8081; done')"
+if ! container_has_exact_ownership "$upstream_ref" "$upstream_ref"; then
+	echo "FAIL: created upstream container does not have the exact probe ID and ownership labels" >&2
+	exit 1
+fi
+p start "$upstream_ref" >/dev/null
 
 readonly recovery_json="{\"admin\":{\"listen\":\"127.0.0.1:2019\"},\"apps\":{\"http\":{\"servers\":{\"probe\":{\"listen\":[\":80\"],\"routes\":[{\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":\"${upstream_alias}:8081\"}]}]}]}}}}}"
-printf '%s' "$recovery_json" | p run --rm -i \
+writer_attempted=1
+writer_ref="$(p create --rm -i \
 	--name "$writer" \
 	--label "io.azud.probe=${probe_id}" \
+	--label "io.azud.probe.owner=${probe_owner}" \
 	--network none \
 	--read-only \
 	--read-only-tmpfs=false \
@@ -205,11 +373,18 @@ printf '%s' "$recovery_json" | p run --rm -i \
 	--volume "${config_volume}:/config:U" \
 	--entrypoint /bin/sh \
 	"$caddy_image" \
-	-eu -c 'umask 077; mkdir -p /config/caddy; tmp="$(mktemp /config/caddy/.azud.json.XXXXXX)"; trap '\''rm -f "$tmp"'\'' EXIT HUP INT TERM; cat > "$tmp"; test -s "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" /config/caddy/azud.json; sync; trap - EXIT HUP INT TERM'
+	-eu -c 'umask 077; mkdir -p /config/caddy; tmp="$(mktemp /config/caddy/.azud.json.XXXXXX)"; trap '\''rm -f "$tmp"'\'' EXIT HUP INT TERM; cat > "$tmp"; test -s "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" /config/caddy/azud.json; sync; trap - EXIT HUP INT TERM')"
+if ! container_has_exact_ownership "$writer_ref" "$writer_ref"; then
+	echo "FAIL: created writer container does not have the exact probe ID and ownership labels" >&2
+	exit 1
+fi
+printf '%s' "$recovery_json" | p start --attach --interactive "$writer_ref"
 
-p run -d \
+container_attempted=1
+container_ref="$(p create \
 	--name "$container" \
 	--label "io.azud.probe=${probe_id}" \
+	--label "io.azud.probe.owner=${probe_owner}" \
 	--label 'azud.managed=true' \
 	--label 'azud.type=proxy' \
 	--label "azud.proxy.runtime=${runtime_revision}" \
@@ -237,7 +412,12 @@ p run -d \
 	--stop-timeout 30 \
 	--entrypoint /bin/sh \
 	"$caddy_image" \
-	-eu -c 'if [ -s /config/caddy/azud.json ]; then exec caddy run --config /config/caddy/azud.json; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi' >/dev/null
+	-eu -c 'if [ -s /config/caddy/azud.json ]; then exec caddy run --config /config/caddy/azud.json; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi')"
+if ! container_has_exact_ownership "$container_ref" "$container_ref"; then
+	echo "FAIL: created Caddy container does not have the exact probe ID and ownership labels" >&2
+	exit 1
+fi
+p start "$container_ref" >/dev/null
 
 if ! p exec "$container" /bin/sh -c 'command -v curl >/dev/null'; then
 	echo "FAIL: the pinned Caddy image lacks curl, which Azud requires for every admin request" >&2
