@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.2.0 - 2026-08-02
+
 - Isolated Caddy's admin API inside `azud-proxy`: it now binds only container
   loopback in bridge mode, port 2019 is never published, and every Azud admin
   request runs a fixed, argument-safe `curl` through `podman exec` with request
@@ -35,6 +37,16 @@ release notes for the corresponding signed tag.
   systemd unit reconstruction of digest-pinned deployments so history versions
   such as `sha256:...` use `repository@sha256:...` instead of the invalid
   `repository:sha256:...` tag form.
+- Made runtime drift verification accept Podman 5.4's rootless inspect
+  normalization only when the live image digest, custom-network membership,
+  effective and bounding capabilities, and safe implicit process limit prove
+  the same hardened runtime contract.
+- Added a disposable Netcup compatibility probe that runs through the real
+  non-root deploy identity and verifies the pinned Caddy image, rootless bridge
+  DNS and routing, confinement, protected restart recovery, and exact cleanup.
+- Added an audited operator transport for the Netcup probe, allowing a
+  passwordless operator to enter the deploy account without changing which
+  identity owns or executes the rootless Podman runtime.
 
 ## 1.1.0 - 2026-07-25
 

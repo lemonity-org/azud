@@ -146,7 +146,7 @@ func validateGeneratedUnitState(service, wantedBy, raw string) error {
 	if !strings.HasSuffix(fragment, "/"+expectedUnit) {
 		return fmt.Errorf("FragmentPath %q does not identify %s", fragment, expectedUnit)
 	}
-	if !strings.Contains(fragment, "/systemd/generator") {
+	if !isExactGeneratorFragmentPath(fragment, expectedUnit) {
 		return fmt.Errorf("FragmentPath %q is not Quadlet generator output", fragment)
 	}
 	if wantedBy != "" {
@@ -162,6 +162,40 @@ func validateGeneratedUnitState(service, wantedBy, raw string) error {
 		}
 	}
 	return nil
+}
+
+func isExactGeneratorFragmentPath(fragment, expectedUnit string) bool {
+	suffix := "/" + expectedUnit
+	if !strings.HasSuffix(fragment, suffix) {
+		return false
+	}
+	directory := strings.TrimSuffix(fragment, suffix)
+	for _, rootful := range []string{
+		"/run/systemd/generator",
+		"/run/systemd/generator.early",
+		"/run/systemd/generator.late",
+	} {
+		if directory == rootful {
+			return true
+		}
+	}
+
+	const userPrefix = "/run/user/"
+	if !strings.HasPrefix(directory, userPrefix) {
+		return false
+	}
+	uid, generatorDirectory, found := strings.Cut(strings.TrimPrefix(directory, userPrefix), "/")
+	if !found || uid == "" {
+		return false
+	}
+	for _, character := range uid {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return generatorDirectory == "systemd/generator" ||
+		generatorDirectory == "systemd/generator.early" ||
+		generatorDirectory == "systemd/generator.late"
 }
 
 func (q *QuadletDeployer) Start(host, service string) error {

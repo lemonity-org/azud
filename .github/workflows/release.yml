@@ -28,7 +28,9 @@ jobs:
       - name: Validate semantic-version tag
         shell: bash
         run: |
-          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          # Build metadata is deliberately rejected: finalize treats every tag
+          # without a prerelease suffix as stable and advances v1/latest.
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if [[ ! "${GITHUB_REF_NAME}" =~ $semver ]]; then
             echo "Refusing non-SemVer release tag: ${GITHUB_REF_NAME}" >&2
             exit 1
@@ -37,7 +39,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify signed tag, main ancestry, and changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")
+          if [ "$(jq -r '.object.type' <<<"$ref_json")" != tag ]; then
+            echo "Release tag must be annotated, not lightweight" >&2
+            exit 1
+          fi
+
+          tag_object=$(jq -r '.object.sha' <<<"$ref_json")
+          tag_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")
+          if [ "$(jq -r '.verification.verified' <<<"$tag_json")" != true ]; then
+            echo "Release tag signature is not verified by GitHub" >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.object.type' <<<"$tag_json")" != commit ]; then
+            echo "Release tag must point directly to a commit" >&2
+            exit 1
+          fi
+
+          release_commit=$(git rev-parse HEAD)
+          if [ "$(jq -r '.object.sha' <<<"$tag_json")" != "$release_commit" ]; then
+            echo "Checked-out commit differs from the signed tag target" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Release tag target is not on main" >&2
+            exit 1
+          fi
+
+          version=${GITHUB_REF_NAME#v}
+          heading_count=$(grep -Fc "## ${version} - " CHANGELOG.md || true)
+          if [ "$heading_count" -ne 1 ]; then
+            echo "CHANGELOG.md must contain exactly one ${version} release heading" >&2
+            exit 1
+          fi
+          heading=$(grep -F "## ${version} - " CHANGELOG.md)
+          release_date=${heading#"## ${version} - "}
+          if ! [[ "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "CHANGELOG.md release heading does not contain an ISO date" >&2
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -63,6 +110,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          release_commit=$(git rev-parse HEAD)
           required_checks=(
             "Go test & lint"
             "Integration (rootful-bridge)"
@@ -72,7 +120,7 @@ jobs:
           for check_name in "${required_checks[@]}"; do
             conclusions=$(gh api --paginate \
               -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+              "repos/${GITHUB_REPOSITORY}/commits/${release_commit}/check-runs" \
               --jq ".check_runs[] | select(.name == \"${check_name}\") | .conclusion")
             if ! grep -qx success <<<"$conclusions"; then
               echo "Required check is not successful: ${check_name}" >&2
@@ -145,14 +193,98 @@ jobs:
         with:
           subject-checksums: bin/release/checksums.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - name: Create draft and upload release assets
+        id: draft_release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          draft: true
           generate_release_notes: true
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
           files: |
             bin/release/azud-*
             bin/release/checksums.txt
+
+      - name: Verify draft asset inventory and digests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.id }}
+        run: |
+          test -n "$RELEASE_ID"
+          release_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")
+          if [ "$(jq -r '.draft' <<<"$release_json")" != true ]; then
+            echo "Release became public before asset verification" >&2
+            exit 1
+          fi
+
+          expected_assets=$(printf '%s\n' \
+            azud-darwin-amd64 \
+            azud-darwin-arm64 \
+            azud-linux-amd64 \
+            azud-linux-arm64 \
+            azud-windows-amd64.exe \
+            checksums.txt | LC_ALL=C sort)
+          actual_assets=$(jq -r '.assets[] | select(.state == "uploaded") | .name' \
+            <<<"$release_json" | LC_ALL=C sort)
+          if [ "$actual_assets" != "$expected_assets" ]; then
+            echo "Draft release asset inventory differs from the exact release matrix" >&2
+            diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+            exit 1
+          fi
+          if [ "$(jq '[.assets[] | select(.state != "uploaded" or .size <= 0)] | length' <<<"$release_json")" -ne 0 ]; then
+            echo "Draft release contains an incomplete or empty asset" >&2
+            exit 1
+          fi
+
+          while read -r digest filename; do
+            api_digest=$(jq -r --arg name "$filename" \
+              '.assets[] | select(.name == $name) | .digest' <<<"$release_json")
+            if [ "$api_digest" != "sha256:${digest}" ]; then
+              echo "Release asset digest differs: ${filename}" >&2
+              exit 1
+            fi
+          done < bin/release/checksums.txt
+
+          checksums_digest=$(sha256sum bin/release/checksums.txt | awk '{print $1}')
+          api_checksums_digest=$(jq -r \
+            '.assets[] | select(.name == "checksums.txt") | .digest' <<<"$release_json")
+          if [ "$api_checksums_digest" != "sha256:${checksums_digest}" ]; then
+            echo "Release checksums.txt digest differs" >&2
+            exit 1
+          fi
+
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.id }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          release_json=$(gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false -F "prerelease=${PRERELEASE}")
+          if [ "$(jq -r '.draft' <<<"$release_json")" != false || \
+             [ "$(jq -r '.immutable' <<<"$release_json")" != true ]; then
+            echo "Published release is not immutable" >&2
+            exit 1
+          fi
+
+          release_verified=false
+          for _ in {1..12}; do
+            if gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"; then
+              release_verified=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "$release_verified" != true ]; then
+            echo "Immutable release attestation did not become verifiable" >&2
+            exit 1
+          fi
+          for asset in bin/release/azud-* bin/release/checksums.txt; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$asset" \
+              --repo "$GITHUB_REPOSITORY"
+          done
 
   container:
     if: github.ref_name != 'v1'

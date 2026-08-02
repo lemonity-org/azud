@@ -81,6 +81,11 @@ func TestValidateGeneratedUnitStateRequiresLoadedQuadletOutput(t *testing.T) {
 			state:   "LoadState=loaded\nFragmentPath=/run/systemd/generator/azud-proxy.service\nWantedBy=default.target\n",
 		},
 		{
+			name:    "rootful generator early",
+			service: "azud-proxy",
+			state:   "LoadState=loaded\nFragmentPath=/run/systemd/generator.early/azud-proxy.service\nWantedBy=default.target\n",
+		},
+		{
 			name:    "rootless generator late",
 			service: "pacebeats.service",
 			state:   "FragmentPath=/run/user/1000/systemd/generator.late/pacebeats.service\nWantedBy=default.target\nLoadState=loaded\n",
@@ -101,6 +106,24 @@ func TestValidateGeneratedUnitStateRequiresLoadedQuadletOutput(t *testing.T) {
 			name:    "static unit collision",
 			service: "azud-proxy",
 			state:   "LoadState=loaded\nFragmentPath=/etc/systemd/system/azud-proxy.service\n",
+			wantErr: "not Quadlet generator output",
+		},
+		{
+			name:    "generator substring outside runtime tree",
+			service: "azud-proxy",
+			state:   "LoadState=loaded\nFragmentPath=/tmp/systemd/generator/azud-proxy.service\nWantedBy=default.target\n",
+			wantErr: "not Quadlet generator output",
+		},
+		{
+			name:    "noncanonical generator subdirectory",
+			service: "azud-proxy",
+			state:   "LoadState=loaded\nFragmentPath=/run/systemd/generator/extra/azud-proxy.service\nWantedBy=default.target\n",
+			wantErr: "not Quadlet generator output",
+		},
+		{
+			name:    "rootless generator requires numeric uid",
+			service: "azud-proxy",
+			state:   "LoadState=loaded\nFragmentPath=/run/user/deploy/systemd/generator/azud-proxy.service\nWantedBy=default.target\n",
 			wantErr: "not Quadlet generator output",
 		},
 		{
