@@ -183,7 +183,7 @@ p run -d \
 	--user 1000:1000 \
 	--entrypoint /bin/sh \
 	"$caddy_image" \
-	-eu -c 'exec caddy respond --listen :8081 --body azud-netcup-upstream' >/dev/null
+	-eu -c 'while :; do printf "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nazud-netcup-upstream" | busybox nc -l -p 8081; done' >/dev/null
 
 readonly recovery_json="{\"admin\":{\"listen\":\"127.0.0.1:2019\"},\"apps\":{\"http\":{\"servers\":{\"probe\":{\"listen\":[\":80\"],\"routes\":[{\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":\"${upstream_alias}:8081\"}]}]}]}}}}}"
 printf '%s' "$recovery_json" | p run --rm -i \
