@@ -65,7 +65,7 @@ func TestCaddyRecoveryWriterIsNetworklessAndLeastPrivilege(t *testing.T) {
 	}
 }
 
-func TestInspectCaddyRuntimeAcceptsExactSpecAndFindsSecurityDrift(t *testing.T) {
+func exactCaddyInspectFixture() caddyInspect {
 	var inspect caddyInspect
 	inspect.ImageName = CaddyImage
 	inspect.Config.Image = CaddyImage
@@ -104,6 +104,14 @@ func TestInspectCaddyRuntimeAcceptsExactSpecAndFindsSecurityDrift(t *testing.T) 
 		"443/tcp":  {{HostPort: "8443"}},
 		"2019/tcp": nil,
 	}
+	inspect.NetworkSettings.Networks = map[string]json.RawMessage{
+		"azud": json.RawMessage(`{"NetworkID":"exact-test-network"}`),
+	}
+	return inspect
+}
+
+func TestInspectCaddyRuntimeAcceptsExactSpecAndFindsSecurityDrift(t *testing.T) {
+	inspect := exactCaddyInspectFixture()
 
 	raw, err := json.Marshal([]caddyInspect{inspect})
 	if err != nil {
@@ -131,6 +139,147 @@ func TestInspectCaddyRuntimeAcceptsExactSpecAndFindsSecurityDrift(t *testing.T) 
 	} {
 		if !strings.Contains(drift, want) {
 			t.Fatalf("drift %q missing %q", drift, want)
+		}
+	}
+}
+
+func TestInspectCaddyRuntimeAcceptsPodman54RootlessNormalization(t *testing.T) {
+	inspect := exactCaddyInspectFixture()
+	inspect.ImageName = caddyCanonicalDigestReference()
+	inspect.Config.Image = caddyCanonicalDigestReference()
+	inspect.HostConfig.NetworkMode = "bridge"
+	// Podman 5.4.2's Docker-compatible projection can normalize the requested
+	// drop-all/add-one pair to an empty CapAdd plus the default dropped set.
+	// Its top-level live effective and bounding sets retain the security proof.
+	inspect.HostConfig.CapAdd = []string{}
+	inspect.HostConfig.CapDrop = []string{
+		"CAP_AUDIT_CONTROL", "CAP_AUDIT_READ", "CAP_BLOCK_SUSPEND",
+		"CAP_BPF", "CAP_CHECKPOINT_RESTORE", "CAP_DAC_READ_SEARCH",
+		"CAP_IPC_LOCK", "CAP_IPC_OWNER", "CAP_LEASE", "CAP_LINUX_IMMUTABLE",
+		"CAP_MAC_ADMIN", "CAP_MAC_OVERRIDE", "CAP_NET_ADMIN", "CAP_NET_BROADCAST",
+		"CAP_PERFMON", "CAP_SYS_ADMIN", "CAP_SYS_BOOT", "CAP_SYS_CHROOT",
+		"CAP_SYS_MODULE", "CAP_SYS_NICE", "CAP_SYS_PACCT", "CAP_SYS_PTRACE",
+		"CAP_SYS_RAWIO", "CAP_SYS_RESOURCE", "CAP_SYS_TIME", "CAP_SYS_TTY_CONFIG",
+		"CAP_SYSLOG", "CAP_WAKE_ALARM",
+	}
+	inspect.EffectiveCaps = []string{"CAP_NET_BIND_SERVICE"}
+	inspect.BoundingCaps = []string{"CAP_NET_BIND_SERVICE"}
+	inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits,
+		caddyUlimit{Name: "RLIMIT_NPROC", Soft: 127769, Hard: 127769})
+
+	raw, err := json.Marshal([]caddyInspect{inspect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drift := inspectCaddyRuntime(string(raw), false, 8080, 8443); len(drift) != 0 {
+		t.Fatalf("Podman 5.4 rootless runtime reported drift: %v", drift)
+	}
+}
+
+func TestInspectCaddyRuntimeRejectsUnsafePodmanNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		edit func(*caddyInspect)
+	}{
+		{
+			name: "extra bounding capability",
+			want: "capability set",
+			edit: func(inspect *caddyInspect) {
+				inspect.HostConfig.CapAdd = []string{}
+				inspect.HostConfig.CapDrop = []string{"CAP_SYS_ADMIN"}
+				inspect.EffectiveCaps = []string{"CAP_NET_BIND_SERVICE"}
+				inspect.BoundingCaps = []string{"CAP_NET_BIND_SERVICE", "CAP_SYS_ADMIN"}
+			},
+		},
+		{
+			name: "normalized intent without runtime proof",
+			want: "capability set",
+			edit: func(inspect *caddyInspect) {
+				inspect.HostConfig.CapAdd = []string{}
+				inspect.HostConfig.CapDrop = []string{"CAP_SYS_ADMIN"}
+			},
+		},
+		{
+			name: "different network membership",
+			want: "network mode/membership",
+			edit: func(inspect *caddyInspect) {
+				inspect.HostConfig.NetworkMode = "bridge"
+				inspect.NetworkSettings.Networks = map[string]json.RawMessage{
+					"podman": json.RawMessage(`{"NetworkID":"default"}`),
+				}
+			},
+		},
+		{
+			name: "additional network membership",
+			want: "network mode/membership",
+			edit: func(inspect *caddyInspect) {
+				inspect.NetworkSettings.Networks["unexpected"] = json.RawMessage(`{"NetworkID":"extra"}`)
+			},
+		},
+		{
+			name: "same digest under another repository",
+			want: "image references",
+			edit: func(inspect *caddyInspect) {
+				_, digest, _ := strings.Cut(CaddyImage, "@")
+				inspect.ImageName = "docker.io/example/caddy@" + digest
+				inspect.Config.Image = "docker.io/example/caddy@" + digest
+			},
+		},
+		{
+			name: "mutable tag",
+			want: "image references",
+			edit: func(inspect *caddyInspect) {
+				inspect.ImageName = "docker.io/library/caddy:2.11.4-alpine"
+				inspect.Config.Image = "docker.io/library/caddy:2.11.4-alpine"
+			},
+		},
+		{
+			name: "unknown implicit ulimit",
+			want: "ulimit set",
+			edit: func(inspect *caddyInspect) {
+				inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits,
+					caddyUlimit{Name: "RLIMIT_CORE", Soft: 0, Hard: 0})
+			},
+		},
+		{
+			name: "malformed implicit nproc",
+			want: "ulimit set",
+			edit: func(inspect *caddyInspect) {
+				inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits,
+					caddyUlimit{Name: "RLIMIT_NPROC", Soft: 512, Hard: 256})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inspect := exactCaddyInspectFixture()
+			tt.edit(&inspect)
+			raw, err := json.Marshal([]caddyInspect{inspect})
+			if err != nil {
+				t.Fatal(err)
+			}
+			drift := strings.Join(inspectCaddyRuntime(string(raw), false, 8080, 8443), "\n")
+			if !strings.Contains(drift, tt.want) {
+				t.Fatalf("drift %q missing %q", drift, tt.want)
+			}
+		})
+	}
+}
+
+func TestCaddyImageReferenceAcceptsOnlyExactPinnedForms(t *testing.T) {
+	if !caddyImageReferencesArePinned(CaddyImage, caddyCanonicalDigestReference()) {
+		t.Fatal("exact tagged and canonical digest references were rejected")
+	}
+	for _, reference := range []string{
+		"docker.io/library/caddy:2.11.4-alpine",
+		"docker.io/library/caddy:latest",
+		strings.Replace(caddyCanonicalDigestReference(), "docker.io/library/", "docker.io/example/", 1),
+		strings.Replace(caddyCanonicalDigestReference(), "sha256:5", "sha256:6", 1),
+	} {
+		if caddyImageReferencesArePinned(reference) {
+			t.Fatalf("unsafe image reference accepted: %q", reference)
 		}
 	}
 }

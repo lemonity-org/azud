@@ -124,9 +124,11 @@ func newCaddyRecoveryWriterConfig() *podman.ContainerConfig {
 }
 
 type caddyInspect struct {
-	ImageName string       `json:"ImageName"`
-	Mounts    []caddyMount `json:"Mounts"`
-	Config    struct {
+	ImageName     string       `json:"ImageName"`
+	EffectiveCaps []string     `json:"EffectiveCaps"`
+	BoundingCaps  []string     `json:"BoundingCaps"`
+	Mounts        []caddyMount `json:"Mounts"`
+	Config        struct {
 		Image       string            `json:"Image"`
 		User        string            `json:"User"`
 		Env         []string          `json:"Env"`
@@ -153,7 +155,8 @@ type caddyInspect struct {
 		Ulimits        []caddyUlimit                 `json:"Ulimits"`
 	} `json:"HostConfig"`
 	NetworkSettings struct {
-		Ports map[string][]caddyPortBinding `json:"Ports"`
+		Ports    map[string][]caddyPortBinding `json:"Ports"`
+		Networks map[string]json.RawMessage    `json:"Networks"`
 	} `json:"NetworkSettings"`
 }
 
@@ -219,11 +222,8 @@ func inspectCaddyRuntime(raw string, hostNetwork bool, httpPort, httpsPort int) 
 	if !got.HostConfig.ReadonlyRootfs {
 		add("root filesystem is writable")
 	}
-	if !containsCapability(got.HostConfig.CapDrop, "ALL") {
-		add("capability set does not drop ALL")
-	}
-	if !capabilitySetEquals(got.HostConfig.CapAdd, []string{"NET_BIND_SERVICE"}) {
-		add("capability add set is not exactly NET_BIND_SERVICE")
+	if !caddyCapabilitiesAreConfined(got.HostConfig.CapDrop, got.HostConfig.CapAdd, got.EffectiveCaps, got.BoundingCaps) {
+		add("capability set is not confined to NET_BIND_SERVICE")
 	}
 	if !containsNormalized(got.HostConfig.SecurityOpt, "no-new-privileges") {
 		add("no-new-privileges is disabled")
@@ -246,8 +246,8 @@ func inspectCaddyRuntime(raw string, hostNetwork bool, httpPort, httpsPort int) 
 	if got.Config.StopTimeout != CaddyStopTimeout {
 		add(fmt.Sprintf("stop timeout is %d, expected %d", got.Config.StopTimeout, CaddyStopTimeout))
 	}
-	if !caddyUlimitsAreExact(got.HostConfig.Ulimits) {
-		add("ulimit set is not exactly nofile=65536:65536")
+	if !caddyUlimitsAreConfined(got.HostConfig.Ulimits) {
+		add("ulimit set does not contain exact nofile=65536:65536 with only an optional safe NPROC limit")
 	}
 	if got.HostConfig.ReadonlyTmpfs || got.HostConfig.ReadOnlyTmpfs {
 		add("Podman automatic read-only tmpfs mounts are enabled")
@@ -282,8 +282,8 @@ func inspectCaddyRuntime(raw string, hostNetwork bool, httpPort, httpsPort int) 
 	if hostNetwork {
 		expectedNetwork = "host"
 	}
-	if got.HostConfig.NetworkMode != expectedNetwork {
-		add(fmt.Sprintf("network mode is %q, expected %q", got.HostConfig.NetworkMode, expectedNetwork))
+	if !caddyNetworkIsExact(got.HostConfig.NetworkMode, got.NetworkSettings.Networks, expectedNetwork, hostNetwork) {
+		add(fmt.Sprintf("network mode/membership is %q/%v, expected only %q", got.HostConfig.NetworkMode, networkNames(got.NetworkSettings.Networks), expectedNetwork))
 	}
 	if !reflect.DeepEqual(got.Config.Cmd, caddyCommand) {
 		add("startup command does not use the protected Azud recovery config")
@@ -291,8 +291,8 @@ func inspectCaddyRuntime(raw string, hostNetwork bool, httpPort, httpsPort int) 
 	if !reflect.DeepEqual([]string(got.Config.Entrypoint), []string{CaddyRuntimeEntrypoint}) {
 		add("container entrypoint does not execute the protected recovery selector")
 	}
-	if got.ImageName != CaddyImage && got.Config.Image != CaddyImage {
-		add("Caddy image reference differs from the pinned digest")
+	if !caddyImageReferencesArePinned(got.ImageName, got.Config.Image) {
+		add(fmt.Sprintf("Caddy image references differ from the pinned digest: ImageName=%q Config.Image=%q", got.ImageName, got.Config.Image))
 	}
 
 	sort.Strings(drift)
@@ -335,13 +335,103 @@ func caddyMountsAreExact(mounts []caddyMount) bool {
 	return len(seenVolumes) == len(wantVolumes) && (len(seenTmpfs) == 0 || len(seenTmpfs) == len(caddyTmpfs))
 }
 
-func caddyUlimitsAreExact(limits []caddyUlimit) bool {
-	if len(limits) != 1 {
+func caddyUlimitsAreConfined(limits []caddyUlimit) bool {
+	if len(limits) < 1 || len(limits) > 2 {
 		return false
 	}
-	name := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(limits[0].Name)), "RLIMIT_")
-	return name == "NOFILE" &&
-		limits[0].Soft == CaddyNofileLimit && limits[0].Hard == CaddyNofileLimit
+	seenNofile := false
+	seenNproc := false
+	for _, limit := range limits {
+		name := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(limit.Name)), "RLIMIT_")
+		switch name {
+		case "NOFILE":
+			if seenNofile || limit.Soft != CaddyNofileLimit || limit.Hard != CaddyNofileLimit {
+				return false
+			}
+			seenNofile = true
+		case "NPROC":
+			// Podman 5.4 rootless adds the caller's process limit to inspect
+			// even when only NOFILE was requested. It is an additional ceiling,
+			// never a replacement for the exact requested limit. The exact cgroup
+			// PidsLimit is independently verified above.
+			if seenNproc || limit.Soft < 0 || limit.Hard < limit.Soft {
+				return false
+			}
+			seenNproc = true
+		default:
+			return false
+		}
+	}
+	return seenNofile
+}
+
+func caddyCapabilitiesAreConfined(capDrop, capAdd, effective, bounding []string) bool {
+	wanted := []string{"NET_BIND_SERVICE"}
+	intentIsExact := containsCapability(capDrop, "ALL") && capabilitySetEquals(capAdd, wanted)
+	runtimeProofIsExact := effective != nil && bounding != nil &&
+		capabilitySetEquals(effective, wanted) && capabilitySetEquals(bounding, wanted)
+
+	// When Podman exposes live capability fields, they are stronger evidence
+	// than its Docker-compatible HostConfig projection and must not show drift.
+	if effective != nil && !capabilitySetEquals(effective, wanted) {
+		return false
+	}
+	if bounding != nil && !capabilitySetEquals(bounding, wanted) {
+		return false
+	}
+	return intentIsExact || runtimeProofIsExact
+}
+
+func caddyNetworkIsExact(networkMode string, networks map[string]json.RawMessage, expected string, hostNetwork bool) bool {
+	if hostNetwork {
+		return networkMode == "host"
+	}
+	if networkMode != expected && networkMode != "bridge" {
+		return false
+	}
+	if len(networks) != 1 {
+		return false
+	}
+	membership, ok := networks[expected]
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(membership))
+	return strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")
+}
+
+func networkNames(networks map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(networks))
+	for name := range networks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func caddyImageReferencesArePinned(references ...string) bool {
+	seen := false
+	for _, reference := range references {
+		if reference == "" {
+			continue
+		}
+		seen = true
+		if reference != CaddyImage && reference != caddyCanonicalDigestReference() {
+			return false
+		}
+	}
+	return seen
+}
+
+func caddyCanonicalDigestReference() string {
+	name, digest, ok := strings.Cut(CaddyImage, "@")
+	if !ok {
+		return ""
+	}
+	if tag := strings.LastIndex(name, ":"); tag > strings.LastIndex(name, "/") {
+		name = name[:tag]
+	}
+	return name + "@" + digest
 }
 
 func activePortBindingsEqual(bindings map[string][]caddyPortBinding, expected map[string]int) bool {

@@ -48,6 +48,8 @@ readonly runtime_revision='2'
 readonly probe_id="azud-caddy-probe-$(id -u)-$$-$(date +%s)"
 readonly container="${probe_id}"
 readonly writer="${probe_id}-writer"
+readonly upstream="${probe_id}-upstream"
+readonly upstream_alias="${probe_id}-backend-alias"
 readonly network="${probe_id}-network"
 readonly data_volume="${probe_id}-data"
 readonly config_volume="${probe_id}-config"
@@ -86,13 +88,13 @@ cleanup() {
 	trap - EXIT HUP INT TERM
 	set +e
 
-	p rm -f "$writer" "$container" >/dev/null 2>&1
+	p rm -f "$writer" "$upstream" "$container" >/dev/null 2>&1
 	[ -z "$inspect_file" ] || rm -f -- "$inspect_file"
 	p volume rm "$data_volume" "$config_volume" >/dev/null 2>&1
 	p network rm "$network" >/dev/null 2>&1
 
 	cleanup_failed=0
-	for name in "$writer" "$container"; do
+	for name in "$writer" "$upstream" "$container"; do
 		if p container exists "$name" >/dev/null 2>&1; then
 			echo "FAIL: cleanup left container $name" >&2
 			cleanup_failed=1
@@ -161,7 +163,29 @@ p network create --label "io.azud.probe=${probe_id}" "$network" >/dev/null
 p volume create --label "io.azud.probe=${probe_id}" "$data_volume" >/dev/null
 p volume create --label "io.azud.probe=${probe_id}" "$config_volume" >/dev/null
 
-readonly recovery_json='{"admin":{"listen":"127.0.0.1:2019"},"apps":{"http":{"servers":{"probe":{"listen":[":80"],"routes":[{"handle":[{"handler":"static_response","status_code":200,"body":"azud-netcup-probe\n"}]}]}}}}}'
+echo "== disposable rootless bridge DNS upstream =="
+p run -d \
+	--name "$upstream" \
+	--label "io.azud.probe=${probe_id}" \
+	--restart no \
+	--network "$network" \
+	--network-alias "$upstream_alias" \
+	--read-only \
+	--read-only-tmpfs=false \
+	--cap-drop ALL \
+	--security-opt no-new-privileges \
+	--pids-limit 32 \
+	--memory 64m \
+	--memory-swap 64m \
+	--cpus 1 \
+	--shm-size 4m \
+	--ulimit nofile=1024:1024 \
+	--user 1000:1000 \
+	--entrypoint /bin/sh \
+	"$caddy_image" \
+	-eu -c 'exec caddy respond --listen :8081 --body azud-netcup-upstream' >/dev/null
+
+readonly recovery_json="{\"admin\":{\"listen\":\"127.0.0.1:2019\"},\"apps\":{\"http\":{\"servers\":{\"probe\":{\"listen\":[\":80\"],\"routes\":[{\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":\"${upstream_alias}:8081\"}]}]}]}}}}}"
 printf '%s' "$recovery_json" | p run --rm -i \
 	--name "$writer" \
 	--label "io.azud.probe=${probe_id}" \
@@ -245,9 +269,12 @@ p exec "$container" /bin/sh -eu -c '
 	test -s /config/caddy/azud.json
 	test "$(stat -c %a /config/caddy/azud.json)" = 600
 	grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/1/status
-	caps=$(awk "/^CapEff:/ {print \$2}" /proc/1/status)
-	test $((0x$caps & 0x400)) -ne 0
-	test $((0x$caps & ~0x400)) -eq 0
+	for field in CapEff CapBnd; do
+		caps=$(awk -v wanted="${field}:" "\$1 == wanted {print \$2}" /proc/1/status)
+		test -n "$caps"
+		test $((0x$caps & 0x400)) -ne 0
+		test $((0x$caps & ~0x400)) -eq 0
+	done
 	awk "\$2 == \"/tmp\" && \$4 ~ /noexec/ && \$4 ~ /nosuid/ && \$4 ~ /nodev/ {ok=1} END {exit !ok}" /proc/mounts
 	awk "\$2 == \"/run\" && \$4 ~ /noexec/ && \$4 ~ /nosuid/ && \$4 ~ /nodev/ {ok=1} END {exit !ok}" /proc/mounts
 	test "$(cat /sys/fs/cgroup/memory.max)" = 536870912
@@ -255,10 +282,23 @@ p exec "$container" /bin/sh -eu -c '
 	test "$(cat /sys/fs/cgroup/cpu.max)" = "400000 100000"
 	test "$(ulimit -n)" = 65536
 	test "$(curl --silent --show-error --fail-with-body --noproxy \"*\" --proto \"=http\" --url http://127.0.0.1:2019/config/admin/listen)" = "\"127.0.0.1:2019\""
-	test "$(curl --silent --show-error --fail-with-body --noproxy \"*\" --proto \"=http\" --url http://127.0.0.1/)" = azud-netcup-probe
 '
 
-test "$(curl --silent --show-error --fail-with-body --noproxy '*' --proto '=http' --url 'http://127.0.0.1:8080/')" = 'azud-netcup-probe'
+upstream_ready=0
+for _ in $(seq 1 50); do
+	if p exec "$container" curl --silent --show-error --fail-with-body --max-time 5 --noproxy '*' --proto '=http' --url "http://${upstream_alias}:8081/" 2>/dev/null | grep -qx 'azud-netcup-upstream'; then
+		upstream_ready=1
+		break
+	fi
+	sleep 0.2
+done
+if [ "$upstream_ready" -ne 1 ]; then
+	echo "FAIL: Caddy container cannot resolve and reach the unique rootless-bridge upstream alias" >&2
+	p logs "$upstream" >&2 || true
+	exit 1
+fi
+
+test "$(curl --silent --show-error --fail-with-body --noproxy '*' --proto '=http' --url 'http://127.0.0.1:8080/')" = 'azud-netcup-upstream'
 for port in 8080 8443; do
 	if ! ss -H -ltn | awk -v wanted=":${port}" '$4 ~ wanted "$" {found=1} END {exit !found}'; then
 		echo "FAIL: expected rootless bridge listener on host port $port" >&2
@@ -295,6 +335,8 @@ network = item.get("NetworkSettings") or {}
 
 evidence = {
     "ImageName": item.get("ImageName"),
+    "EffectiveCaps": item.get("EffectiveCaps"),
+    "BoundingCaps": item.get("BoundingCaps"),
     "Config": {key: config.get(key) for key in ("Image", "User", "Env", "Labels", "Cmd", "Entrypoint", "StopTimeout")},
     "HostConfig": {key: host.get(key) for key in (
         "NetworkMode", "ReadonlyRootfs", "CapAdd", "CapDrop", "SecurityOpt",
@@ -302,7 +344,7 @@ evidence = {
         "PortBindings", "Tmpfs", "ReadonlyTmpfs", "ReadOnlyTmpfs", "Ulimits",
         "RestartPolicy",
     )},
-    "NetworkSettings": {"Ports": network.get("Ports")},
+    "NetworkSettings": {"Ports": network.get("Ports"), "Networks": network.get("Networks")},
     "Mounts": item.get("Mounts"),
     "State": {key: (item.get("State") or {}).get(key) for key in ("Running", "Status", "ExitCode", "Error")},
 }
@@ -315,10 +357,22 @@ def require(condition, message):
 def cap(value):
     return str(value).strip().upper().removeprefix("CAP_")
 
+def exact_cap_set(values, wanted):
+    normalized = [cap(value) for value in (values or [])]
+    return len(normalized) == len(wanted) and set(normalized) == wanted
+
 def option_set(value):
     return {part.strip() for part in str(value or "").split(",") if part.strip()}
 
-require(item.get("ImageName") == expected_image or config.get("Image") == expected_image, "container does not retain the exact pinned image reference")
+expected_name, separator, expected_digest = expected_image.partition("@")
+require(separator == "@" and expected_digest.startswith("sha256:"), "probe image constant is not digest-pinned")
+last_slash = expected_name.rfind("/")
+last_colon = expected_name.rfind(":")
+expected_repository = expected_name[:last_colon] if last_colon > last_slash else expected_name
+canonical_image = f"{expected_repository}@{expected_digest}"
+allowed_images = {expected_image, canonical_image}
+image_refs = [value for value in (item.get("ImageName"), config.get("Image")) if value]
+require(image_refs and all(value in allowed_images for value in image_refs), f"container image is not the exact pinned repository/digest: ImageName={item.get('ImageName')!r} Config.Image={config.get('Image')!r} allowed={sorted(allowed_images)!r}")
 require(config.get("User") == "1000:1000", "Config.User is not 1000:1000")
 require([value for value in (config.get("Env") or []) if value.startswith("CADDY_ADMIN=")] == ["CADDY_ADMIN=127.0.0.1:2019"], "CADDY_ADMIN is not exactly loopback-only")
 require((config.get("Labels") or {}).get("azud.proxy.runtime") == revision, "runtime revision label is missing")
@@ -326,10 +380,20 @@ require(config.get("Entrypoint") in ("/bin/sh", ["/bin/sh"]), "entrypoint is not
 require(config.get("Cmd") == ["-eu", "-c", "if [ -s /config/caddy/azud.json ]; then exec caddy run --config /config/caddy/azud.json; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile; fi"], "startup command differs from Azud recovery selector")
 require(config.get("StopTimeout") == 30, "stop timeout is not 30 seconds")
 
-require(host.get("NetworkMode") == expected_network, "network mode differs from the disposable rootless bridge")
+networks = network.get("Networks") or {}
+require(host.get("NetworkMode") in (expected_network, "bridge"), f"network mode is not the disposable rootless bridge: {host.get('NetworkMode')!r}")
+require(set(networks) == {expected_network} and isinstance(networks.get(expected_network), dict), f"actual network membership differs from the disposable bridge: {sorted(networks)!r}")
 require(host.get("ReadonlyRootfs") is True, "root filesystem is writable")
-require({cap(value) for value in (host.get("CapDrop") or [])} == {"ALL"}, "CapDrop is not exactly ALL")
-require({cap(value) for value in (host.get("CapAdd") or [])} == {"NET_BIND_SERVICE"}, "CapAdd is not exactly NET_BIND_SERVICE")
+expected_caps = {"NET_BIND_SERVICE"}
+effective_caps = item.get("EffectiveCaps")
+bounding_caps = item.get("BoundingCaps")
+if effective_caps is not None:
+    require(exact_cap_set(effective_caps, expected_caps), f"effective capabilities are not exactly NET_BIND_SERVICE: {effective_caps!r}")
+if bounding_caps is not None:
+    require(exact_cap_set(bounding_caps, expected_caps), f"bounding capabilities are not exactly NET_BIND_SERVICE: {bounding_caps!r}")
+intent_is_exact = "ALL" in {cap(value) for value in (host.get("CapDrop") or [])} and exact_cap_set(host.get("CapAdd"), expected_caps)
+runtime_proof_is_exact = effective_caps is not None and bounding_caps is not None and exact_cap_set(effective_caps, expected_caps) and exact_cap_set(bounding_caps, expected_caps)
+require(intent_is_exact or runtime_proof_is_exact, "neither HostConfig capability intent nor live effective/bounding capabilities proves NET_BIND_SERVICE-only confinement")
 require(any(str(value).lower() in ("no-new-privileges", "no-new-privileges=true") for value in (host.get("SecurityOpt") or [])), "no-new-privileges is missing")
 require(host.get("PidsLimit") == 256, "pids limit is not 256")
 require(host.get("Memory") == 536870912, "memory limit is not 512 MiB")
@@ -342,9 +406,17 @@ run_options = option_set((host.get("Tmpfs") or {}).get("/run"))
 require(run_options >= {"rw", "noexec", "nosuid", "nodev", "size=8m"} and ({"mode=0755", "mode=755"} & run_options), "/run tmpfs options drifted")
 
 limits = host.get("Ulimits") or []
-require(len(limits) == 1, "ulimit set is not singular")
-limit = limits[0]
-require(str(limit.get("Name", "")).upper().removeprefix("RLIMIT_") == "NOFILE" and limit.get("Soft") == 65536 and limit.get("Hard") == 65536, "nofile ulimit drifted")
+require(1 <= len(limits) <= 2, f"unexpected ulimit count: {limits!r}")
+limits_by_name = {}
+for limit in limits:
+    name = str(limit.get("Name", "")).strip().upper().removeprefix("RLIMIT_")
+    require(name in ("NOFILE", "NPROC") and name not in limits_by_name, f"unexpected or duplicate ulimit: {limit!r}")
+    limits_by_name[name] = limit
+nofile = limits_by_name.get("NOFILE") or {}
+require(nofile.get("Soft") == 65536 and nofile.get("Hard") == 65536, f"exact requested nofile ulimit is missing: {limits!r}")
+if "NPROC" in limits_by_name:
+    nproc_limit = limits_by_name["NPROC"]
+    require(isinstance(nproc_limit.get("Soft"), int) and isinstance(nproc_limit.get("Hard"), int) and 0 <= nproc_limit["Soft"] <= nproc_limit["Hard"], f"implicit NPROC ulimit is malformed: {nproc_limit!r}")
 require((host.get("RestartPolicy") or {}).get("Name") in ("", "no"), "disposable container has an active restart policy")
 
 bindings = host.get("PortBindings") or {}
@@ -392,9 +464,10 @@ if ! wait_for_admin; then
 	p logs "$container" >&2 || true
 	exit 1
 fi
-test "$(curl --silent --show-error --fail-with-body --max-time 5 --noproxy '*' --proto '=http' --url 'http://127.0.0.1:8080/')" = 'azud-netcup-probe'
-
 p stats --no-stream "$container"
 p logs --tail 100 "$container"
-echo "PASS: pinned Caddy image, rootless bridge 8080/8443 with no host 2019, stdin admin mutation, protected restart recovery, cgroups, and confinement"
+test "$(curl --silent --show-error --fail-with-body --max-time 5 --noproxy '*' --proto '=http' --url 'http://127.0.0.1:8080/')" = 'azud-netcup-upstream'
+
+p stats --no-stream "$upstream"
+echo "PASS: pinned Caddy image, rootless bridge DNS/upstream routing, 8080/8443 with no host 2019, stdin admin mutation, protected restart recovery, cgroups, and confinement"
 AZUD_NETCUP_PROBE
