@@ -136,7 +136,7 @@ func (c *CanaryDeployer) Deploy(opts *CanaryDeployOptions) error {
 	// Determine image to deploy
 	image := c.cfg.Image
 	if opts.Version != "" {
-		image = fmt.Sprintf("%s:%s", stripImageTag(image), opts.Version)
+		image = ImageReferenceForVersion(image, opts.Version)
 	}
 
 	// Canary traffic is meaningful only for the proxy-serving web role.

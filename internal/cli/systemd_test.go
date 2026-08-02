@@ -7,9 +7,54 @@ import (
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/proxy"
 	"github.com/lemonity-org/azud/internal/quadlet"
 )
+
+func TestResolveSystemdImagePreservesHistoryReferenceSemantics(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+
+	digest := "sha256:" + strings.Repeat("d", 64)
+	for _, tt := range []struct {
+		name           string
+		configured     string
+		historyVersion string
+		want           string
+	}{
+		{name: "tag history", configured: "ghcr.io/acme/test", historyVersion: "v1.2.3", want: "ghcr.io/acme/test:v1.2.3"},
+		{name: "digest history", configured: "ghcr.io/acme/test", historyVersion: digest, want: "ghcr.io/acme/test@" + digest},
+		{name: "registry port and digest history", configured: "localhost:5000/acme/test", historyVersion: digest, want: "localhost:5000/acme/test@" + digest},
+		{name: "configured tag wins", configured: "ghcr.io/acme/test:stable", historyVersion: digest, want: "ghcr.io/acme/test:stable"},
+		{name: "configured digest wins", configured: "ghcr.io/acme/test@" + digest, historyVersion: "v1.2.3", want: "ghcr.io/acme/test@" + digest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AZUD_STATE_DIR", t.TempDir())
+			cfg = &config.Config{
+				Service: "test-app",
+				Image:   tt.configured,
+				Deploy:  config.DeployConfig{RetainHistory: 20},
+			}
+
+			history := deploy.NewDurableHistoryStore(20, output.DefaultLogger)
+			record := deploy.NewDeploymentRecord(cfg.Service, tt.configured, tt.historyVersion, "production", []string{"host"})
+			record.Complete()
+			if err := history.Record(record); err != nil {
+				t.Fatalf("record deployment history: %v", err)
+			}
+
+			got := resolveSystemdImage(output.DefaultLogger)
+			if got != tt.want {
+				t.Fatalf("resolveSystemdImage() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, ":sha256:") {
+				t.Fatalf("resolved malformed digest-as-tag reference %q", got)
+			}
+		})
+	}
+}
 
 func TestBuildAppQuadletUnit_MixedModePublishesLoopbackPort(t *testing.T) {
 	oldCfg := cfg

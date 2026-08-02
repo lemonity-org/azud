@@ -244,16 +244,20 @@ func systemdTargetHosts(targets []systemdTarget) []string {
 
 func resolveSystemdImage(log *output.Logger) string {
 	image := cfg.Image
+	if strings.Contains(image, "@") {
+		return image
+	}
 	if idx := strings.LastIndex(image, ":"); idx > 0 && !strings.Contains(image[idx:], "/") {
 		return image
 	}
 
+	version := "latest"
 	history := deploy.NewDurableHistoryStore(cfg.Deploy.RetainHistory, log)
 	if last, err := history.GetLastSuccessful(cfg.Service); err == nil && last.Version != "" {
-		return fmt.Sprintf("%s:%s", image, last.Version)
+		version = last.Version
 	}
 
-	return fmt.Sprintf("%s:latest", image)
+	return deploy.ImageReferenceForVersion(image, version)
 }
 
 func systemdSecretsPath(path string, rootless bool, user string) string {

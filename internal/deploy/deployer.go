@@ -168,24 +168,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	timer := d.log.NewTimer("Deployment")
 	defer timer.Stop()
 
-	// Determine the image to deploy
-	image := d.cfg.Image
-	version := opts.Version
-	switch {
-	case version != "":
-		// Explicit version: replace any existing tag or digest.
-		image = fmt.Sprintf("%s:%s", stripImageTag(image), version)
-	case strings.Contains(image, "@"):
-		// Digest-pinned image (no explicit version): use the digest as version.
-		version = image[strings.Index(image, "@")+1:]
-	case hasImageTag(image):
-		// Tagged image: extract the tag as the version.
-		version = image[strings.LastIndex(image, ":")+1:]
-	default:
-		// No tag and no version: default to latest.
-		version = "latest"
-		image = fmt.Sprintf("%s:latest", image)
-	}
+	// Determine the image to deploy. A digest recorded as a version must be
+	// joined with @, not the : separator used for tags.
+	image, version := resolveDeploymentImage(d.cfg.Image, opts.Version)
 	d.log.Header("Deploying %s", image)
 
 	// Resolve role/host pairs before doing any remote work. A host can run
@@ -1403,6 +1388,63 @@ func hasImageTag(image string) bool {
 	return idx > 0 && !strings.Contains(image[idx:], "/")
 }
 
+// resolveDeploymentImage returns the complete image reference and the version
+// value stored in deployment history. Explicit versions may be ordinary tags
+// or OCI digests restored from an earlier history record.
+func resolveDeploymentImage(image, requestedVersion string) (string, string) {
+	if requestedVersion != "" {
+		return ImageReferenceForVersion(image, requestedVersion), requestedVersion
+	}
+	if at := strings.Index(image, "@"); at >= 0 {
+		return image, image[at+1:]
+	}
+	if hasImageTag(image) {
+		return image, image[strings.LastIndex(image, ":")+1:]
+	}
+	return ImageReferenceForVersion(image, "latest"), "latest"
+}
+
+// ImageReferenceForVersion replaces any existing tag or digest while
+// preserving the semantic separator: tags use ':' and digests use '@'.
+func ImageReferenceForVersion(image, version string) string {
+	separator := ":"
+	if isDigestVersion(version) {
+		separator = "@"
+	}
+	return stripImageTag(image) + separator + version
+}
+
+// isDigestVersion recognizes the OCI digest grammar algorithm:encoded. A
+// colon cannot occur in an OCI tag, so a syntactically digest-shaped version
+// is unambiguous even for algorithms other than sha256.
+func isDigestVersion(version string) bool {
+	algorithm, encoded, found := strings.Cut(version, ":")
+	if !found || algorithm == "" || encoded == "" {
+		return false
+	}
+	componentLength := 0
+	for _, char := range algorithm {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
+			componentLength++
+			continue
+		}
+		if componentLength == 0 || !strings.ContainsRune("+._-", char) {
+			return false
+		}
+		componentLength = 0
+	}
+	if componentLength == 0 {
+		return false
+	}
+	for _, char := range encoded {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune("=_-", char) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // Rollback re-deploys a previous version.
 func (d *Deployer) Rollback(ctx context.Context, version, destination string, hosts []string) error {
 	d.log.Header("Rolling back to %s", version)
@@ -1458,7 +1500,7 @@ func (d *Deployer) rollbackTargets(ctx context.Context, targets []deploymentTarg
 		return fmt.Errorf("no previous version recorded")
 	}
 
-	prevImage := fmt.Sprintf("%s:%s", stripImageTag(d.cfg.Image), previousVersion)
+	prevImage := ImageReferenceForVersion(d.cfg.Image, previousVersion)
 	var rollbackErrors []string
 
 	for _, target := range targets {
