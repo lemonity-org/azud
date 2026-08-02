@@ -163,11 +163,17 @@ func (m *Manager) EnsureConfig(host string) error {
 func (m *Manager) waitForAdminAPI(host string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	interval := 500 * time.Millisecond
+	var lastErr error
 	for time.Now().Before(deadline) {
 		if _, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil); err == nil {
 			return nil
+		} else {
+			lastErr = err
 		}
 		time.Sleep(interval)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("caddy admin API not ready after %s: %w", timeout, lastErr)
 	}
 	return fmt.Errorf("caddy admin API not ready after %s", timeout)
 }

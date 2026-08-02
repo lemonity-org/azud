@@ -203,6 +203,24 @@ jobs:
           printf '::error title=Setup integration test failed::%s\n' "$annotation"
           exit 1
 
+      - name: Capture failed proxy diagnostics
+        if: failure()
+        env:
+          TARGET_USER: ${{ matrix.user }}
+          TARGET_ROOTLESS: ${{ matrix.rootless }}
+          PROXY_ROOTFUL: ${{ matrix.proxy_rootful }}
+        run: |
+          if [ "$TARGET_ROOTLESS" = "true" ] && [ "$PROXY_ROOTFUL" = "true" ]; then
+            podman_command='sudo -n podman'
+          else
+            podman_command='podman'
+          fi
+          ssh -o BatchMode=yes -o ConnectTimeout=5 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -i /tmp/azud_ci_key "${TARGET_USER}@127.0.0.1" \
+            "${podman_command} ps -a --filter name=azud-proxy; ${podman_command} inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' azud-proxy; ${podman_command} logs --tail 200 azud-proxy" \
+            || true
+
       - name: Cleanup podman artifacts
         if: always()
         env:
