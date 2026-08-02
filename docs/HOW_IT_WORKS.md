@@ -32,8 +32,24 @@ Azud manages Caddy as the reverse proxy by default:
 
 Each Azud-owned route and reverse-proxy handler has a stable Caddy `@id`.
 `azud proxy reconcile --check` reports drift between configuration, managed
-containers, canary state, and the live route; `--repair` explicitly restores
-that desired state without touching routes owned by other IDs.
+containers, canary state, the hardened proxy runtime, and the live route;
+`--repair` explicitly restores that desired state without touching routes
+owned by other IDs. In bridge mode, Caddy's admin API is reachable only from
+inside the proxy container and is never published.
+
+Azud keeps two protected copies of the accepted Caddy JSON: a mode-0600 host
+snapshot for operator backup/rollback and `/config/caddy/azud.json` in the
+named Caddy config volume for cold start. `azud proxy stage-recovery` is the
+explicit, non-starting handoff from a restored host snapshot to that boot
+authority. This keeps the host file out of the non-root proxy container while
+ensuring a Quadlet restart uses the restored config from its first instruction.
+
+During a no-downtime supervisor migration, `azud systemd enable --no-start`
+keeps the current proxy process running. Only after the Quadlet is installed
+does Azud change that container's Podman restart policy to `no` and verify it.
+The enabled Quadlet is then the sole authority that may recreate
+`azud-proxy` after a host reboot, avoiding a race with
+`podman-restart.service` for the same container name.
 
 You can disable managed proxy for non-HTTP workloads, or use your own load balancer in front.
 

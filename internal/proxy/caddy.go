@@ -4,28 +4,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"time"
+	"io"
+	"net/url"
+	"strings"
 
+	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
 
+type caddyContainerExecutor interface {
+	Exec(host string, config *podman.ExecConfig) (*ssh.Result, error)
+	ExecWithStdin(host string, config *podman.ExecConfig, stdin io.Reader) (*ssh.Result, error)
+}
+
 // CaddyClient manages Caddy proxy via its admin API
 type CaddyClient struct {
-	sshClient  *ssh.Client
-	adminPort  int
-	httpClient *http.Client
+	executor caddyContainerExecutor
 }
 
 // NewCaddyClient creates a new Caddy client
-func NewCaddyClient(sshClient *ssh.Client) *CaddyClient {
-	return &CaddyClient{
-		sshClient: sshClient,
-		adminPort: 2019, // Caddy's default admin API port
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
+func NewCaddyClient(executor caddyContainerExecutor) *CaddyClient {
+	return &CaddyClient{executor: executor}
 }
 
 // CaddyConfig represents the full Caddy configuration
@@ -247,7 +246,9 @@ type ServerLogs struct {
 	DefaultLoggerName string `json:"default_logger_name,omitempty"`
 }
 
-// apiRequest executes an HTTP request against Caddy's admin API via SSH tunnel
+// apiRequest executes an HTTP request against Caddy's admin API from inside
+// azud-proxy. The admin listener is container-loopback-only and is never
+// published into the host network namespace in bridge mode.
 func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([]byte, error) {
 	var bodyJSON []byte
 	var err error
@@ -259,32 +260,71 @@ func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([
 		}
 	}
 
-	// Execute curl command via SSH to reach Caddy's admin API.
-	// Use -f (--fail) so curl returns a non-zero exit code on HTTP 4xx/5xx
-	// errors, preventing silent failures when Caddy rejects a config change.
-	// Body is piped via stdin (-d @-) to avoid single-quote breakout issues
-	// when JSON values contain quote characters.
-	curlCmd := fmt.Sprintf("curl -sSf -X %s", method)
-	if len(bodyJSON) > 0 {
-		curlCmd += " -H 'Content-Type: application/json' -d @-"
+	execConfig, err := caddyAdminExecConfig(method, path, len(bodyJSON) > 0)
+	if err != nil {
+		return nil, err
 	}
-	curlCmd += fmt.Sprintf(" http://localhost:%d%s", c.adminPort, path)
 
 	var result *ssh.Result
 	if len(bodyJSON) > 0 {
-		result, err = c.sshClient.ExecuteWithStdin(host, curlCmd, bytes.NewReader(bodyJSON))
+		result, err = c.executor.ExecWithStdin(host, execConfig, bytes.NewReader(bodyJSON))
 	} else {
-		result, err = c.sshClient.Execute(host, curlCmd)
+		result, err = c.executor.Exec(host, execConfig)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute API request: %w", err)
+		return nil, fmt.Errorf("failed to execute Caddy API request inside %s: %w", CaddyContainerName, err)
 	}
 
 	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("API request failed: %s", result.Stderr)
+		return nil, fmt.Errorf("caddy API request failed: %s", strings.TrimSpace(result.Stderr))
 	}
 
 	return []byte(result.Stdout), nil
+}
+
+func caddyAdminExecConfig(method, path string, hasBody bool) (*podman.ExecConfig, error) {
+	switch method {
+	case "GET", "POST", "PATCH", "DELETE":
+	default:
+		return nil, fmt.Errorf("unsupported Caddy API method %q", method)
+	}
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("caddy API path must be absolute")
+	}
+	parsed, err := url.ParseRequestURI(path)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" {
+		return nil, fmt.Errorf("invalid Caddy API path %q", path)
+	}
+
+	command := []string{
+		"curl",
+		"--silent",
+		"--show-error",
+		"--fail-with-body",
+		"--max-time", "30",
+		"--noproxy", "*",
+		"--proto", "=http",
+		"--request", method,
+	}
+	if hasBody {
+		command = append(command,
+			"--header", "Content-Type: application/json",
+			"--data-binary", "@-",
+		)
+	}
+	command = append(command, "--url", "http://"+CaddyAdminListen+path)
+	return &podman.ExecConfig{
+		Container:   CaddyContainerName,
+		Command:     command,
+		Interactive: hasBody,
+	}, nil
+}
+
+func enforceAdminIsolation(config *CaddyConfig) {
+	if config.Admin == nil {
+		config.Admin = &AdminConfig{}
+	}
+	config.Admin.Listen = CaddyAdminListen
 }
 
 // GetConfig retrieves the current Caddy configuration
@@ -304,12 +344,14 @@ func (c *CaddyClient) GetConfig(host string) (*CaddyConfig, error) {
 
 // SetConfig sets the full Caddy configuration
 func (c *CaddyClient) SetConfig(host string, config *CaddyConfig) error {
+	enforceAdminIsolation(config)
 	_, err := c.apiRequest(host, "POST", "/config/", config)
 	return err
 }
 
 // LoadConfig loads a configuration from a path
 func (c *CaddyClient) LoadConfig(host string, config *CaddyConfig) error {
+	enforceAdminIsolation(config)
 	_, err := c.apiRequest(host, "POST", "/load", config)
 	return err
 }

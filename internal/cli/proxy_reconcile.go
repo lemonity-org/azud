@@ -57,7 +57,7 @@ func runProxyReconcile(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 	cm := podman.NewContainerManager(podman.NewClient(sshClient))
-	manager := proxy.NewManagerWithOptions(sshClient, output.DefaultLogger, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, output.DefaultLogger, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 	proxyConfig := buildProxyConfig(output.DefaultLogger)
 	manager.SetProxyConfig(proxyConfig)
 	var failures []string
@@ -71,6 +71,22 @@ func runProxyReconcile(cmd *cobra.Command, args []string) error {
 		if proxyReconcileRepair {
 			if err := manager.Boot(host, proxyConfig); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: boot: %v", host, err))
+				continue
+			}
+		} else {
+			runtimeStatus, statusErr := manager.Status(host)
+			if statusErr != nil {
+				failures = append(failures, fmt.Sprintf("%s: runtime inspection: %v", host, statusErr))
+				continue
+			}
+			if !runtimeStatus.Running {
+				failures = append(failures, fmt.Sprintf("%s: proxy is not running", host))
+				continue
+			}
+			if !runtimeStatus.Secure {
+				reason := strings.Join(runtimeStatus.SecurityDrift, "; ")
+				output.DefaultLogger.HostError(host, "proxy runtime security drift: %s", reason)
+				failures = append(failures, fmt.Sprintf("%s: runtime security drift: %s", host, reason))
 				continue
 			}
 		}

@@ -93,7 +93,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 	}
 
 	bootstrapper := server.NewBootstrapper(sshClient, log, cfg.Podman.NetworkBackend)
-	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 
 	rows := make([][]string, len(hosts))
 	var wg sync.WaitGroup
@@ -108,7 +108,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	wg.Wait()
 
-	headings := []string{"Host", "SSH", "Trust", "Podman", "Rootless", "Secrets", "Proxy", "Helper", "Curl", "SSHD", "Firewall", "Cron"}
+	headings := []string{"Host", "SSH", "Trust", "Podman", "Rootless", "Secrets", "Proxy", "Helper", "Proxy security", "SSHD", "Firewall", "Cron"}
 	log.Table(headings, rows)
 	var warnings []string
 	for _, row := range rows {
@@ -316,7 +316,7 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 	var podmanStatus string
 	proxyStatus := "n/a"
 	helperStatus := "n/a"
-	var curlStatus string
+	proxySecurityStatus := "n/a"
 	var sshdStatus string
 	var firewallStatus string
 	proxyHosts := cfg.Proxy.AllHosts()
@@ -396,6 +396,11 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 	if len(proxyHosts) > 0 && isProxyHost {
 		if status, err := proxyManager.Status(host); err == nil && status.Running {
 			proxyStatus = "ok"
+			if status.Secure {
+				proxySecurityStatus = "ok"
+			} else {
+				proxySecurityStatus = "insecure"
+			}
 		} else {
 			proxyStatus = "down"
 		}
@@ -416,13 +421,6 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 		helperStatus = checkRemoteCommand(bootstrapper, host, cmd)
 	}
 
-	// Host dependencies
-	if len(proxyHosts) > 0 && isProxyHost {
-		curlStatus = checkRemoteCommand(bootstrapper, host, "command -v curl >/dev/null 2>&1")
-	} else {
-		curlStatus = "n/a"
-	}
-
 	// SSH hardening checks
 	sshdStatus = checkSSHDHardening(bootstrapper, host)
 
@@ -439,7 +437,7 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 		cronStatus = checkCronDeps(bootstrapper, host)
 	}
 
-	return []string{host, sshStatus, trustStatus, podmanStatus, rootlessStatus, secretsStatus, proxyStatus, helperStatus, curlStatus, sshdStatus, firewallStatus, cronStatus}
+	return []string{host, sshStatus, trustStatus, podmanStatus, rootlessStatus, secretsStatus, proxyStatus, helperStatus, proxySecurityStatus, sshdStatus, firewallStatus, cronStatus}
 }
 
 func verifyTrustedHost(host string) bool {

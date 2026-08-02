@@ -74,6 +74,51 @@ security:
 - Keep app ports internal; proxy forwards traffic
 - Lock down SSH with firewall rules
 
+### Caddy control plane
+
+Azud does not publish Caddy's admin port. In bridge mode the admin API binds to
+`127.0.0.1:2019` inside `azud-proxy`, and the CLI executes the pinned image's
+`curl` binary with `podman exec`. Request bodies travel over stdin rather than
+shell arguments. Host `curl` is therefore not a proxy prerequisite and a host
+listener on port 2019 indicates runtime drift in bridge deployments. Mixed
+rootful/rootless mode uses host networking, where container loopback is also
+host loopback; host firewall and process isolation remain part of that mode's
+trust boundary.
+
+The managed proxy runs as numeric UID/GID `1000:1000` with a read-only image,
+`no-new-privileges`, all capabilities dropped except `NET_BIND_SERVICE`, and
+bounded memory, CPU, PID, file-descriptor, shared-memory, `/tmp`, and `/run`
+resources. Only the named `/data` and `/config` volumes remain writable. Azud
+stores a mode-0600 recovery configuration in `/config/caddy/azud.json` and a
+second protected host copy; it never mounts the host copy into the container.
+The startup shell has an explicit entrypoint and reads only the Azud recovery
+file (falling back to the stock Caddyfile on a genuinely empty first
+deployment), never Caddy's mutable autosave.
+
+`azud preflight`, `azud proxy status`, and `azud proxy reconcile --check`
+report this runtime security state. `azud proxy boot` and reconciliation repair
+recreate a running legacy proxy only after moving its live admin listener to
+container loopback and successfully writing both recovery copies. A stopped
+or unreachable insecure proxy is rejected so routes or TLS material are not
+silently discarded.
+
+Azud also prevents two reboot supervisors from racing for `azud-proxy`.
+`azud systemd enable --no-start` first writes the Quadlet and reloads systemd,
+then leaves the live proxy process untouched while changing its Podman restart
+policy to `no`. The command verifies that handoff, so the installed Quadlet is
+the only component authorized to recreate the proxy on the next boot. A
+drifted, missing, or stopped proxy is rejected before this transition.
+
+For rollback, stop the proxy unit, restore the accepted mode-0600 host snapshot
+at `~/.local/share/azud/caddy-config.json` (or
+`/var/lib/azud/caddy-config.json` for root), run
+`azud proxy stage-recovery --host <host>`, and only then start the proxy unit.
+The staging command validates JSON, forces the admin listener to container
+loopback, and writes the named volume atomically through a disposable pinned
+Caddy container with `--network none`, a read-only root filesystem, all
+capabilities dropped, and no published ports. It never sends config JSON in
+argv or logs and does not require the live admin API.
+
 ## TLS / HTTPS
 
 - Use Caddy automatic TLS for public domains

@@ -1,6 +1,9 @@
 package podman
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseHostPort(t *testing.T) {
 	tests := []struct {
@@ -60,5 +63,34 @@ func TestParseHostPort(t *testing.T) {
 				t.Fatalf("unexpected port: want %d got %d", tt.wantPort, port)
 			}
 		})
+	}
+}
+
+func TestValidateRestartPolicy(t *testing.T) {
+	for _, policy := range []string{"no", "never", "always", "unless-stopped", "on-failure", "on-failure:0", "on-failure:5"} {
+		if err := validateRestartPolicy(policy); err != nil {
+			t.Fatalf("valid policy %q rejected: %v", policy, err)
+		}
+	}
+	for _, policy := range []string{"", "unless-stopped; reboot", "on-failure:-1", "on-failure:many"} {
+		if err := validateRestartPolicy(policy); err == nil {
+			t.Fatalf("invalid policy %q accepted", policy)
+		}
+	}
+}
+
+func TestParseRestartPolicy(t *testing.T) {
+	got, err := parseRestartPolicy(`[{"HostConfig":{"RestartPolicy":{"Name":"no","MaximumRetryCount":0}}}]`)
+	if err != nil {
+		t.Fatalf("parse restart policy: %v", err)
+	}
+	if got != "no" {
+		t.Fatalf("restart policy = %q, want no", got)
+	}
+
+	for _, raw := range []string{`not-json`, `[]`, `[{},{}]`} {
+		if _, err := parseRestartPolicy(raw); err == nil {
+			t.Fatalf("invalid inspect payload accepted: %s", strings.TrimSpace(raw))
+		}
 	}
 }

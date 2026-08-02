@@ -158,28 +158,42 @@ func TestBuildRunCommand_WithResources(t *testing.T) {
 
 func TestBuildRunCommand_WithTypedRuntimeHardening(t *testing.T) {
 	cfg := &ContainerConfig{
-		Image:             "worker:latest",
-		User:              "10001:10001",
-		ReadOnly:          true,
-		CapDrop:           []string{"ALL"},
-		NoNewPrivileges:   true,
-		Tmpfs:             []string{"/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"},
-		NoHealthcheck:     true,
-		StopTimeout:       30,
-		HealthCmd:         "should-not-disable-explicit-command-generation",
-		HealthInterval:    "10s",
-		HealthTimeout:     "5s",
-		HealthRetries:     3,
-		HealthStartPeriod: "1m",
+		Image:                "worker:latest",
+		User:                 "10001:10001",
+		ReadOnly:             true,
+		DisableReadOnlyTmpfs: true,
+		CapDrop:              []string{"ALL"},
+		CapAdd:               []string{"NET_BIND_SERVICE"},
+		NoNewPrivileges:      true,
+		Tmpfs:                []string{"/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"},
+		PidsLimit:            128,
+		ShmSize:              "16m",
+		Memory:               "512m",
+		MemorySwap:           "512m",
+		Ulimits:              []string{"nofile=65536:65536"},
+		NoHealthcheck:        true,
+		StopTimeout:          30,
+		HealthCmd:            "should-not-disable-explicit-command-generation",
+		HealthInterval:       "10s",
+		HealthTimeout:        "5s",
+		HealthRetries:        3,
+		HealthStartPeriod:    "1m",
 	}
 
 	cmd := cfg.BuildRunCommand()
 	for _, want := range []string{
 		"--user 10001:10001",
 		"--read-only",
+		"--read-only-tmpfs=false",
 		"--cap-drop ALL",
+		"--cap-add NET_BIND_SERVICE",
 		"--security-opt no-new-privileges",
 		"--tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777'",
+		"--pids-limit 128",
+		"--shm-size 16m",
+		"--memory 512m",
+		"--memory-swap 512m",
+		"--ulimit 'nofile=65536:65536'",
 		"--no-healthcheck",
 		"--stop-timeout 30",
 	} {
@@ -215,14 +229,18 @@ func TestBuildCreateCommandOmitsRunOnlyFlags(t *testing.T) {
 
 func TestBuildRunCommand_WithRemove(t *testing.T) {
 	cfg := &ContainerConfig{
-		Image:  "nginx:latest",
-		Remove: true,
+		Image:       "nginx:latest",
+		Interactive: true,
+		Remove:      true,
 	}
 
 	cmd := cfg.BuildRunCommand()
 
 	if !strings.Contains(cmd, "--rm") {
 		t.Error("expected '--rm' flag")
+	}
+	if !strings.Contains(cmd, " -i ") {
+		t.Error("expected '-i' flag for streamed stdin")
 	}
 }
 

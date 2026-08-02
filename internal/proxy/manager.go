@@ -33,7 +33,8 @@ const (
 	// CaddyLockFileName is the name of the Caddy lock file.
 	CaddyLockFileName = "caddy.lock"
 
-	CaddyLockTimeout = 120 * time.Second
+	CaddyLockTimeout               = 120 * time.Second
+	missingProtectedConfigExitCode = 44
 
 	azudRouteIDPrefix   = "azud-route-"
 	azudHandlerIDPrefix = "azud-proxy-"
@@ -46,12 +47,6 @@ const (
 	// outage requests should fail rather than pile up.
 	upstreamTryDuration = "5s"
 	upstreamTryInterval = "250ms"
-
-	// Bridged containers must listen on the container interface so Podman's
-	// loopback-only host port can reach the API. Host-networked containers share
-	// the host namespace and therefore stay bound to host loopback.
-	caddyAdminBridgeListen = "0.0.0.0:2019" // safe: container-only; Podman publishes this port to host loopback
-	caddyAdminHostListen   = "127.0.0.1:2019"
 )
 
 // CaddyConfigDir returns the Caddy config directory for the given user.
@@ -78,6 +73,8 @@ type Manager struct {
 	user        string // SSH user for state directory paths
 	rootful     bool
 	hostPorts   bool
+	httpPort    int
+	httpsPort   int
 	proxyConfig *ProxyConfig // cached proxy config for fallback rebuilds
 }
 
@@ -92,7 +89,9 @@ func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) 
 }
 
 // NewManagerWithOptions creates a proxy manager with explicit runtime options.
-func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user string, rootful bool, hostPortUpstreams bool) *Manager {
+// expectedHostPorts may contain HTTP then HTTPS; omitting it preserves the
+// conventional 80/443 defaults for existing library callers.
+func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user string, rootful bool, hostPortUpstreams bool, expectedHostPorts ...int) *Manager {
 	if log == nil {
 		log = output.DefaultLogger
 	}
@@ -105,15 +104,28 @@ func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user strin
 		podmanCmd = "sudo -n podman"
 	}
 	podmanClient := podman.NewClientWithCommand(sshClient, podmanCmd)
+	podmanManager := podman.NewContainerManager(podmanClient)
+
+	httpPort, httpsPort := CaddyHTTPPort, CaddyHTTPSPort
+	if len(expectedHostPorts) >= 2 {
+		if expectedHostPorts[0] > 0 {
+			httpPort = expectedHostPorts[0]
+		}
+		if expectedHostPorts[1] > 0 {
+			httpsPort = expectedHostPorts[1]
+		}
+	}
 
 	return &Manager{
 		sshClient:   sshClient,
-		caddyClient: NewCaddyClient(sshClient),
-		podman:      podman.NewContainerManager(podmanClient),
+		caddyClient: NewCaddyClient(podmanManager),
+		podman:      podmanManager,
 		log:         log,
 		user:        user,
 		rootful:     rootful,
 		hostPorts:   hostPortUpstreams,
+		httpPort:    httpPort,
+		httpsPort:   httpsPort,
 	}
 }
 
@@ -121,13 +133,17 @@ func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user strin
 // the full Caddy config during service registration fallback.
 func (m *Manager) SetProxyConfig(config *ProxyConfig) {
 	m.proxyConfig = config
-}
-
-func (m *Manager) adminListen() string {
-	if m.hostPorts {
-		return caddyAdminHostListen
+	if config == nil {
+		return
 	}
-	return caddyAdminBridgeListen
+	m.httpPort = CaddyHTTPPort
+	m.httpsPort = CaddyHTTPSPort
+	if config.HTTPPort > 0 {
+		m.httpPort = config.HTTPPort
+	}
+	if config.HTTPSPort > 0 {
+		m.httpsPort = config.HTTPSPort
+	}
 }
 
 // EnsureConfig ensures the proxy has TLS/ACME and logging settings applied.
@@ -178,8 +194,10 @@ func (m *Manager) withPersistedMutation(host string, mutate func() error) error 
 			return fmt.Errorf("caddy mutation failed; restored previous live config: %w", err)
 		}
 		if err := m.persistConfig(host); err != nil {
-			if restoreErr := m.caddyClient.LoadConfig(host, before); restoreErr != nil {
-				return fmt.Errorf("failed to persist Caddy mutation: %v (live rollback also failed: %v)", err, restoreErr)
+			restoreErr := m.caddyClient.LoadConfig(host, before)
+			durableRestoreErr := m.persistConfigData(host, before)
+			if restoreErr != nil || durableRestoreErr != nil {
+				return fmt.Errorf("failed to persist Caddy mutation: %v (live rollback: %v; durable rollback: %v)", err, restoreErr, durableRestoreErr)
 			}
 			return fmt.Errorf("failed to persist Caddy mutation; restored previous live config: %w", err)
 		}
@@ -211,34 +229,116 @@ func (m *Manager) ensureRootfulAccess(host string) error {
 	return nil
 }
 
-func (m *Manager) containerUsesHostNetwork(host, container string) (bool, error) {
-	raw, err := m.podman.Inspect(host, container)
+// RuntimeDrift reports security and topology differences between a live
+// azud-proxy container and the authoritative runtime specification.
+func (m *Manager) RuntimeDrift(host string) ([]string, error) {
+	raw, err := m.podman.Inspect(host, CaddyContainerName)
 	if err != nil {
-		return false, err
+		return nil, err
+	}
+	return inspectCaddyRuntime(raw, m.hostPorts, m.httpPort, m.httpsPort), nil
+}
+
+func (m *Manager) prepareRunningProxyForRecreation(host string) error {
+	return m.withCaddyLock(host, func() error {
+		config, err := m.caddyClient.GetConfig(host)
+		if err != nil {
+			return fmt.Errorf("cannot snapshot the running proxy through its container-local admin API: %w", err)
+		}
+		enforceAdminIsolation(config)
+		if err := m.caddyClient.LoadConfig(host, config); err != nil {
+			return fmt.Errorf("cannot move the live admin listener to container loopback: %w", err)
+		}
+		if err := m.persistConfig(host); err != nil {
+			return fmt.Errorf("cannot persist a secure recovery config before recreation: %w", err)
+		}
+		return nil
+	})
+}
+
+// PrepareQuadletState writes a secure, container-readable recovery config for
+// generated Quadlet units. It never starts or recreates a container; existing
+// proxy state must be running so Azud can snapshot it without guessing.
+func (m *Manager) PrepareQuadletState(host string) error {
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
+	exists, err := m.podman.Exists(host, CaddyContainerName)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return validateQuadletState(false, false)
+	}
+	running, err := m.podman.IsRunning(host, CaddyContainerName)
+	if err != nil {
+		return err
+	}
+	if err := validateQuadletState(true, running); err != nil {
+		return err
+	}
+	return m.prepareRunningProxyForRecreation(host)
+}
+
+func validateQuadletState(exists, running bool) error {
+	if !exists {
+		return fmt.Errorf("proxy container %s does not exist; run azud proxy boot before enabling its Quadlet unit", CaddyContainerName)
+	}
+	if !running {
+		return fmt.Errorf("refusing to generate proxy recovery state from stopped container %s", CaddyContainerName)
+	}
+	return nil
+}
+
+// CompleteQuadletHandoff leaves the current proxy process online while making
+// the successfully deployed Quadlet unit its sole host-reboot supervisor.
+// Podman's restart service must not race systemd for the same container name.
+func (m *Manager) CompleteQuadletHandoff(host string) error {
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
+	exists, err := m.podman.Exists(host, CaddyContainerName)
+	if err != nil {
+		return err
+	}
+	running, err := m.podman.IsRunning(host, CaddyContainerName)
+	if err != nil {
+		return err
+	}
+	var drift []string
+	if exists {
+		drift, err = m.RuntimeDrift(host)
+		if err != nil {
+			return fmt.Errorf("failed to inspect proxy before Quadlet handoff: %w", err)
+		}
+	}
+	if err := validateQuadletHandoffState(exists, running, drift); err != nil {
+		return err
 	}
 
-	var payload []struct {
-		HostConfig struct {
-			NetworkMode string `json:"NetworkMode"`
-		} `json:"HostConfig"`
-		NetworkSettings struct {
-			Networks map[string]json.RawMessage `json:"Networks"`
-		} `json:"NetworkSettings"`
+	if err := m.podman.UpdateRestartPolicy(host, CaddyContainerName, "no"); err != nil {
+		return fmt.Errorf("failed to disable Podman's competing proxy restart authority: %w", err)
 	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return false, err
+	policy, err := m.podman.RestartPolicy(host, CaddyContainerName)
+	if err != nil {
+		return fmt.Errorf("proxy restart authority was updated but could not be verified: %w", err)
 	}
-	if len(payload) == 0 {
-		return false, fmt.Errorf("empty inspect result")
+	if policy != "no" {
+		return fmt.Errorf("proxy restart authority handoff did not stick: Podman reports %q, expected %q", policy, "no")
 	}
 
-	if payload[0].HostConfig.NetworkMode == "host" {
-		return true, nil
+	m.log.HostSuccess(host, "Proxy reboot supervision handed to Quadlet")
+	return nil
+}
+
+func validateQuadletHandoffState(exists, running bool, drift []string) error {
+	if err := validateQuadletState(exists, running); err != nil {
+		return err
 	}
-	if _, ok := payload[0].NetworkSettings.Networks["host"]; ok {
-		return true, nil
+	if len(drift) > 0 {
+		return fmt.Errorf("refusing Quadlet supervisor handoff from a drifted proxy runtime: %s", strings.Join(drift, "; "))
 	}
-	return false, nil
+	return nil
 }
 
 // persistConfig fetches the current Caddy config from the admin API and
@@ -250,21 +350,120 @@ func (m *Manager) persistConfig(host string) error {
 		return fmt.Errorf("failed to GET config from Caddy API: %w", err)
 	}
 
-	if !json.Valid(data) {
-		return fmt.Errorf("invalid JSON from Caddy admin API")
+	var config CaddyConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("invalid JSON from Caddy admin API: %w", err)
+	}
+	return m.persistConfigData(host, &config)
+}
+
+func (m *Manager) persistConfigData(host string, config *CaddyConfig) error {
+	if config == nil {
+		return fmt.Errorf("refusing to persist a nil Caddy config")
+	}
+	enforceAdminIsolation(config)
+	data, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal protected Caddy config: %w", err)
 	}
 
-	// Write atomically via a temp file to avoid partial writes on failure.
-	// Note: paths are pre-quoted with ${HOME} expansion support for non-root users.
-	cmd := persistConfigCommand(m.user)
-	result, err := m.sshClient.ExecuteWithStdin(host, cmd, bytes.NewReader(data))
+	// Write the in-volume recovery copy first. The protected host copy remains
+	// untouched if this fails, and the caller can safely roll the live config
+	// back. Caddy starts from this recovery file after crashes and reboots.
+	containerCmd := &podman.ExecConfig{
+		Container: CaddyContainerName,
+		Command:   []string{"/bin/sh", "-eu", "-c", caddyRecoveryWriteScript},
+	}
+	result, err := m.podman.ExecWithStdin(host, containerCmd, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to write container recovery config: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("container recovery write failed: %s", strings.TrimSpace(result.Stderr))
+	}
+
+	if err := m.persistHostConfigData(host, config); err != nil {
+		return err
+	}
+	m.log.Debug("persistConfig: saved protected Caddy state")
+	return nil
+}
+
+// StageRecovery validates the protected host snapshot and atomically streams a
+// loopback-admin copy into caddy_config. It does not start, stop, restart, or
+// mutate the live proxy; the staged file is authoritative on the next start.
+func (m *Manager) StageRecovery(host string) error {
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
+	return m.withCaddyLock(host, func() error {
+		config, found, err := m.readProtectedHostConfig(host)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("protected Caddy snapshot does not exist at %s", CaddyConfigFile(m.user))
+		}
+		if err := m.stageRecoveryConfig(host, config); err != nil {
+			return err
+		}
+		// Canonicalize the protected copy too, so a restored legacy snapshot can
+		// never reintroduce a wildcard admin listener on a later staging pass.
+		if err := m.persistHostConfigData(host, config); err != nil {
+			return fmt.Errorf("recovery volume was staged securely, but protected host snapshot normalization failed: %w", err)
+		}
+		m.log.HostSuccess(host, "Protected proxy recovery state staged")
+		return nil
+	})
+}
+
+func (m *Manager) stageRecoveryForBoot(host string, fallback *CaddyConfig) error {
+	return m.withCaddyLock(host, func() error {
+		config, found, err := m.readProtectedHostConfig(host)
+		if err != nil {
+			return err
+		}
+		if !found {
+			if fallback == nil {
+				return fmt.Errorf("protected Caddy snapshot is missing and no safe initial config was provided")
+			}
+			config = fallback
+		}
+		return m.stageRecoveryConfig(host, config)
+	})
+}
+
+func (m *Manager) stageRecoveryConfig(host string, config *CaddyConfig) error {
+	if config == nil {
+		return fmt.Errorf("refusing to stage a nil Caddy config")
+	}
+	enforceAdminIsolation(config)
+	data, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal recovery config: %w", err)
+	}
+	if _, err := m.podman.RunWithStdin(host, newCaddyRecoveryWriterConfig(), bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("failed to stage protected recovery config: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) persistHostConfigData(host string, config *CaddyConfig) error {
+	if config == nil {
+		return fmt.Errorf("refusing to persist a nil Caddy config")
+	}
+	enforceAdminIsolation(config)
+	data, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal protected Caddy config: %w", err)
+	}
+	result, err := m.sshClient.ExecuteWithStdin(host, persistConfigCommand(m.user), bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	if result.ExitCode != 0 {
-		return fmt.Errorf("write command failed: %s", result.Stderr)
+		return fmt.Errorf("write command failed: %s", strings.TrimSpace(result.Stderr))
 	}
-	m.log.Debug("persistConfig: saved protected Caddy state")
 	return nil
 }
 
@@ -280,21 +479,14 @@ func persistConfigCommand(user string) string {
 // on the remote host and loads it into Caddy via the admin API. Returns an
 // error so callers can decide whether to warn or fail.
 func (m *Manager) restoreConfig(host string) error {
-	cmd := restoreConfigCommand(m.user)
-	result, err := m.sshClient.Execute(host, cmd)
+	config, found, err := m.readProtectedHostConfig(host)
 	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
+		return err
 	}
-	if result.ExitCode != 0 {
+	if !found {
 		return fmt.Errorf("config file does not exist")
 	}
-
-	var config CaddyConfig
-	if err := json.Unmarshal([]byte(result.Stdout), &config); err != nil {
-		return fmt.Errorf("persisted config is invalid JSON: %w", err)
-	}
-
-	if err := m.caddyClient.LoadConfig(host, &config); err != nil {
+	if err := m.caddyClient.LoadConfig(host, config); err != nil {
 		return fmt.Errorf("failed to load persisted config: %w", err)
 	}
 
@@ -302,10 +494,37 @@ func (m *Manager) restoreConfig(host string) error {
 	return nil
 }
 
+func (m *Manager) readProtectedHostConfig(host string) (*CaddyConfig, bool, error) {
+	result, err := m.sshClient.Execute(host, restoreConfigCommand(m.user))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to read protected Caddy config: %w", err)
+	}
+	if result.ExitCode == missingProtectedConfigExitCode {
+		return nil, false, nil
+	}
+	if result.ExitCode != 0 {
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = fmt.Sprintf("remote command exited with status %d", result.ExitCode)
+		}
+		return nil, false, fmt.Errorf("failed to read protected Caddy config: %s", detail)
+	}
+
+	var config *CaddyConfig
+	if err := json.Unmarshal([]byte(result.Stdout), &config); err != nil {
+		return nil, false, fmt.Errorf("persisted config is invalid JSON: %w", err)
+	}
+	if config == nil {
+		return nil, false, fmt.Errorf("persisted config must be a JSON object")
+	}
+	enforceAdminIsolation(config)
+	return config, true, nil
+}
+
 func restoreConfigCommand(user string) string {
 	configDir := state.DirQuoted(user)
 	configFile := state.ConfigFileQuoted(user, CaddyConfigFileName)
-	return fmt.Sprintf("test -f %s && chmod 700 %s && chmod 600 %s && cat %s", configFile, configDir, configFile, configFile) // safe: all values come from state.*Quoted
+	return fmt.Sprintf("if [ ! -f %s ]; then exit %d; fi; chmod 700 %s && chmod 600 %s && cat %s", configFile, missingProtectedConfigExitCode, configDir, configFile, configFile) // safe: all values come from state.*Quoted
 }
 
 type ProxyConfig struct {
@@ -351,7 +570,7 @@ type ProxyConfig struct {
 
 // Boot starts the Caddy proxy on a host
 func (m *Manager) Boot(host string, config *ProxyConfig) error {
-	m.proxyConfig = config
+	m.SetProxyConfig(config)
 	m.log.Host(host, "Starting proxy...")
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
@@ -366,17 +585,21 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		return fmt.Errorf("failed to check proxy container: %w", err)
 	}
 
-	// Mixed mode requires host networking so Caddy can reach app host ports
-	// on 127.0.0.1. Recreate existing proxy containers that use bridge mode.
-	if m.hostPorts && exists {
-		hostNet, inspectErr := m.containerUsesHostNetwork(host, CaddyContainerName)
+	if exists {
+		drift, inspectErr := m.RuntimeDrift(host)
 		if inspectErr != nil {
-			return fmt.Errorf("failed to inspect proxy network mode on %s: %w", host, inspectErr)
+			return fmt.Errorf("failed to inspect proxy runtime on %s: %w", host, inspectErr)
 		}
-		if !hostNet {
-			m.log.Host(host, "Recreating proxy container for mixed rootful/rootless mode...")
-			if running {
-				_ = m.podman.Stop(host, CaddyContainerName, 30)
+		if len(drift) > 0 {
+			if !running {
+				return fmt.Errorf("refusing to start stopped insecure proxy; remove it after preserving its Caddy state: %s", strings.Join(drift, "; "))
+			}
+			m.log.Host(host, "Recreating proxy container to repair runtime security drift...")
+			if err := m.prepareRunningProxyForRecreation(host); err != nil {
+				return fmt.Errorf("refusing to recreate insecure proxy without a recoverable config: %w", err)
+			}
+			if err := m.podman.Stop(host, CaddyContainerName, 30); err != nil {
+				return fmt.Errorf("failed to stop drifted proxy container: %w", err)
 			}
 			if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
 				return fmt.Errorf("failed to recreate proxy container: %w", err)
@@ -391,14 +614,30 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		// Apply TLS/ACME and logging settings from deploy.yml while
 		// preserving existing routes so that registered services are
 		// not wiped out.
-		if config != nil {
-			if err := m.withPersistedMutation(host, func() error {
+		if err := m.withPersistedMutation(host, func() error {
+			if config != nil {
 				return m.applyConfigPreservingRoutes(host, config)
-			}); err != nil {
-				return fmt.Errorf("failed to apply proxy config: %w", err)
 			}
+			live, getErr := m.caddyClient.GetConfig(host)
+			if getErr != nil {
+				return getErr
+			}
+			enforceAdminIsolation(live)
+			return m.caddyClient.LoadConfig(host, live)
+		}); err != nil {
+			return fmt.Errorf("failed to apply secure proxy config: %w", err)
 		}
 		return nil
+	}
+
+	// Establish a known-good boot authority before starting any stopped or new
+	// container. An accepted protected snapshot wins; on first deployment only,
+	// use the desired initial config. This prevents an orphaned volume from
+	// briefly booting stale or hostile admin settings.
+	initialConfig := m.buildBaseConfig()
+	m.applyProxySettingsFrom(initialConfig, config)
+	if err := m.stageRecoveryForBoot(host, initialConfig); err != nil {
+		return fmt.Errorf("failed to prepare proxy boot state: %w", err)
 	}
 
 	if exists {
@@ -442,34 +681,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		httpsPort = config.HTTPSPort
 	}
 
-	containerConfig := &podman.ContainerConfig{
-		Name:    CaddyContainerName,
-		Image:   CaddyImage,
-		Detach:  true,
-		Restart: "unless-stopped",
-		Volumes: []string{
-			"caddy_data:/data",
-			"caddy_config:/config",
-		},
-		Labels: map[string]string{
-			"azud.managed": "true",
-			"azud.type":    "proxy",
-		},
-		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--watch"},
-		Env: map[string]string{
-			"CADDY_ADMIN": m.adminListen(),
-		},
-	}
-	if m.hostPorts {
-		containerConfig.Network = "host"
-	} else {
-		containerConfig.Network = "azud"
-		containerConfig.Ports = []string{
-			fmt.Sprintf("%d:%d", httpPort, 80),
-			fmt.Sprintf("%d:%d", httpsPort, 443),
-			fmt.Sprintf("127.0.0.1:%d:%d", CaddyAdminPort, CaddyAdminPort),
-		}
-	}
+	containerConfig := NewCaddyContainerConfig(httpPort, httpsPort, m.hostPorts)
 
 	_, err = m.podman.Run(host, containerConfig)
 	if err != nil {
@@ -557,7 +769,7 @@ func (m *Manager) applyConfigPreservingRoutes(host string, config *ProxyConfig) 
 func (m *Manager) buildBaseConfig() *CaddyConfig {
 	return &CaddyConfig{
 		Admin: &AdminConfig{
-			Listen: m.adminListen(),
+			Listen: CaddyAdminListen,
 		},
 		Apps: &AppsConfig{
 			HTTP: &HTTPApp{
@@ -722,8 +934,24 @@ func (m *Manager) Stop(host string) error {
 // after restart so that TLS/ACME changes take effect immediately.
 func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 	m.log.Host(host, "Rebooting proxy...")
+	m.SetProxyConfig(config)
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
+	}
+	drift, err := m.RuntimeDrift(host)
+	if err != nil {
+		return fmt.Errorf("failed to inspect proxy runtime before reboot: %w", err)
+	}
+	if len(drift) > 0 {
+		m.log.Host(host, "Recreating proxy during reboot to repair runtime security drift...")
+		return m.Boot(host, config)
+	}
+
+	// The protected host snapshot is the operator-approved rollback authority.
+	// Stage it before restart so the very first Caddy instruction after restart
+	// uses that snapshot, rather than an older in-volume autosave.
+	if err := m.StageRecovery(host); err != nil {
+		return fmt.Errorf("failed to stage protected config before restart: %w", err)
 	}
 
 	if err := m.podman.Restart(host, CaddyContainerName, 30); err != nil {
@@ -764,9 +992,10 @@ func (m *Manager) Remove(host string) error {
 		return fmt.Errorf("failed to remove proxy: %w", err)
 	}
 
-	// The persisted JSON may contain private key material. Treat failure to
-	// remove it as a command failure instead of claiming the proxy was fully
-	// removed while sensitive state remains behind.
+	// The protected host JSON may contain private key material, so remove it
+	// alongside the container. The named Caddy data/config volumes are
+	// intentionally retained for certificate reuse; this command is not a
+	// secure data purge.
 	rmCmd := fmt.Sprintf("rm -f %s", state.ConfigFileQuoted(m.user, CaddyConfigFileName))
 	result, err := m.sshClient.Execute(host, rmCmd)
 	if err != nil {
@@ -792,6 +1021,16 @@ func (m *Manager) Status(host string) (*ProxyStatus, error) {
 		return nil, err
 	}
 	status.Running = running
+	exists, err := m.podman.Exists(host, CaddyContainerName)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		status.SecurityDrift, err = m.RuntimeDrift(host)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	if running {
 		// Get container stats
@@ -802,21 +1041,30 @@ func (m *Manager) Status(host string) (*ProxyStatus, error) {
 
 		// Try to get config info
 		config, err := m.caddyClient.GetConfig(host)
+		if err != nil {
+			status.SecurityDrift = append(status.SecurityDrift, "container-local admin API is unavailable")
+		} else if config.Admin == nil || config.Admin.Listen != CaddyAdminListen {
+			status.SecurityDrift = append(status.SecurityDrift, "live admin listener is not container loopback")
+		}
 		if err == nil && config.Apps != nil && config.Apps.HTTP != nil {
 			for _, server := range config.Apps.HTTP.Servers {
 				status.RouteCount += len(server.Routes)
 			}
 		}
 	}
+	sort.Strings(status.SecurityDrift)
+	status.Secure = exists && len(status.SecurityDrift) == 0
 
 	return status, nil
 }
 
 type ProxyStatus struct {
-	Host       string
-	Running    bool
-	Stats      string
-	RouteCount int
+	Host          string
+	Running       bool
+	Stats         string
+	RouteCount    int
+	Secure        bool
+	SecurityDrift []string
 }
 
 // Logs retrieves proxy logs

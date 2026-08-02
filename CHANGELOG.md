@@ -6,6 +6,29 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Isolated Caddy's admin API inside `azud-proxy`: it now binds only container
+  loopback in bridge mode, port 2019 is never published, and every Azud admin
+  request runs a fixed, argument-safe `curl` through `podman exec` with request
+  bodies on stdin.
+- Hardened both imperative and Quadlet proxy runtimes with a non-root user,
+  read-only root filesystem, one required capability, no-new-privileges,
+  bounded tmpfs/shm, and CPU, memory, swap, file-descriptor, and PID limits.
+- Added proxy-runtime drift detection and fail-closed migration. Running legacy
+  proxies are secured and snapshotted before recreation; stopped or
+  unsnapshotable insecure proxies are rejected rather than replaced blindly.
+- Added an Azud-owned mode-0600 recovery config in Caddy's persistent config
+  volume, so API-managed routes survive process and host restarts without
+  exposing the host's protected state file to the non-root container.
+- Added `azud proxy stage-recovery`, a validation and atomic staging path from
+  an operator-restored host snapshot into the protected boot volume before a
+  proxy or Quadlet start.
+- Made cold-start execution independent of image command metadata with an
+  explicit shell entrypoint, so the hardened recovery selector is identical in
+  imperative Podman and generated Quadlet deployments.
+- Made `systemd enable --no-start` hand the live proxy's reboot authority to
+  the installed Quadlet without interrupting traffic, and verify Podman's
+  competing restart policy is disabled.
+
 ## 1.1.0 - 2026-07-25
 
 - Added typed per-role container hardening and a rollback-safe `stop_first`

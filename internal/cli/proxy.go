@@ -77,6 +77,20 @@ Example:
 	RunE: runProxyStatus,
 }
 
+var proxyStageRecoveryCmd = &cobra.Command{
+	Use:   "stage-recovery",
+	Short: "Stage the protected proxy snapshot for the next start",
+	Long: `Validate the protected host Caddy snapshot and atomically copy a
+loopback-admin version into the caddy_config volume used at proxy startup.
+
+This command does not start, stop, restart, or modify the live proxy. Run it
+after restoring an accepted host snapshot and before starting the proxy.
+
+Example:
+  azud proxy stage-recovery --host x.x.x.x`,
+	RunE: runProxyStageRecovery,
+}
+
 var proxyRemoveCmd = &cobra.Command{
 	Use:   "remove",
 	Short: "Remove the proxy container",
@@ -114,6 +128,9 @@ func init() {
 	// Status flags
 	proxyStatusCmd.Flags().StringVar(&proxyHost, "host", "", "Specific host to check")
 
+	// Recovery staging flags
+	proxyStageRecoveryCmd.Flags().StringVar(&proxyHost, "host", "", "Specific host to operate on")
+
 	// Remove flags
 	proxyRemoveCmd.Flags().StringVar(&proxyHost, "host", "", "Specific host to operate on")
 	proxyRemoveCmd.Flags().BoolVar(&proxyForceRemove, "force", false, "Force removal")
@@ -124,6 +141,7 @@ func init() {
 	proxyCmd.AddCommand(proxyRebootCmd)
 	proxyCmd.AddCommand(proxyLogsCmd)
 	proxyCmd.AddCommand(proxyStatusCmd)
+	proxyCmd.AddCommand(proxyStageRecoveryCmd)
 	proxyCmd.AddCommand(proxyRemoveCmd)
 
 	rootCmd.AddCommand(proxyCmd)
@@ -183,7 +201,7 @@ func runProxyBoot(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 	proxyConfig := buildProxyConfig(log)
 
 	var bootErrors []string
@@ -227,7 +245,7 @@ func runProxyStop(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 
 	for _, host := range hosts {
 		if err := manager.Stop(host); err != nil {
@@ -260,7 +278,7 @@ func runProxyReboot(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 	proxyConfig := buildProxyConfig(log)
 
 	var rebootErrors []string
@@ -312,7 +330,7 @@ func runProxyLogs(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 	if proxyFollow {
 		if err := manager.LogsStream(host, true, proxyTail, os.Stdout, os.Stderr); err != nil {
 			return fmt.Errorf("failed to follow logs: %w", err)
@@ -348,7 +366,7 @@ func runProxyStatus(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 
 	log.Header("Proxy Status")
 
@@ -357,7 +375,7 @@ func runProxyStatus(cmd *cobra.Command, args []string) error {
 	for _, host := range hosts {
 		status, err := manager.Status(host)
 		if err != nil {
-			rows = append(rows, []string{host, "error", err.Error()})
+			rows = append(rows, []string{host, "error", "unknown", err.Error()})
 			statusErrors = append(statusErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
@@ -368,13 +386,45 @@ func runProxyStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		routes := fmt.Sprintf("%d routes", status.RouteCount)
-		rows = append(rows, []string{host, state, routes})
+		security := "secure"
+		if !status.Secure {
+			security = "drift: " + strings.Join(status.SecurityDrift, "; ")
+		}
+		rows = append(rows, []string{host, state, security, routes})
 	}
 
-	log.Table([]string{"Host", "Status", "Routes"}, rows)
+	log.Table([]string{"Host", "Status", "Security", "Routes"}, rows)
 	if len(statusErrors) > 0 {
 		return fmt.Errorf("proxy status failed: %s", strings.Join(statusErrors, "; "))
 	}
+	return nil
+}
+
+func runProxyStageRecovery(cmd *cobra.Command, args []string) error {
+	output.SetVerbose(verbose)
+	log := output.DefaultLogger
+
+	hosts := getTargetHosts(proxyHost)
+	if len(hosts) == 0 {
+		return fmt.Errorf("no hosts configured")
+	}
+
+	sshClient := createSSHClient()
+	defer func() { _ = sshClient.Close() }()
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
+
+	var stageErrors []string
+	for _, host := range hosts {
+		if err := manager.StageRecovery(host); err != nil {
+			log.HostError(host, "failed to stage proxy recovery state: %v", err)
+			stageErrors = append(stageErrors, fmt.Sprintf("%s: %v", host, err))
+		}
+	}
+	if len(stageErrors) > 0 {
+		return fmt.Errorf("proxy recovery staging failed: %s", strings.Join(stageErrors, "; "))
+	}
+
+	log.Success("Protected proxy recovery state is ready for the next start")
 	return nil
 }
 
@@ -390,7 +440,7 @@ func runProxyRemove(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 
 	var removeErrors []string
 	for _, host := range hosts {

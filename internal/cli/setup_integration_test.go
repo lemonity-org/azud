@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/proxy"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
 
@@ -93,9 +94,29 @@ func TestSetupIntegration(t *testing.T) {
 	assertRemoteContains(t, client, host, "stat -c '%a' ~/.azud/secrets", "600")
 	assertRemoteSuccess(t, client, host, "podman exec azud-it sh -c 'test \"$AZUD_IT_TOKEN\" = integration-secret'")
 	assertHTTPAvailable(t, client, host, httpPort)
+	assertProxyRuntimeHardened(t, client, host, proxyPodmanCommand, !proxyRootful)
 
 	if os.Getenv("AZUD_INTEGRATION_FULL") == "" {
 		return
+	}
+
+	// Recreate the v1.1-era bridge shape: root user, writable rootfs, wildcard
+	// admin listener, and a published host admin port. proxy boot must first
+	// secure and persist the live config, then recreate the container without
+	// losing the application route.
+	if !proxyRootful {
+		assertRemoteSuccess(t, client, host,
+			`printf '%s' '"0.0.0.0:2019"' | podman exec -i azud-proxy curl --silent --show-error --fail-with-body --request PATCH --header 'Content-Type: application/json' --data-binary @- --url http://127.0.0.1:2019/config/admin/listen`)
+		assertRemoteSuccess(t, client, host, "podman rm -f azud-proxy")
+		insecureRun := fmt.Sprintf(
+			"podman run -d --name azud-proxy --restart unless-stopped --network azud -p %d:80 -p %d:443 -p 127.0.0.1:2019:2019 -v caddy_data:/data -v caddy_config:/config -e CADDY_ADMIN=0.0.0.0:2019 %s caddy run --resume",
+			httpPort, 8443, proxy.CaddyImage,
+		)
+		assertRemoteSuccess(t, client, host, insecureRun)
+		assertRemoteSuccess(t, client, host, "for i in $(seq 1 20); do curl -fsS http://127.0.0.1:2019/config/ >/dev/null && exit 0; sleep 1; done; exit 1")
+		runAzud(t, binaryPath, configPath, stateDir, tempDir, "proxy", "boot")
+		assertProxyRuntimeHardened(t, client, host, proxyPodmanCommand, true)
+		assertHTTPAvailable(t, client, host, httpPort)
 	}
 
 	// Exercise buffered, streaming, and PTY SSH paths against a real remote
@@ -170,7 +191,7 @@ func TestSetupIntegration(t *testing.T) {
 	// data-plane traffic. The next deploy must fail, remove its temporary
 	// container, and leave the prior application reachable.
 	assertRemoteSuccess(t, client, host,
-		`curl -fsS -X PATCH -H 'Content-Type: application/json' --data '"127.0.0.1:2020"' http://127.0.0.1:2019/config/admin/listen`)
+		fmt.Sprintf(`printf '%%s' '"127.0.0.1:2020"' | %s exec -i azud-proxy curl --silent --show-error --fail-with-body --request PATCH --header 'Content-Type: application/json' --data-binary @- --url http://127.0.0.1:2019/config/admin/listen`, proxyPodmanCommand))
 	runAzudExpectFailure(t, binaryPath, configPath, stateDir, tempDir, "deploy", "--version", "latest")
 	assertHTTPAvailable(t, client, host, httpPort)
 	assertRemoteContains(t, client, host,
@@ -197,6 +218,13 @@ func TestSetupIntegration(t *testing.T) {
 	// Install per-role Quadlets, remove the imperative containers, then start
 	// the generated units. This is the same cold-start path used after reboot.
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "systemd", "enable", "--no-start")
+	// The live proxy remains online during the shadow window, but Podman's
+	// reboot service must no longer race the newly installed Quadlet unit.
+	assertRemoteContains(t, client, host,
+		proxyPodmanCommand+" inspect --format '{{.HostConfig.RestartPolicy.Name}}' azud-proxy", "no")
+	// Exercise the explicit rollback handoff: host snapshot -> protected volume.
+	// It must not need the proxy admin API and does not mutate the running proxy.
+	runAzud(t, binaryPath, configPath, stateDir, tempDir, "proxy", "stage-recovery", "--host", host)
 	assertRemoteSuccess(t, client, host,
 		"podman rm -f azud-it azud-it-worker || { ! podman container exists azud-it && ! podman container exists azud-it-worker; }")
 	proxyPodman := "podman"
@@ -220,6 +248,7 @@ func TestSetupIntegration(t *testing.T) {
 	assertContainerRunning(t, client, host, "azud-it")
 	assertContainerRunning(t, client, host, "azud-it-worker")
 	assertHTTPAvailable(t, client, host, httpPort)
+	assertProxyRuntimeHardened(t, client, host, proxyPodman, !proxyRootful)
 
 	// A singleton deployment must refuse to run while the role's unit is
 	// active: Restart=always would recreate the previous container as soon as
@@ -389,6 +418,28 @@ func assertContainerRunningWithPodman(t *testing.T, client *ssh.Client, host, na
 	}
 	if !strings.Contains(result.Stdout, name) {
 		t.Fatalf("expected container %s to be running, got:\n%s", name, result.Stdout)
+	}
+}
+
+func assertProxyRuntimeHardened(t *testing.T, client *ssh.Client, host, podmanCommand string, bridgeMode bool) {
+	t.Helper()
+	assertRemoteContains(t, client, host,
+		podmanCommand+" inspect --format '{{.Config.User}}' azud-proxy", "1000:1000")
+	assertRemoteContains(t, client, host,
+		podmanCommand+" inspect --format '{{json .Config.Entrypoint}}' azud-proxy", proxy.CaddyRuntimeEntrypoint)
+	assertRemoteContains(t, client, host,
+		podmanCommand+" inspect --format '{{.HostConfig.ReadonlyRootfs}}' azud-proxy", "true")
+	assertRemoteContains(t, client, host,
+		podmanCommand+" inspect --format '{{ index .Config.Labels \"azud.proxy.runtime\" }}' azud-proxy", proxy.CaddyRuntimeRevision)
+	assertRemoteContains(t, client, host,
+		podmanCommand+" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' azud-proxy", "CADDY_ADMIN="+proxy.CaddyAdminListen)
+	assertRemoteSuccess(t, client, host,
+		podmanCommand+` exec azud-proxy /bin/sh -eu -c 'test "$(id -u)" = 1000; test "$(id -g)" = 1000; ! touch /usr/azud-write-test; test -s /config/caddy/azud.json; test "$(stat -c %a /config/caddy/azud.json)" = 600; grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/1/status; caps=$(awk "/^CapEff:/ {print \$2}" /proc/1/status); test $((0x$caps & 0x400)) -ne 0; test $((0x$caps & ~0x400)) -eq 0; awk "\$2 == \"/tmp\" && \$4 ~ /noexec/ && \$4 ~ /nosuid/ && \$4 ~ /nodev/ {ok=1} END {exit !ok}" /proc/mounts; awk "\$2 == \"/run\" && \$4 ~ /noexec/ && \$4 ~ /nosuid/ && \$4 ~ /nodev/ {ok=1} END {exit !ok}" /proc/mounts; test "$(cat /sys/fs/cgroup/memory.max)" = 536870912; test "$(cat /sys/fs/cgroup/pids.max)" = 256; test "$(cat /sys/fs/cgroup/cpu.max)" = "400000 100000"; test "$(curl --silent --show-error --fail-with-body --noproxy "*" --proto "=http" --url http://127.0.0.1:2019/config/admin/listen)" = "\"127.0.0.1:2019\""'`)
+	assertRemoteSuccess(t, client, host,
+		"test -z \"$("+podmanCommand+" port azud-proxy 2019/tcp 2>/dev/null || true)\"")
+	if bridgeMode {
+		assertRemoteSuccess(t, client, host,
+			"! curl --silent --show-error --fail --max-time 2 http://127.0.0.1:2019/config/ >/dev/null 2>&1")
 	}
 }
 

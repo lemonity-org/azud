@@ -88,7 +88,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 	imageManager := podman.NewImageManager(podmanClient)
-	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 
 	log.Header("Scaling Application")
 

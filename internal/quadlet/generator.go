@@ -21,8 +21,21 @@ type ContainerUnit struct {
 	Label           map[string]string
 	HealthCmd       string
 	HealthInterval  string
+	Entrypoint      string
 	Exec            string
 	PodmanArgs      []string
+	User            string
+	Group           string
+	ReadOnly        bool
+	ReadOnlyTmpfs   *bool
+	DropCapability  []string
+	AddCapability   []string
+	NoNewPrivileges bool
+	Tmpfs           []string
+	Memory          string
+	PidsLimit       int
+	ShmSize         string
+	Ulimit          []string
 	Restart         string // systemd restart policy: always, on-failure
 	TimeoutStopSec  int
 	WantedBy        string
@@ -113,8 +126,47 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	if unit.HealthInterval != "" {
 		_, _ = fmt.Fprintf(&sb, "HealthInterval=%s\n", sanitizeINIValue(unit.HealthInterval))
 	}
+	if unit.Entrypoint != "" {
+		_, _ = fmt.Fprintf(&sb, "Entrypoint=%s\n", sanitizeINIValue(unit.Entrypoint))
+	}
 	if unit.Exec != "" {
 		_, _ = fmt.Fprintf(&sb, "Exec=%s\n", sanitizeINIValue(unit.Exec))
+	}
+	if unit.User != "" {
+		_, _ = fmt.Fprintf(&sb, "User=%s\n", sanitizeINIValue(unit.User))
+	}
+	if unit.Group != "" {
+		_, _ = fmt.Fprintf(&sb, "Group=%s\n", sanitizeINIValue(unit.Group))
+	}
+	if unit.ReadOnly {
+		sb.WriteString("ReadOnly=true\n")
+	}
+	if unit.ReadOnlyTmpfs != nil {
+		_, _ = fmt.Fprintf(&sb, "ReadOnlyTmpfs=%t\n", *unit.ReadOnlyTmpfs)
+	}
+	for _, capability := range unit.DropCapability {
+		_, _ = fmt.Fprintf(&sb, "DropCapability=%s\n", sanitizeINIValue(capability))
+	}
+	for _, capability := range unit.AddCapability {
+		_, _ = fmt.Fprintf(&sb, "AddCapability=%s\n", sanitizeINIValue(capability))
+	}
+	if unit.NoNewPrivileges {
+		sb.WriteString("NoNewPrivileges=true\n")
+	}
+	for _, mount := range unit.Tmpfs {
+		_, _ = fmt.Fprintf(&sb, "Tmpfs=%s\n", sanitizeINIValue(mount))
+	}
+	if unit.Memory != "" {
+		_, _ = fmt.Fprintf(&sb, "Memory=%s\n", sanitizeINIValue(unit.Memory))
+	}
+	if unit.PidsLimit > 0 {
+		_, _ = fmt.Fprintf(&sb, "PidsLimit=%d\n", unit.PidsLimit)
+	}
+	if unit.ShmSize != "" {
+		_, _ = fmt.Fprintf(&sb, "ShmSize=%s\n", sanitizeINIValue(unit.ShmSize))
+	}
+	for _, limit := range unit.Ulimit {
+		_, _ = fmt.Fprintf(&sb, "Ulimit=%s\n", sanitizeINIValue(limit))
 	}
 	for _, arg := range unit.PodmanArgs {
 		_, _ = fmt.Fprintf(&sb, "PodmanArgs=%s\n", sanitizeINIValue(arg))

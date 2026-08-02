@@ -430,25 +430,45 @@ View proxy logs.
 **Flags:** `--host`, `-f/--follow`, `--tail`
 
 #### `azud proxy status`
-Show proxy status and route count.
+Show proxy status, runtime-security drift, and route count.
 **Flags:** `--host`
 
+#### `azud proxy stage-recovery`
+Validate the protected host snapshot, force its Caddy admin listener to
+`127.0.0.1:2019`, and atomically stream it into the `caddy_config` volume for
+the next proxy start. The helper uses the pinned Caddy image with no network,
+ports, or added capabilities. It does not start, stop, restart, or change the
+live proxy.
+
+```bash
+# The proxy or azud-proxy.service must already be stopped for a rollback.
+# Restore the accepted snapshot at ~/.local/share/azud/caddy-config.json
+# (/var/lib/azud/caddy-config.json for root), then:
+azud proxy stage-recovery --host 203.0.113.10
+systemctl --user start azud-proxy.service  # rootless proxy
+```
+
+Use system `systemctl` for a rootful proxy. Staging fails if the host snapshot
+is missing, unreadable, or invalid JSON. **Flags:** `--host`.
+
 #### `azud proxy reconcile`
-Compare the configured service, running Azud-managed web containers, persisted
-canary state, and the service's ID-owned Caddy route.
+Compare the configured service, hardened Caddy runtime, running Azud-managed
+web containers, persisted canary state, and the service's ID-owned Caddy route.
 
 ```bash
 azud proxy reconcile --check
 azud proxy reconcile --repair
 ```
 
-`--check` is read-only and exits nonzero when drift is present. `--repair`
+`--check` is read-only and exits nonzero when route or proxy-runtime drift is
+present. `--repair` securely recreates a legacy proxy when needed, then
 creates, updates, adopts a legacy ID-less route, or removes a stale ID-owned
 route. Routes owned by other IDs and manual routes are left untouched.
 **Flags:** exactly one of `--check` or `--repair`; optional `--host`.
 
 #### `azud proxy remove`
-Remove the proxy container.
+Remove the proxy container and protected host snapshot. Named Caddy volumes
+remain for certificate reuse; this is not a secure data-purge command.
 **Flags:** `--host`, `--force`
 
 ---
@@ -507,12 +527,14 @@ Generate and install systemd/quadlet units for the application and proxy. This i
 
 **Flags:**
 *   `--host`, `--role`
-*   `--no-start`: Only enable, do not start immediately.
+*   `--no-start`: Install without restarting now. A running proxy remains online while Azud disables its Podman restart policy, leaving the installed Quadlet as the sole next-boot supervisor.
 *   `--skip-app`, `--skip-proxy`
 
 Notes:
 *   With `podman.rootless: true` + `proxy.rootful: true`, app units stay rootless while the proxy unit is installed as a system unit.
 *   When `ssh.user` is non-root and a system unit is managed, passwordless `sudo` is required for `systemctl` and quadlet file writes.
+*   Proxy unit generation requires the imperative proxy to exist and be running so Azud can snapshot it without guessing. For a later rollback, use `azud proxy stage-recovery` after restoring the accepted host snapshot and before starting the already-installed unit.
+*   The `--no-start` proxy handoff occurs only after the Quadlet file is deployed and systemd has reloaded. Azud verifies both a drift-free live proxy and the resulting Podman restart policy; an incomplete handoff makes the command fail.
 
 ---
 

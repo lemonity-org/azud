@@ -50,6 +50,26 @@ func (m *ContainerManager) Run(host string, config *ContainerConfig) (string, er
 	return strings.TrimSpace(result.Stdout), nil
 }
 
+// RunWithStdin runs a foreground container with an ordinary stdin pipe.
+// Podman requires -i to keep stdin open, so it is forced on a copy without
+// mutating the caller's reusable configuration.
+func (m *ContainerManager) RunWithStdin(host string, config *ContainerConfig, stdin io.Reader) (string, error) {
+	if err := ValidateOptions(config.Options); err != nil {
+		return "", err
+	}
+	copy := *config
+	copy.Interactive = true
+	cmd := m.client.RewriteCommand(copy.BuildRunCommand())
+	result, err := m.client.ssh.ExecuteWithStdin(host, cmd, stdin)
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("failed to run container: %s", result.Stderr)
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}
+
 // Create validates and creates a container without starting it.
 func (m *ContainerManager) Create(host string, config *ContainerConfig) (string, error) {
 	if err := ValidateOptions(config.Options); err != nil {
@@ -137,6 +157,69 @@ func (m *ContainerManager) Restart(host, container string, timeout int) error {
 	return nil
 }
 
+// UpdateRestartPolicy changes only Podman's host-reboot policy for an
+// existing container. This is used when a generated systemd/Quadlet unit takes
+// over supervision from podman-restart.service without interrupting the live
+// process.
+func (m *ContainerManager) UpdateRestartPolicy(host, container, policy string) error {
+	if err := validateRestartPolicy(policy); err != nil {
+		return err
+	}
+
+	result, err := m.client.Execute(host, "update", "--restart", policy, container)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to update restart policy: %s", result.Stderr)
+	}
+
+	return nil
+}
+
+// RestartPolicy returns Podman's current host-reboot policy for a container.
+func (m *ContainerManager) RestartPolicy(host, container string) (string, error) {
+	raw, err := m.Inspect(host, container)
+	if err != nil {
+		return "", err
+	}
+	return parseRestartPolicy(raw)
+}
+
+func validateRestartPolicy(policy string) error {
+	switch policy {
+	case "no", "never", "always", "unless-stopped", "on-failure":
+		return nil
+	}
+
+	prefix, retries, found := strings.Cut(policy, ":")
+	if !found || prefix != "on-failure" {
+		return fmt.Errorf("unsupported container restart policy %q", policy)
+	}
+	count, err := strconv.Atoi(retries)
+	if err != nil || count < 0 {
+		return fmt.Errorf("invalid on-failure retry count in restart policy %q", policy)
+	}
+	return nil
+}
+
+func parseRestartPolicy(raw string) (string, error) {
+	var payload []struct {
+		HostConfig struct {
+			RestartPolicy struct {
+				Name string `json:"Name"`
+			} `json:"RestartPolicy"`
+		} `json:"HostConfig"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", fmt.Errorf("invalid Podman inspect JSON: %w", err)
+	}
+	if len(payload) != 1 {
+		return "", fmt.Errorf("expected one Podman inspect object, got %d", len(payload))
+	}
+	return payload[0].HostConfig.RestartPolicy.Name, nil
+}
+
 func (m *ContainerManager) Kill(host, container, signal string) error {
 	args := []string{"kill"}
 	if signal != "" {
@@ -160,6 +243,16 @@ func (m *ContainerManager) Exec(host string, config *ExecConfig) (*ssh.Result, e
 	cmd := config.BuildExecCommand()
 	cmd = m.client.RewriteCommand(cmd)
 	return m.client.ssh.Execute(host, cmd)
+}
+
+// ExecWithStdin executes a command in a container with an ordinary stdin
+// pipe. Podman requires -i to keep the container's stdin open, so it is forced
+// here even when the caller did not set Interactive explicitly.
+func (m *ContainerManager) ExecWithStdin(host string, config *ExecConfig, stdin io.Reader) (*ssh.Result, error) {
+	copy := *config
+	copy.Interactive = true
+	cmd := m.client.RewriteCommand(copy.BuildExecCommand())
+	return m.client.ssh.ExecuteWithStdin(host, cmd, stdin)
 }
 
 func (m *ContainerManager) Logs(host string, config *LogsConfig) (*ssh.Result, error) {

@@ -27,7 +27,9 @@ var systemdEnableCmd = &cobra.Command{
 	Long: `Generate quadlet unit files for the app and proxy.
 
 This improves reboot reliability, especially for rootless Podman.
-Units are installed into quadlet paths and can be started immediately.`,
+Units are installed into quadlet paths and can be started immediately.
+With --no-start, a running proxy stays online while its reboot supervision is
+handed from Podman's restart service to the installed Quadlet.`,
 	RunE: runSystemdEnable,
 }
 
@@ -158,8 +160,14 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 	if !systemdSkipProxy && (systemdRole == "" || systemdRole == "web") && len(cfg.Proxy.AllHosts()) > 0 {
 		proxyUnit := buildProxyQuadletUnit()
 		unitName := fmt.Sprintf("%s.container", proxy.CaddyContainerName)
+		proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 		for _, host := range cfg.GetRoleHosts("web") {
 			if systemdHost != "" && host != systemdHost {
+				continue
+			}
+			if err := proxyManager.PrepareQuadletState(host); err != nil {
+				log.HostError(host, "Failed to prepare secure proxy recovery state: %v", err)
+				hasErrors = true
 				continue
 			}
 			if err := proxyDeployer.Deploy(host, unitName, quadlet.GenerateContainerFile(proxyUnit)); err != nil {
@@ -167,7 +175,15 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 				hasErrors = true
 				continue
 			}
-			if !systemdNoStart {
+			if systemdNoStart {
+				// The current process stays online, but the installed Quadlet must
+				// be the only authority that can recreate it after a host reboot.
+				if err := proxyManager.CompleteQuadletHandoff(host); err != nil {
+					log.HostError(host, "Failed to hand proxy reboot supervision to Quadlet: %v", err)
+					hasErrors = true
+					continue
+				}
+			} else {
 				if err := proxyDeployer.Start(host, proxy.CaddyContainerName); err != nil {
 					log.HostError(host, "Failed to start proxy unit: %v", err)
 					hasErrors = true
@@ -325,41 +341,48 @@ func buildAppQuadletUnit(image, role string) *quadlet.ContainerUnit {
 func buildProxyQuadletUnit() *quadlet.ContainerUnit {
 	proxyRootless := cfg.Podman.Rootless && !cfg.Proxy.Rootful
 	after, requires := quadletNetworkOnlineDependencies(proxyRootless)
+	runtime := proxy.NewCaddyContainerConfig(cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort(), cfg.UseHostPortUpstreams())
 	network := []string{"azud.network"}
-	publishPorts := []string{
-		fmt.Sprintf("%d:80", cfg.Proxy.EffectiveHTTPPort()),
-		fmt.Sprintf("%d:443", cfg.Proxy.EffectiveHTTPSPort()),
-		fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort),
-	}
+	publishPorts := runtime.Ports
 	if cfg.UseHostPortUpstreams() {
 		network = []string{"host"}
-		publishPorts = []string{}
 	}
-	adminListen := "0.0.0.0:2019" // safe: container-only; Quadlet publishes the admin port to host loopback
-	if cfg.UseHostPortUpstreams() {
-		adminListen = "127.0.0.1:2019"
-	}
-	stateDir := "%h/.local/share/azud"
-	if cfg.SSH.User == "" || cfg.SSH.User == "root" {
-		stateDir = "/var/lib/azud"
-	} else if !proxyRootless {
-		stateDir = "/home/" + cfg.SSH.User + "/.local/share/azud"
-	}
+	user, group, _ := strings.Cut(runtime.User, ":")
+	readOnlyTmpfs := !runtime.DisableReadOnlyTmpfs
+	exec := fmt.Sprintf("-eu -c '%s'", runtime.Command[2])
 
 	unit := &quadlet.ContainerUnit{
-		Description:    "Azud Caddy proxy",
-		After:          after,
-		Requires:       requires,
-		Image:          proxy.CaddyImage,
-		ContainerName:  proxy.CaddyContainerName,
-		Environment:    map[string]string{"CADDY_ADMIN": adminListen},
-		PublishPort:    publishPorts,
-		Volume:         []string{"caddy_data:/data", "caddy_config:/config", stateDir + ":/azud-state:ro,Z"},
-		Network:        network,
-		Label:          map[string]string{"azud.managed": "true", "azud.type": "proxy"},
-		Exec:           fmt.Sprintf("/bin/sh -c 'if [ -s /azud-state/%s ]; then exec caddy run --config /azud-state/%s --watch; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --watch; fi'", proxy.CaddyConfigFileName, proxy.CaddyConfigFileName),
+		Description:     "Azud Caddy proxy",
+		After:           after,
+		Requires:        requires,
+		Image:           runtime.Image,
+		ContainerName:   runtime.Name,
+		Environment:     runtime.Env,
+		PublishPort:     publishPorts,
+		Volume:          runtime.Volumes,
+		Network:         network,
+		Label:           runtime.Labels,
+		Entrypoint:      runtime.Entrypoint,
+		Exec:            exec,
+		User:            user,
+		Group:           group,
+		ReadOnly:        runtime.ReadOnly,
+		ReadOnlyTmpfs:   &readOnlyTmpfs,
+		DropCapability:  runtime.CapDrop,
+		AddCapability:   runtime.CapAdd,
+		NoNewPrivileges: runtime.NoNewPrivileges,
+		Tmpfs:           runtime.Tmpfs,
+		Memory:          runtime.Memory,
+		PidsLimit:       runtime.PidsLimit,
+		ShmSize:         runtime.ShmSize,
+		Ulimit:          runtime.Ulimits,
+		PodmanArgs: []string{
+			"--cpus=" + runtime.CPUs,
+			"--memory-swap=" + runtime.MemorySwap,
+			"--stop-timeout=30",
+		},
 		Restart:        "always",
-		TimeoutStopSec: 30,
+		TimeoutStopSec: 35,
 		WantedBy:       "default.target",
 	}
 

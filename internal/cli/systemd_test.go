@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -153,13 +152,37 @@ func TestBuildProxyQuadletUnit_DefaultNetworkPublishesConfiguredPorts(t *testing
 	want := []string{
 		"8080:80",
 		"8443:443",
-		fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort),
 	}
 	if !reflect.DeepEqual(unit.PublishPort, want) {
 		t.Fatalf("unexpected published ports: want %v got %v", want, unit.PublishPort)
 	}
-	if !strings.Contains(unit.Exec, "/azud-state/"+proxy.CaddyConfigFileName) {
-		t.Fatalf("proxy unit does not restore persisted Caddy file: %q", unit.Exec)
+	for _, port := range unit.PublishPort {
+		if strings.Contains(port, "2019") {
+			t.Fatalf("proxy unit publishes the Caddy admin port: %v", unit.PublishPort)
+		}
+	}
+	if !strings.Contains(unit.Exec, proxy.CaddyRecoveryConfigFile) || strings.Contains(unit.Exec, "--watch") {
+		t.Fatalf("proxy unit does not use the protected recovery config: %q", unit.Exec)
+	}
+	if unit.Entrypoint != proxy.CaddyRuntimeEntrypoint {
+		t.Fatalf("proxy unit entrypoint = %q, want %q", unit.Entrypoint, proxy.CaddyRuntimeEntrypoint)
+	}
+	if unit.Environment["CADDY_ADMIN"] != proxy.CaddyAdminListen {
+		t.Fatalf("proxy admin listener = %q", unit.Environment["CADDY_ADMIN"])
+	}
+	if unit.User != proxy.CaddyRuntimeUser || unit.Group != proxy.CaddyRuntimeGroup || !unit.ReadOnly || unit.ReadOnlyTmpfs == nil || *unit.ReadOnlyTmpfs {
+		t.Fatalf("proxy user/read-only hardening is incomplete: %#v", unit)
+	}
+	if !reflect.DeepEqual(unit.DropCapability, []string{"ALL"}) || !reflect.DeepEqual(unit.AddCapability, []string{"NET_BIND_SERVICE"}) || !unit.NoNewPrivileges {
+		t.Fatalf("proxy capability hardening is incomplete: drop=%v add=%v nnp=%t", unit.DropCapability, unit.AddCapability, unit.NoNewPrivileges)
+	}
+	if unit.Memory != proxy.CaddyMemoryLimit || unit.PidsLimit != proxy.CaddyPidsLimit || unit.ShmSize != proxy.CaddyShmSize {
+		t.Fatalf("proxy resource limits are incomplete: memory=%s pids=%d shm=%s", unit.Memory, unit.PidsLimit, unit.ShmSize)
+	}
+	for _, volume := range unit.Volume {
+		if strings.Contains(volume, "azud-state") {
+			t.Fatalf("non-root proxy still mounts host state: %v", unit.Volume)
+		}
 	}
 	if len(unit.After) != 0 || len(unit.Requires) != 0 {
 		t.Fatalf("rootless proxy references system-manager targets: after=%v requires=%v", unit.After, unit.Requires)

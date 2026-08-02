@@ -111,14 +111,27 @@ type ContainerConfig struct {
 	Restart         string // no, always, unless-stopped, on-failure[:max-retries]
 	User            string
 	ReadOnly        bool
-	CapDrop         []string
-	NoNewPrivileges bool
-	Tmpfs           []string
-	NoHealthcheck   bool
-	StopTimeout     int
-	Detach          bool
-	Remove          bool
-	Pull            bool
+	// DisableReadOnlyTmpfs prevents Podman from adding its default unbounded
+	// writable tmpfs mounts when ReadOnly is enabled. Callers that set this
+	// should add only the bounded Tmpfs mounts the workload actually needs.
+	DisableReadOnlyTmpfs bool
+	CapDrop              []string
+	CapAdd               []string
+	NoNewPrivileges      bool
+	Tmpfs                []string
+	PidsLimit            int
+	ShmSize              string
+	MemorySwap           string
+	Ulimits              []string
+	NoHealthcheck        bool
+	StopTimeout          int
+	Detach               bool
+	// Interactive keeps stdin open for foreground one-shot containers. It is
+	// intentionally typed instead of being accepted through Options so callers
+	// can stream sensitive payloads without placing them in argv.
+	Interactive bool
+	Remove      bool
+	Pull        bool
 
 	// Healthcheck
 	HealthCmd         string
@@ -145,6 +158,10 @@ func (c *ContainerConfig) buildContainerCommand(subcommand string) string {
 
 	if subcommand == "run" && c.Detach {
 		args = append(args, "-d")
+	}
+
+	if subcommand == "run" && c.Interactive {
+		args = append(args, "-i")
 	}
 
 	if subcommand == "run" && c.Remove {
@@ -207,8 +224,14 @@ func (c *ContainerConfig) buildContainerCommand(subcommand string) string {
 	if c.ReadOnly {
 		args = append(args, "--read-only")
 	}
+	if c.DisableReadOnlyTmpfs {
+		args = append(args, "--read-only-tmpfs=false")
+	}
 	for _, capability := range c.CapDrop {
 		args = append(args, "--cap-drop", shell.Quote(capability))
+	}
+	for _, capability := range c.CapAdd {
+		args = append(args, "--cap-add", shell.Quote(capability))
 	}
 	if c.NoNewPrivileges {
 		args = append(args, "--security-opt", "no-new-privileges")
@@ -222,9 +245,21 @@ func (c *ContainerConfig) buildContainerCommand(subcommand string) string {
 	if c.StopTimeout > 0 {
 		args = append(args, "--stop-timeout", fmt.Sprintf("%d", c.StopTimeout))
 	}
+	if c.PidsLimit > 0 {
+		args = append(args, "--pids-limit", fmt.Sprintf("%d", c.PidsLimit))
+	}
+	if c.ShmSize != "" {
+		args = append(args, "--shm-size", shell.Quote(c.ShmSize))
+	}
+	for _, limit := range c.Ulimits {
+		args = append(args, "--ulimit", shell.Quote(limit))
+	}
 
 	if c.Memory != "" {
 		args = append(args, "--memory", shell.Quote(c.Memory))
+	}
+	if c.MemorySwap != "" {
+		args = append(args, "--memory-swap", shell.Quote(c.MemorySwap))
 	}
 	if c.CPUs != "" {
 		args = append(args, "--cpus", shell.Quote(c.CPUs))

@@ -10,26 +10,27 @@ import (
 	"time"
 )
 
-func TestAdminListenMatchesNetworkMode(t *testing.T) {
-	tests := []struct {
-		name      string
-		hostPorts bool
-		want      string
-	}{
-		{name: "bridge", hostPorts: false, want: caddyAdminBridgeListen},
-		{name: "host network", hostPorts: true, want: caddyAdminHostListen},
+func TestAdminListenIsContainerLoopbackInEveryNetworkMode(t *testing.T) {
+	for _, hostPorts := range []bool{false, true} {
+		manager := &Manager{hostPorts: hostPorts}
+		if got := manager.buildBaseConfig().Admin.Listen; got != CaddyAdminListen {
+			t.Fatalf("base config admin listen = %q, want %q", got, CaddyAdminListen)
+		}
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := &Manager{hostPorts: tt.hostPorts}
-			if got := manager.adminListen(); got != tt.want {
-				t.Fatalf("admin listen = %q, want %q", got, tt.want)
-			}
-			if got := manager.buildBaseConfig().Admin.Listen; got != tt.want {
-				t.Fatalf("base config admin listen = %q, want %q", got, tt.want)
-			}
-		})
+func TestManagerTracksExpectedProxyHostPorts(t *testing.T) {
+	manager := NewManagerWithOptions(nil, nil, "deploy", false, false, 8080, 8443)
+	if manager.httpPort != 8080 || manager.httpsPort != 8443 {
+		t.Fatalf("constructor ports = %d/%d", manager.httpPort, manager.httpsPort)
+	}
+	manager.SetProxyConfig(&ProxyConfig{HTTPPort: 9080, HTTPSPort: 9443})
+	if manager.httpPort != 9080 || manager.httpsPort != 9443 {
+		t.Fatalf("configured ports = %d/%d", manager.httpPort, manager.httpsPort)
+	}
+	manager.SetProxyConfig(&ProxyConfig{})
+	if manager.httpPort != CaddyHTTPPort || manager.httpsPort != CaddyHTTPSPort {
+		t.Fatalf("defaulted ports = %d/%d", manager.httpPort, manager.httpsPort)
 	}
 }
 
@@ -407,8 +408,63 @@ func TestPersistConfigCommandsProtectPrivateCaddyState(t *testing.T) {
 
 			restore := restoreConfigCommand(tt.user)
 			if !strings.Contains(restore, "chmod 700 "+tt.dir) ||
-				!strings.Contains(restore, "chmod 600 "+tt.file) {
+				!strings.Contains(restore, "chmod 600 "+tt.file) ||
+				!strings.Contains(restore, "exit 44") {
 				t.Fatalf("restore command does not repair modes: %q", restore)
+			}
+		})
+	}
+}
+
+func TestValidateQuadletStateRejectsMissingOrStoppedProxy(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		exists  bool
+		running bool
+		want    string
+	}{
+		{name: "missing", want: "does not exist"},
+		{name: "stopped", exists: true, want: "stopped container"},
+		{name: "running", exists: true, running: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateQuadletState(tt.exists, tt.running)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("running proxy was rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateQuadletHandoffStateRequiresSecureRunningProxy(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		exists  bool
+		running bool
+		drift   []string
+		want    string
+	}{
+		{name: "missing", want: "does not exist"},
+		{name: "stopped", exists: true, want: "stopped container"},
+		{name: "drifted", exists: true, running: true, drift: []string{"admin port is published"}, want: "drifted proxy runtime"},
+		{name: "secure and running", exists: true, running: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateQuadletHandoffState(tt.exists, tt.running, tt.drift)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("secure running proxy was rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
 			}
 		})
 	}

@@ -65,7 +65,7 @@ func NewCanaryDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Lo
 	}
 
 	podmanClient := podman.NewClient(sshClient)
-	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
+	proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams(), cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort())
 	proxyManager.SetProxyConfig(newProxyConfigFromCfg(cfg))
 
 	deployer := &CanaryDeployer{
