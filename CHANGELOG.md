@@ -28,6 +28,9 @@ release notes for the corresponding signed tag.
 - Made `systemd enable --no-start` hand the live proxy's reboot authority to
   the installed Quadlet without interrupting traffic, and verify Podman's
   competing restart policy is disabled.
+- Refused starts and no-downtime supervisor handoffs unless systemd reports the
+  daemon-reloaded Quadlet service as loaded from generator output and connected
+  to its requested boot target.
 - Fixed manual rollback, automatic fleet rollback, canary deployment, and
   systemd unit reconstruction of digest-pinned deployments so history versions
   such as `sha256:...` use `repository@sha256:...` instead of the invalid

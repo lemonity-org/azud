@@ -107,6 +107,63 @@ func (q *QuadletDeployer) Reload(host string) error {
 	return nil
 }
 
+// VerifyGenerated proves that systemd loaded the service from its Quadlet
+// generator output. daemon-reload can itself succeed while a generator rejects
+// a malformed or unsupported Quadlet directive, so callers must perform this
+// check before starting the unit or handing it reboot authority.
+func (q *QuadletDeployer) VerifyGenerated(host, service, wantedBy string) error {
+	action := fmt.Sprintf("show %s --property=LoadState --property=FragmentPath --property=WantedBy", shell.Quote(service))
+	result, err := q.ssh.Execute(host, q.systemctlCmd(action))
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to inspect generated unit %s: %s", service, result.Stderr)
+	}
+	if err := validateGeneratedUnitState(service, wantedBy, result.Stdout); err != nil {
+		return fmt.Errorf("quadlet unit %s is unavailable after daemon-reload: %w", service, err)
+	}
+	return nil
+}
+
+func validateGeneratedUnitState(service, wantedBy, raw string) error {
+	properties := make(map[string]string)
+	for _, line := range strings.Split(raw, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if found {
+			properties[key] = value
+		}
+	}
+
+	if state := properties["LoadState"]; state != "loaded" {
+		return fmt.Errorf("LoadState is %q, expected %q", state, "loaded")
+	}
+	fragment := properties["FragmentPath"]
+	if fragment == "" {
+		return fmt.Errorf("FragmentPath is empty")
+	}
+	expectedUnit := strings.TrimSuffix(service, ".service") + ".service"
+	if !strings.HasSuffix(fragment, "/"+expectedUnit) {
+		return fmt.Errorf("FragmentPath %q does not identify %s", fragment, expectedUnit)
+	}
+	if !strings.Contains(fragment, "/systemd/generator") {
+		return fmt.Errorf("FragmentPath %q is not Quadlet generator output", fragment)
+	}
+	if wantedBy != "" {
+		found := false
+		for _, target := range strings.Fields(properties["WantedBy"]) {
+			if target == wantedBy {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("WantedBy does not include %s", wantedBy)
+		}
+	}
+	return nil
+}
+
 func (q *QuadletDeployer) Start(host, service string) error {
 	result, err := q.ssh.Execute(host, q.systemctlCmd("start "+shell.Quote(service)))
 	if err != nil {

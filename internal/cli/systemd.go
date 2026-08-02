@@ -114,6 +114,11 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 				hasErrors = true
 				continue
 			}
+			if err := appDeployer.VerifyGenerated(host, networkServiceName, ""); err != nil {
+				log.HostError(host, "Failed to verify network unit: %v", err)
+				hasErrors = true
+				continue
+			}
 			if !systemdNoStart {
 				if err := appDeployer.Start(host, networkServiceName); err != nil {
 					log.HostError(host, "Failed to start network unit: %v", err)
@@ -148,6 +153,11 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 				hasErrors = true
 				continue
 			}
+			if err := appDeployer.VerifyGenerated(target.Host, serviceName, "default.target"); err != nil {
+				log.HostError(target.Host, "Failed to verify %s app unit: %v", target.Role, err)
+				hasErrors = true
+				continue
+			}
 			if !systemdNoStart {
 				if err := appDeployer.Start(target.Host, serviceName); err != nil {
 					log.HostError(target.Host, "Failed to start %s app unit: %v", target.Role, err)
@@ -172,6 +182,11 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 			}
 			if err := proxyDeployer.Deploy(host, unitName, quadlet.GenerateContainerFile(proxyUnit)); err != nil {
 				log.HostError(host, "Failed to deploy proxy unit: %v", err)
+				hasErrors = true
+				continue
+			}
+			if err := proxyDeployer.VerifyGenerated(host, proxy.CaddyContainerName, "default.target"); err != nil {
+				log.HostError(host, "Failed to verify proxy unit: %v", err)
 				hasErrors = true
 				continue
 			}
