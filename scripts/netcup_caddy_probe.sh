@@ -7,18 +7,28 @@
 #
 # Usage:
 #   scripts/netcup_caddy_probe.sh deploy@<host-or-ssh-alias>
+#   scripts/netcup_caddy_probe.sh --via-operator <operator-ssh-alias>
 #
 # The immutable Caddy image may remain in Podman's cache. Keeping a shared image
 # is safer than deleting one that an existing or concurrently created proxy may
 # use. This script is intentionally separate from the live systemd handoff probe.
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-	echo "usage: $0 <ssh-config-host-or-user@host>" >&2
-	exit 2
-fi
+remote_command='bash -s'
+case "$#:${1-}" in
+	1:*) ssh_target="$1" ;;
+	2:--via-operator)
+		ssh_target="$2"
+		# The operator is only a transport. The complete probe runs in deploy's
+		# login environment and independently rejects any non-deploy identity.
+		remote_command='sudo -n -iu deploy env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -s'
+		;;
+	*)
+		echo "usage: $0 [--via-operator] <ssh-config-host-or-user@host>" >&2
+		exit 2
+		;;
+esac
 
-ssh_target="$1"
 case "$ssh_target" in
 	-* | *$'\n'* | *$'\r'*)
 		echo "invalid SSH target" >&2
@@ -27,7 +37,7 @@ case "$ssh_target" in
 esac
 
 # One SSH process means one 1Password SSH-agent authorization window.
-ssh -T "$ssh_target" 'bash -s' <<'AZUD_NETCUP_PROBE'
+ssh -T "$ssh_target" "$remote_command" <<'AZUD_NETCUP_PROBE'
 set -euo pipefail
 export LC_ALL=C
 umask 077
