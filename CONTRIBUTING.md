@@ -24,7 +24,7 @@ go test -race ./...
 Install the tools used by CI:
 
 ```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 ```
 
