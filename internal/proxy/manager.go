@@ -879,6 +879,55 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	return nil
 }
 
+// EnsureServiceHosts synchronizes an existing Azud route's host matchers
+// without changing its handlers or upstreams.
+func (m *Manager) EnsureServiceHosts(host string, service *ServiceConfig) error {
+	if service.Host == "" && len(service.Hosts) > 0 {
+		service.Host = service.Hosts[0]
+	}
+	desired := m.buildServiceRoute(service)
+
+	return m.withPersistedMutation(host, func() error {
+		config, err := m.caddyClient.GetConfig(host)
+		if err != nil {
+			return fmt.Errorf("failed to get Caddy config: %w", err)
+		}
+
+		path, matches, err := planServiceHostPatch(serviceRoutes(config), desired, service.Host)
+		if err != nil {
+			return err
+		}
+		if path == "" {
+			return nil
+		}
+
+		if _, err := m.caddyClient.apiRequest(host, "PATCH", path, matches); err != nil {
+			return fmt.Errorf("failed to patch service hosts: %w", err)
+		}
+		return nil
+	})
+}
+
+// planServiceHostPatch returns a targeted matcher patch for an owned route.
+// An empty path means the route is missing or already current.
+func planServiceHostPatch(routes []*Route, desired *Route, fallbackHost string) (string, []*Match, error) {
+	if err := ensureNoForeignHostOwner(routes, desired); err != nil {
+		return "", nil, err
+	}
+
+	for i, route := range routes {
+		if !routesHaveSameOwner(route, desired, fallbackHost) {
+			continue
+		}
+		if reflect.DeepEqual(route.Match, desired.Match) {
+			return "", nil, nil
+		}
+		return routeAPIPath("/config/apps/http/servers/srv0/routes", i, route) + "/match", desired.Match, nil
+	}
+
+	return "", nil, nil
+}
+
 // upsertRoute updates an existing route for serviceHost or appends a new one
 // using Caddy's path-specific admin API.
 func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {

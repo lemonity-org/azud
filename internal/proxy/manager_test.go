@@ -199,6 +199,32 @@ func TestEnsureNoForeignHostOwnerChecksAllAliases(t *testing.T) {
 	}
 }
 
+func TestPlanServiceHostPatchRefreshesAliasesWithoutReplacingRoute(t *testing.T) {
+	manager := &Manager{}
+	existing := manager.buildServiceRoute(&ServiceConfig{
+		Name: "shop", Host: "pacebeats.com", Upstreams: []string{"shop:3000"},
+	})
+	desired := manager.buildServiceRoute(&ServiceConfig{
+		Name: "shop", Host: "pacebeats.com", Hosts: []string{"mcp.pacebeats.com"},
+	})
+
+	path, matches, err := planServiceHostPatch([]*Route{existing}, desired, "pacebeats.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/id/azud-route-shop/match" {
+		t.Fatalf("patch path = %q, want /id/azud-route-shop/match", path)
+	}
+	want := []*Match{{Host: []string{"pacebeats.com", "mcp.pacebeats.com"}}}
+	if !reflect.DeepEqual(matches, want) {
+		t.Fatalf("patched matchers = %#v, want %#v", matches, want)
+	}
+	handler, _, ok := reverseProxyHandler(existing)
+	if !ok || len(handler.Upstreams) != 1 || handler.Upstreams[0].Dial != "shop:3000" {
+		t.Fatalf("existing upstreams changed while planning host patch: %#v", handler)
+	}
+}
+
 func TestBuildServiceRouteConfiguresUpstreamProtocol(t *testing.T) {
 	tests := []struct {
 		protocol string
