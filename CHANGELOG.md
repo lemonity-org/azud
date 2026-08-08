@@ -6,6 +6,15 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.1.1 - 2026-08-08
+
+- Fixed rolling deployments to reconcile Caddy host aliases added after the
+  initial deployment without replacing existing upstreams, allowing Automatic
+  HTTPS to provision certificates for new domains while preserving scaled and
+  canary routes.
+- Updated the Go build, test, release, and container toolchain to Go 1.26.5 and
+  the CI and contributor lint tooling to `golangci-lint` v2.12.2.
+
 ## 1.1.0 - 2026-07-25
 
 - Added typed per-role container hardening and a rollback-safe `stop_first`
