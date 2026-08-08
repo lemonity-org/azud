@@ -37,6 +37,19 @@ type containerLifecycle interface {
 	HostPort(host, container string, containerPort int) (int, error)
 }
 
+// deploymentProxy is the subset of proxy.Manager used by rolling deployments.
+// Keeping this boundary explicit lets deployment sequencing be tested without
+// requiring a live Caddy admin API.
+type deploymentProxy interface {
+	Boot(host string, config *proxy.ProxyConfig) error
+	EnsureConfig(host string) error
+	EnsureServiceHosts(host string, service *proxy.ServiceConfig) error
+	RegisterService(host string, service *proxy.ServiceConfig) error
+	AddUpstream(host, serviceHost, upstream string) error
+	RemoveUpstream(host, serviceHost, upstream string) error
+	DrainUpstream(host, upstream string, timeout time.Duration) error
+}
+
 // Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
 	cfg         *config.Config
@@ -47,7 +60,7 @@ type Deployer struct {
 	imageDigest func(host, image string) (string, error)
 	unitActive  func(host, unit string) (bool, error)
 	registry    *podman.RegistryManager
-	proxy       *proxy.Manager
+	proxy       deploymentProxy
 	hooks       *HookRunner
 	history     *HistoryStore
 	log         *output.Logger
@@ -503,6 +516,12 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	// between deploys and lost its config.
 	if err := d.proxy.EnsureConfig(host); err != nil {
 		return removeNewContainer(fmt.Errorf("failed to ensure proxy config: %w", err))
+	}
+	// Caddy discovers automatic HTTPS names from route host matchers, while
+	// rolling deployments otherwise update only upstreams.
+	desiredService := BuildProxyServiceConfig(d.cfg, nil, nil)
+	if err := d.proxy.EnsureServiceHosts(host, desiredService); err != nil {
+		return removeNewContainer(fmt.Errorf("failed to ensure proxy hosts: %w", err))
 	}
 
 	// Register new container with proxy
