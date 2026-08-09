@@ -300,6 +300,28 @@ func Validate(cfg *Config) error {
 			})
 		}
 	}
+	if cfg.Proxy.MaxHeaderBytes < 0 {
+		errs = append(errs, ValidationError{
+			Field:   "proxy.max_header_bytes",
+			Message: "max_header_bytes must be non-negative",
+		})
+	}
+	if cfg.Proxy.FlushInterval != "" {
+		if _, err := time.ParseDuration(cfg.Proxy.FlushInterval); err != nil {
+			errs = append(errs, ValidationError{
+				Field:   "proxy.flush_interval",
+				Message: "flush_interval must be a valid duration (e.g., -1s, 100ms)",
+			})
+		}
+	}
+	if cfg.Proxy.StreamCloseDelay != "" {
+		if duration, err := time.ParseDuration(cfg.Proxy.StreamCloseDelay); err != nil || duration < 0 {
+			errs = append(errs, ValidationError{
+				Field:   "proxy.stream_close_delay",
+				Message: "stream_close_delay must be a non-negative duration (e.g., 5m)",
+			})
+		}
+	}
 	if cfg.Proxy.Healthcheck.Interval != "" {
 		if _, err := time.ParseDuration(cfg.Proxy.Healthcheck.Interval); err != nil {
 			errs = append(errs, ValidationError{
@@ -353,6 +375,13 @@ func Validate(cfg *Config) error {
 	}
 	if len(cfg.Env.Tags) > 0 {
 		errs = append(errs, ValidationError{Field: "env.tags", Message: "tagged environments are not supported"})
+	}
+
+	if (cfg.Proxy.SSLCertificate == "") != (cfg.Proxy.SSLPrivateKey == "") {
+		errs = append(errs, ValidationError{
+			Field:   "proxy.ssl_certificate",
+			Message: "ssl_certificate and ssl_private_key must be configured together",
+		})
 	}
 
 	// Validate ACME email when SSL is enabled (skip if custom certificates are provided)

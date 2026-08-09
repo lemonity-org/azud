@@ -53,10 +53,12 @@ type HTTPApp struct {
 
 // HTTPServer represents an HTTP server configuration
 type HTTPServer struct {
-	Listen    []string         `json:"listen,omitempty"`
-	Routes    []*Route         `json:"routes,omitempty"`
-	Logs      *ServerLogs      `json:"logs,omitempty"`
-	AutoHTTPS *AutoHTTPSConfig `json:"automatic_https,omitempty"`
+	Listen           []string         `json:"listen,omitempty"`
+	Routes           []*Route         `json:"routes,omitempty"`
+	Logs             *ServerLogs      `json:"logs,omitempty"`
+	AutoHTTPS        *AutoHTTPSConfig `json:"automatic_https,omitempty"`
+	MaxHeaderBytes   int              `json:"max_header_bytes,omitempty"`
+	EnableFullDuplex bool             `json:"enable_full_duplex,omitempty"`
 }
 
 // Route defines a routing rule
@@ -84,12 +86,13 @@ type Handler struct {
 	Body       string `json:"body,omitempty"`
 
 	// For reverse_proxy handler
-	LoadBalancing   *LoadBalancing `json:"load_balancing,omitempty"`
-	HealthChecks    *HealthChecks  `json:"health_checks,omitempty"`
-	Transport       *Transport     `json:"transport,omitempty"`
-	FlushInterval   string         `json:"flush_interval,omitempty"`
-	BufferRequests  bool           `json:"buffer_requests,omitempty"`
-	BufferResponses bool           `json:"buffer_responses,omitempty"`
+	LoadBalancing    *LoadBalancing `json:"load_balancing,omitempty"`
+	HealthChecks     *HealthChecks  `json:"health_checks,omitempty"`
+	Transport        *Transport     `json:"transport,omitempty"`
+	FlushInterval    string         `json:"flush_interval,omitempty"`
+	StreamCloseDelay string         `json:"stream_close_delay,omitempty"`
+	BufferRequests   bool           `json:"buffer_requests,omitempty"`
+	BufferResponses  bool           `json:"buffer_responses,omitempty"`
 
 	// Headers configures reverse_proxy request and response header operations.
 	// Static response headers are intentionally not modeled on this handler.
@@ -171,8 +174,9 @@ type UpstreamTLSConfig struct{}
 
 // AutoHTTPSConfig configures automatic HTTPS behavior.
 type AutoHTTPSConfig struct {
-	Disable          bool `json:"disable,omitempty"`
-	DisableRedirects bool `json:"disable_redirects,omitempty"`
+	Disable             bool `json:"disable,omitempty"`
+	DisableRedirects    bool `json:"disable_redirects,omitempty"`
+	DisableCertificates bool `json:"disable_certificates,omitempty"`
 }
 
 // TLSApp configures TLS/HTTPS
@@ -308,9 +312,19 @@ func (c *CaddyClient) SetConfig(host string, config *CaddyConfig) error {
 	return err
 }
 
-// LoadConfig loads a configuration from a path
+// LoadConfig loads a typed Caddy configuration.
 func (c *CaddyClient) LoadConfig(host string, config *CaddyConfig) error {
 	_, err := c.apiRequest(host, "POST", "/load", config)
+	return err
+}
+
+// LoadRawConfig loads already validated JSON without discarding fields Azud
+// does not model. This is required for safe rollback and persisted restores.
+func (c *CaddyClient) LoadRawConfig(host string, data []byte) error {
+	if !json.Valid(data) {
+		return fmt.Errorf("invalid raw Caddy configuration")
+	}
+	_, err := c.apiRequest(host, "POST", "/load", json.RawMessage(data))
 	return err
 }
 

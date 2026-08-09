@@ -6,6 +6,15 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added explicit Caddy request-header, HTTP/1 full-duplex, response-flush, and
+  stream-close-delay controls, including rolling reconciliation of streaming
+  options without replacing active upstreams.
+- Made custom TLS fail closed when certificate references are incomplete,
+  missing, empty, malformed, or do not match instead of silently clearing TLS
+  state or falling back to automatic certificate behavior.
+- Changed Caddy restarts to resume autosaved live JSON instead of briefly
+  serving the stock file-server route before Azud restores persisted state.
+
 ## 1.1.1 - 2026-08-09
 
 - Added safe leftmost wildcard proxy hosts, wildcard-aware DNS preflight, and

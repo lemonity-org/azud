@@ -355,6 +355,18 @@ type ProxyConfig struct {
 	// Response header timeout (time to wait for response headers only)
 	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
 
+	// Maximum client request header size in bytes. Zero retains Caddy's default.
+	MaxHeaderBytes int `yaml:"max_header_bytes"`
+
+	// Enable concurrent HTTP/1 request reads and response writes.
+	EnableFullDuplex bool `yaml:"enable_full_duplex"`
+
+	// Response flush interval. A negative duration enables immediate flushing.
+	FlushInterval string `yaml:"flush_interval"`
+
+	// Delay closing streaming connections when Caddy reloads its configuration.
+	StreamCloseDelay string `yaml:"stream_close_delay"`
+
 	// Forward headers to backend
 	ForwardHeaders bool `yaml:"forward_headers"`
 

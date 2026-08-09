@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -137,6 +138,9 @@ func (m *Manager) EnsureConfig(host string) error {
 	if m.proxyConfig == nil {
 		return nil
 	}
+	if err := validateProxyConfig(m.proxyConfig); err != nil {
+		return err
+	}
 	return m.withPersistedMutation(host, func() error {
 		return m.applyConfigPreservingRoutes(host, m.proxyConfig)
 	})
@@ -167,24 +171,33 @@ func (m *Manager) withCaddyLock(host string, fn func() error) error {
 // written, the prior live configuration is restored before the error returns.
 func (m *Manager) withPersistedMutation(host string, mutate func() error) error {
 	return m.withCaddyLock(host, func() error {
-		before, err := m.caddyClient.GetConfig(host)
-		if err != nil {
-			return fmt.Errorf("failed to snapshot Caddy config before mutation: %w", err)
-		}
-		if err := mutate(); err != nil {
-			if restoreErr := m.caddyClient.LoadConfig(host, before); restoreErr != nil {
-				return fmt.Errorf("caddy mutation failed: %v (live rollback also failed: %v)", err, restoreErr)
-			}
-			return fmt.Errorf("caddy mutation failed; restored previous live config: %w", err)
-		}
-		if err := m.persistConfig(host); err != nil {
-			if restoreErr := m.caddyClient.LoadConfig(host, before); restoreErr != nil {
-				return fmt.Errorf("failed to persist Caddy mutation: %v (live rollback also failed: %v)", err, restoreErr)
-			}
-			return fmt.Errorf("failed to persist Caddy mutation; restored previous live config: %w", err)
-		}
-		return nil
+		return m.withPersistedMutationLocked(host, mutate)
 	})
+}
+
+// withPersistedMutationLocked runs a transactional mutation while the caller
+// already holds the remote Caddy lock.
+func (m *Manager) withPersistedMutationLocked(host string, mutate func() error) error {
+	before, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil)
+	if err != nil {
+		return fmt.Errorf("failed to snapshot Caddy config before mutation: %w", err)
+	}
+	if !json.Valid(before) {
+		return fmt.Errorf("failed to snapshot Caddy config before mutation: invalid JSON")
+	}
+	if err := mutate(); err != nil {
+		if restoreErr := m.caddyClient.LoadRawConfig(host, before); restoreErr != nil {
+			return fmt.Errorf("caddy mutation failed: %v (live rollback also failed: %v)", err, restoreErr)
+		}
+		return fmt.Errorf("caddy mutation failed; restored previous live config: %w", err)
+	}
+	if err := m.persistConfig(host); err != nil {
+		if restoreErr := m.caddyClient.LoadRawConfig(host, before); restoreErr != nil {
+			return fmt.Errorf("failed to persist Caddy mutation: %v (live rollback also failed: %v)", err, restoreErr)
+		}
+		return fmt.Errorf("failed to persist Caddy mutation; restored previous live config: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) ensureRootfulAccess(host string) error {
@@ -209,6 +222,60 @@ func (m *Manager) ensureRootfulAccess(host string) error {
 		return fmt.Errorf("proxy.rootful requires passwordless sudo for podman on %s: %s", host, msg)
 	}
 	return nil
+}
+
+func (m *Manager) containerUsesResume(host, container string) (bool, error) {
+	raw, err := m.podman.Inspect(host, container)
+	if err != nil {
+		return false, err
+	}
+	var payload []struct {
+		Config struct {
+			Cmd []string `json:"Cmd"`
+		} `json:"Config"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return false, err
+	}
+	if len(payload) == 0 {
+		return false, fmt.Errorf("empty inspect result")
+	}
+	return commandUsesResume(payload[0].Config.Cmd), nil
+}
+
+func commandUsesResume(arguments []string) bool {
+	for _, argument := range arguments {
+		for _, field := range strings.Fields(argument) {
+			if strings.Trim(field, "'\";") == "--resume" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *Manager) caddyAutosaveExists(host string) (bool, error) {
+	result, err := m.podman.Run(host, &podman.ContainerConfig{
+		Image:           CaddyImage,
+		Entrypoint:      "/bin/sh",
+		Command:         []string{"-c", "if [ -s /config/caddy/autosave.json ]; then printf yes; else printf no; fi"},
+		Volumes:         []string{"caddy_config:/config:ro"},
+		ReadOnly:        true,
+		CapDrop:         []string{"all"},
+		NoNewPrivileges: true,
+		Remove:          true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect Caddy autosave volume: %w", err)
+	}
+	switch strings.TrimSpace(result) {
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected Caddy autosave probe output %q", result)
+	}
 }
 
 func (m *Manager) containerUsesHostNetwork(host, container string) (bool, error) {
@@ -289,12 +356,12 @@ func (m *Manager) restoreConfig(host string) error {
 		return fmt.Errorf("config file does not exist")
 	}
 
-	var config CaddyConfig
-	if err := json.Unmarshal([]byte(result.Stdout), &config); err != nil {
-		return fmt.Errorf("persisted config is invalid JSON: %w", err)
+	data := []byte(result.Stdout)
+	if !json.Valid(data) {
+		return fmt.Errorf("persisted config is invalid JSON")
 	}
 
-	if err := m.caddyClient.LoadConfig(host, &config); err != nil {
+	if err := m.caddyClient.LoadRawConfig(host, data); err != nil {
 		return fmt.Errorf("failed to load persisted config: %w", err)
 	}
 
@@ -339,6 +406,15 @@ type ProxyConfig struct {
 	// Custom SSL private key PEM content
 	SSLPrivateKey string
 
+	// Require valid custom certificate material instead of falling back to ACME.
+	CustomCertificate bool
+
+	// Maximum client request header size in bytes.
+	MaxHeaderBytes int
+
+	// Enable concurrent HTTP/1 request reads and response writes.
+	EnableFullDuplex bool
+
 	// Enable access logging (even without header redaction)
 	LoggingEnabled bool
 
@@ -351,6 +427,9 @@ type ProxyConfig struct {
 
 // Boot starts the Caddy proxy on a host
 func (m *Manager) Boot(host string, config *ProxyConfig) error {
+	if err := validateProxyConfig(config); err != nil {
+		return err
+	}
 	m.proxyConfig = config
 	m.log.Host(host, "Starting proxy...")
 	if err := m.ensureRootfulAccess(host); err != nil {
@@ -386,6 +465,27 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		}
 	}
 
+	// Older proxy containers restart from the stock Caddyfile and serve its
+	// catch-all file route until Azud reconnects. Recreate them once so Caddy
+	// resumes its autosaved live JSON before accepting traffic after a restart.
+	if exists {
+		usesResume, inspectErr := m.containerUsesResume(host, CaddyContainerName)
+		if inspectErr != nil {
+			return fmt.Errorf("failed to inspect proxy restart command on %s: %w", host, inspectErr)
+		}
+		if !usesResume {
+			m.log.Host(host, "Recreating proxy container with Caddy config resume enabled...")
+			if running {
+				_ = m.podman.Stop(host, CaddyContainerName, 30)
+			}
+			if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
+				return fmt.Errorf("failed to recreate proxy container: %w", err)
+			}
+			running = false
+			exists = false
+		}
+	}
+
 	if running {
 		m.log.Host(host, "Proxy already running")
 		// Apply TLS/ACME and logging settings from deploy.yml while
@@ -402,32 +502,18 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 
 	if exists {
+		hasAutosave, err := m.caddyAutosaveExists(host)
+		if err != nil {
+			return err
+		}
 		if err := m.podman.Start(host, CaddyContainerName); err != nil {
 			return fmt.Errorf("failed to start proxy: %w", err)
 		}
-		// Wait for Caddy admin API to be ready, then restore persisted config
 		if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
 			return err
 		}
-		if err := m.withPersistedMutation(host, func() error {
-			if restoreErr := m.restoreConfig(host); restoreErr != nil {
-				if config == nil {
-					return restoreErr
-				}
-				if initErr := m.loadInitialConfig(host, config); initErr != nil {
-					return fmt.Errorf("restore failed (%v) and initial config failed: %w", restoreErr, initErr)
-				}
-				return nil
-			}
-			if config != nil {
-				if err := m.applyConfigPreservingRoutes(host, config); err != nil {
-					return err
-				}
-				return nil
-			}
-			return nil
-		}); err != nil {
-			return fmt.Errorf("failed to restore proxy config: %w", err)
+		if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
+			return err
 		}
 		m.log.HostSuccess(host, "Proxy started")
 		return nil
@@ -440,6 +526,11 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 	if config != nil && config.HTTPSPort > 0 {
 		httpsPort = config.HTTPSPort
+	}
+
+	hasAutosave, err := m.caddyAutosaveExists(host)
+	if err != nil {
+		return err
 	}
 
 	containerConfig := &podman.ContainerConfig{
@@ -455,7 +546,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 			"azud.managed": "true",
 			"azud.type":    "proxy",
 		},
-		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--watch"},
+		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--resume"},
 		Env: map[string]string{
 			"CADDY_ADMIN": m.adminListen(),
 		},
@@ -481,32 +572,54 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		return err
 	}
 
-	// Load configuration under the Caddy lock.
-	if err := m.withPersistedMutation(host, func() error {
-		if err := m.restoreConfig(host); err != nil {
-			if initErr := m.loadInitialConfig(host, config); initErr != nil {
-				return initErr
-			}
-			return nil
-		}
-		if config != nil {
-			if err := m.applyConfigPreservingRoutes(host, config); err != nil {
-				return err
-			}
-			return nil
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to load initial proxy config: %w", err)
+	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
+		return err
 	}
 
 	m.log.HostSuccess(host, "Proxy started")
 	return nil
 }
 
+func (m *Manager) finalizeProxyStartup(host string, config *ProxyConfig, hasAutosave bool) error {
+	if hasAutosave {
+		// --resume selected the authoritative autosave. Never overwrite it with
+		// Azud's potentially older protected bootstrap copy.
+		if config != nil {
+			if err := m.withPersistedMutation(host, func() error {
+				return m.applyConfigPreservingRoutes(host, config)
+			}); err != nil {
+				return fmt.Errorf("failed to apply proxy config after resume: %w", err)
+			}
+			return nil
+		}
+		if err := m.withCaddyLock(host, func() error { return m.persistConfig(host) }); err != nil {
+			return fmt.Errorf("failed to persist resumed proxy config: %w", err)
+		}
+		return nil
+	}
+
+	// No autosave existed before startup, so Caddy used the stock fallback.
+	// Restore Azud's protected bootstrap copy or initialize a minimal config.
+	if err := m.withPersistedMutation(host, func() error {
+		if err := m.restoreConfig(host); err != nil {
+			return m.loadInitialConfig(host, config)
+		}
+		if config != nil {
+			return m.applyConfigPreservingRoutes(host, config)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to load initial proxy config: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
+	if err := validateProxyConfig(config); err != nil {
+		return err
+	}
 	caddyConfig := m.buildBaseConfig()
-	m.applyProxySettings(caddyConfig)
+	m.applyProxySettingsFrom(caddyConfig, config)
 
 	if config != nil && config.SSLCertificate != "" {
 		m.log.Host(host, "Configuring custom SSL certificates...")
@@ -538,19 +651,114 @@ func ensureHTTPServer(caddyConfig *CaddyConfig) {
 // TLS/ACME and logging settings from the given ProxyConfig, and reloads
 // it. Existing routes (registered services) are preserved.
 func (m *Manager) applyConfigPreservingRoutes(host string, config *ProxyConfig) error {
-	caddyConfig, err := m.caddyClient.GetConfig(host)
+	if err := validateProxyConfig(config); err != nil {
+		return err
+	}
+	data, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil)
 	if err != nil {
-		return m.loadInitialConfig(host, config)
+		return fmt.Errorf("failed to read running Caddy config: %w", err)
 	}
 
-	ensureHTTPServer(caddyConfig)
-	m.applyProxySettingsFrom(caddyConfig, config)
+	currentRaw, err := decodeJSONObject(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse running Caddy config: %w", err)
+	}
+	desired := m.buildBaseConfig()
+	m.applyProxySettingsFrom(desired, config)
+
+	desiredData, err := json.Marshal(desired)
+	if err != nil {
+		return fmt.Errorf("failed to encode desired Caddy settings: %w", err)
+	}
+	var desiredRaw map[string]interface{}
+	if err := json.Unmarshal(desiredData, &desiredRaw); err != nil {
+		return fmt.Errorf("failed to parse desired Caddy settings: %w", err)
+	}
+	if err := copyManagedProxySettings(currentRaw, desiredRaw); err != nil {
+		return err
+	}
 
 	if config.SSLCertificate != "" {
 		m.log.Host(host, "Configuring custom SSL certificates...")
 	}
 
-	return m.caddyClient.LoadConfig(host, caddyConfig)
+	updated, err := json.Marshal(currentRaw)
+	if err != nil {
+		return fmt.Errorf("failed to encode updated Caddy config: %w", err)
+	}
+	return m.caddyClient.LoadRawConfig(host, updated)
+}
+
+func decodeJSONObject(data []byte) (map[string]interface{}, error) {
+	value, err := decodeJSONValue(data)
+	if err != nil {
+		return nil, err
+	}
+	object, ok := value.(map[string]interface{})
+	if !ok || object == nil {
+		return nil, fmt.Errorf("expected JSON object")
+	}
+	return object, nil
+}
+
+func decodeJSONValue(data []byte) (interface{}, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value interface{}
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func copyManagedProxySettings(current, desired map[string]interface{}) error {
+	currentApps, err := nestedJSONObject(current, "apps")
+	if err != nil {
+		return err
+	}
+	desiredApps, err := nestedJSONObject(desired, "apps")
+	if err != nil {
+		return err
+	}
+	currentServer, err := nestedJSONObject(currentApps, "http", "servers", "srv0")
+	if err != nil {
+		return err
+	}
+	desiredServer, err := nestedJSONObject(desiredApps, "http", "servers", "srv0")
+	if err != nil {
+		return err
+	}
+
+	for _, key := range []string{"listen", "automatic_https", "logs", "max_header_bytes", "enable_full_duplex"} {
+		copyOptionalJSONField(currentServer, desiredServer, key)
+	}
+	copyOptionalJSONField(current, desired, "logging")
+	copyOptionalJSONField(currentApps, desiredApps, "tls")
+	return nil
+}
+
+func nestedJSONObject(root map[string]interface{}, path ...string) (map[string]interface{}, error) {
+	current := root
+	for _, key := range path {
+		value, ok := current[key]
+		if !ok {
+			return nil, fmt.Errorf("running Caddy config is missing %s", strings.Join(path, "."))
+		}
+		next, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("running Caddy config field %s is not an object", strings.Join(path, "."))
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func copyOptionalJSONField(destination, source map[string]interface{}, key string) {
+	if value, ok := source[key]; ok {
+		destination[key] = value
+	} else {
+		delete(destination, key)
+	}
 }
 
 // buildBaseConfig creates a minimal Caddy config with admin and HTTP server.
@@ -574,13 +782,6 @@ func (m *Manager) buildBaseConfig() *CaddyConfig {
 	}
 }
 
-// applyProxySettings applies TLS, AutoHTTPS, and logging settings from the
-// cached proxy config onto the given Caddy config. This is used both during
-// initial bootstrap and when registerServiceFull needs to rebuild the config.
-func (m *Manager) applyProxySettings(caddyConfig *CaddyConfig) {
-	m.applyProxySettingsFrom(caddyConfig, m.proxyConfig)
-}
-
 // applyProxySettingsFrom applies TLS, AutoHTTPS, and logging settings from the
 // given ProxyConfig onto a Caddy config. Accepts an explicit config to avoid
 // temporary field swaps on the Manager.
@@ -592,6 +793,8 @@ func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *Proxy
 	ensureHTTPServer(caddyConfig)
 	server := caddyConfig.Apps.HTTP.Servers["srv0"]
 	server.Listen = proxyListenAddresses(config)
+	server.MaxHeaderBytes = config.MaxHeaderBytes
+	server.EnableFullDuplex = config.EnableFullDuplex
 
 	switch {
 	case !config.AutoHTTPS:
@@ -648,20 +851,19 @@ func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *Proxy
 	// Clear previously managed TLS material before applying the desired mode.
 	caddyConfig.Apps.TLS = nil
 	if config.SSLCertificate != "" && config.SSLPrivateKey != "" {
+		// Loaded PEM certificates are the only permitted certificate source in
+		// custom TLS mode. Disable automatic issuance explicitly; an empty issuer
+		// list is omitted from JSON and would otherwise fall back to Caddy defaults.
+		if server.AutoHTTPS == nil {
+			server.AutoHTTPS = &AutoHTTPSConfig{}
+		}
+		server.AutoHTTPS.DisableCertificates = true
 		caddyConfig.Apps.TLS = &TLSApp{
 			Certificates: &CertificatesConfig{
 				LoadPEM: []LoadedCertificate{
 					{
 						Certificate: config.SSLCertificate,
 						Key:         config.SSLPrivateKey,
-					},
-				},
-			},
-			Automation: &TLSAutomation{
-				Policies: []*TLSPolicy{
-					{
-						Subjects: config.Hosts,
-						Issuers:  []*Issuer{}, // empty disables ACME
 					},
 				},
 			},
@@ -703,6 +905,19 @@ func proxyListenAddresses(config *ProxyConfig) []string {
 	}
 }
 
+func validateProxyConfig(config *ProxyConfig) error {
+	if config == nil || !config.CustomCertificate {
+		return nil
+	}
+	if strings.TrimSpace(config.SSLCertificate) == "" || strings.TrimSpace(config.SSLPrivateKey) == "" {
+		return fmt.Errorf("custom SSL certificate secrets are missing or empty")
+	}
+	if _, err := tls.X509KeyPair([]byte(config.SSLCertificate), []byte(config.SSLPrivateKey)); err != nil {
+		return fmt.Errorf("invalid custom SSL certificate or private key: %w", err)
+	}
+	return nil
+}
+
 // Stop stops the Caddy proxy on a host
 func (m *Manager) Stop(host string) error {
 	m.log.Host(host, "Stopping proxy...")
@@ -721,32 +936,46 @@ func (m *Manager) Stop(host string) error {
 // Reboot restarts the Caddy proxy. If config is provided, it is applied
 // after restart so that TLS/ACME changes take effect immediately.
 func (m *Manager) Reboot(host string, config *ProxyConfig) error {
+	if err := validateProxyConfig(config); err != nil {
+		return err
+	}
 	m.log.Host(host, "Rebooting proxy...")
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
 	}
 
+	exists, err := m.podman.Exists(host, CaddyContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to check proxy container: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("proxy container does not exist")
+	}
+	usesResume, err := m.containerUsesResume(host, CaddyContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to inspect proxy restart command on %s: %w", host, err)
+	}
+	if !usesResume {
+		m.log.Host(host, "Migrating proxy container to Caddy config resume before reboot...")
+		_ = m.podman.Stop(host, CaddyContainerName, 30)
+		if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
+			return fmt.Errorf("failed to migrate proxy container: %w", err)
+		}
+		return m.Boot(host, config)
+	}
+
+	hasAutosave, err := m.caddyAutosaveExists(host)
+	if err != nil {
+		return err
+	}
 	if err := m.podman.Restart(host, CaddyContainerName, 30); err != nil {
 		return fmt.Errorf("failed to restart proxy: %w", err)
 	}
-
-	// Wait for Caddy admin API to be ready, then restore config and apply settings
 	if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
 		return err
 	}
-	if err := m.withPersistedMutation(host, func() error {
-		// Try to restore persisted config first (preserves routes)
-		restoreErr := m.restoreConfig(host)
-		if config != nil {
-			// Apply TLS/ACME settings on top of restored config
-			if applyErr := m.applyConfigPreservingRoutes(host, config); applyErr != nil {
-				return applyErr
-			}
-			return nil
-		}
-		return restoreErr
-	}); err != nil {
-		return fmt.Errorf("failed to apply proxy config after reboot: %w", err)
+	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
+		return fmt.Errorf("failed to finalize proxy reboot: %w", err)
 	}
 
 	m.log.HostSuccess(host, "Proxy rebooted")
@@ -860,16 +1089,9 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	route := m.buildServiceRoute(service)
 
 	if err := m.withPersistedMutation(host, func() error {
-		// Try route-specific update first
 		if err := m.upsertRoute(host, service.Host, route); err != nil {
-			// Fall back to full config replacement if route-specific update fails
-			// (e.g., the server doesn't exist yet and needs bootstrapping)
-			m.log.Debug("Route-specific update failed, falling back to full config: %v", err)
-			if fallbackErr := m.registerServiceFull(host, service, route); fallbackErr != nil {
-				return fallbackErr
-			}
+			return fmt.Errorf("failed to update owned service route without replacing Caddy config: %w", err)
 		}
-
 		return nil
 	}); err != nil {
 		return err
@@ -879,8 +1101,8 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 	return nil
 }
 
-// EnsureServiceHosts synchronizes an existing Azud route's host matchers
-// without changing its handlers or upstreams.
+// EnsureServiceHosts synchronizes an existing Azud route's host matchers and
+// streaming options without replacing its upstreams or sibling handlers.
 func (m *Manager) EnsureServiceHosts(host string, service *ServiceConfig) error {
 	if service.Host == "" && len(service.Hosts) > 0 {
 		service.Host = service.Hosts[0]
@@ -888,24 +1110,84 @@ func (m *Manager) EnsureServiceHosts(host string, service *ServiceConfig) error 
 	desired := m.buildServiceRoute(service)
 
 	return m.withPersistedMutation(host, func() error {
-		config, err := m.caddyClient.GetConfig(host)
+		routesPath := "/config/apps/http/servers/srv0/routes"
+		data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
 		if err != nil {
-			return fmt.Errorf("failed to get Caddy config: %w", err)
+			return fmt.Errorf("failed to read Caddy routes: %w", err)
 		}
-
-		path, matches, err := planServiceHostPatch(serviceRoutes(config), desired, service.Host)
+		rawRoutes, routes, err := parseRouteIdentities(data)
 		if err != nil {
 			return err
 		}
-		if path == "" {
+		if err := ensureNoForeignHostOwner(routes, desired); err != nil {
+			return err
+		}
+
+		desiredHandler, _, ok := reverseProxyHandler(desired)
+		if !ok {
+			return fmt.Errorf("desired service route has no reverse_proxy handler")
+		}
+		for i, route := range routes {
+			if !routesHaveSameOwner(route, desired, service.Host) {
+				continue
+			}
+			if !reflect.DeepEqual(route.Match, desired.Match) {
+				if _, err := m.caddyClient.apiRequest(host, "PATCH", routeAPIPath(routesPath, i, route)+"/match", desired.Match); err != nil {
+					return fmt.Errorf("failed to patch service hosts: %w", err)
+				}
+			}
+			handler, handlerIndex, err := parseReverseProxyIdentity(rawRoutes[i])
+			if err != nil {
+				return err
+			}
+			rawRoute, err := decodeJSONObject(rawRoutes[i])
+			if err != nil {
+				return err
+			}
+			rawHandlers, err := jsonObjectSlice(rawRoute["handle"])
+			if err != nil || handlerIndex >= len(rawHandlers) {
+				return fmt.Errorf("failed to locate owned reverse_proxy handler")
+			}
+			rawHandler := rawHandlers[handlerIndex]
+			handlerPath := handlerAPIPath(routesPath, i, handlerIndex, handler)
+			_, flushPresent := rawHandler["flush_interval"]
+			if err := m.reconcileStringField(host, handlerPath+"/flush_interval", handler.FlushInterval, desiredHandler.FlushInterval, flushPresent); err != nil {
+				return fmt.Errorf("failed to reconcile flush_interval: %w", err)
+			}
+			_, closeDelayPresent := rawHandler["stream_close_delay"]
+			if err := m.reconcileStringField(host, handlerPath+"/stream_close_delay", handler.StreamCloseDelay, desiredHandler.StreamCloseDelay, closeDelayPresent); err != nil {
+				return fmt.Errorf("failed to reconcile stream_close_delay: %w", err)
+			}
 			return nil
 		}
 
-		if _, err := m.caddyClient.apiRequest(host, "PATCH", path, matches); err != nil {
-			return fmt.Errorf("failed to patch service hosts: %w", err)
-		}
 		return nil
 	})
+}
+
+func (m *Manager) reconcileStringField(host, path, actual, desired string, present bool) error {
+	method, body, mutate := planStringFieldMutation(actual, desired, present)
+	if !mutate {
+		return nil
+	}
+	_, err := m.caddyClient.apiRequest(host, method, path, body)
+	return err
+}
+
+func planStringFieldMutation(actual, desired string, present bool) (string, interface{}, bool) {
+	if desired == "" {
+		if !present {
+			return "", nil, false
+		}
+		return "DELETE", nil, true
+	}
+	if present && actual == desired {
+		return "", nil, false
+	}
+	if present {
+		return "PATCH", desired, true
+	}
+	return "PUT", desired, true
 }
 
 // planServiceHostPatch returns a targeted matcher patch for an owned route.
@@ -938,36 +1220,30 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 		return fmt.Errorf("failed to get routes: %w", err)
 	}
 
-	var routes []*Route
-	if err := json.Unmarshal(data, &routes); err != nil {
-		return fmt.Errorf("failed to parse routes: %w", err)
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		return err
 	}
 	if err := ensureNoForeignHostOwner(routes, route); err != nil {
 		return err
 	}
-	for _, existing := range routes {
-		if existing != nil && route.ID != "" && existing.ID == route.ID {
-			routePath := caddyIDPath(route.ID)
-			if _, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route); err != nil {
-				return fmt.Errorf("failed to patch route %s: %w", route.ID, err)
-			}
-			return nil
+
+	for i, existing := range routes {
+		if existing == nil || !routesHaveSameOwner(existing, route, serviceHost) {
+			continue
 		}
+		merged, err := mergeOwnedRoute(rawRoutes[i], route)
+		if err != nil {
+			return err
+		}
+		if _, err := m.caddyClient.apiRequest(host, "PATCH", routeAPIPath(routesPath, i, existing), merged); err != nil {
+			return fmt.Errorf("failed to update owned route: %w", err)
+		}
+		return nil
 	}
 
-	for i, r := range routes {
-		if routeMatchesHost(r, serviceHost) {
-			routePath := routeAPIPath(routesPath, i, r)
-			_, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route)
-			if err != nil {
-				return fmt.Errorf("failed to patch route %s: %w", routePath, err)
-			}
-			return nil
-		}
-	}
-
-	// Route doesn't exist — POST appends one element to Caddy's routes array
-	// without replacing routes owned by other services or manual operators.
+	// Route doesn't exist — POST appends one Azud-owned route without replacing
+	// routes or handlers owned by other services and manual operators.
 	_, err = m.caddyClient.apiRequest(host, "POST", routesPath, routeAppendPayload(routes, route))
 	if err != nil {
 		return fmt.Errorf("failed to append route: %w", err)
@@ -976,40 +1252,247 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 	return nil
 }
 
-// registerServiceFull is the fallback path that replaces the full Caddy
-// configuration. Used when the server or routes path doesn't exist yet
-// (first deployment).
-func (m *Manager) registerServiceFull(host string, service *ServiceConfig, route *Route) error {
-	config, err := m.caddyClient.GetConfig(host)
+func parseRouteIdentities(data []byte) ([]json.RawMessage, []*Route, error) {
+	var rawRoutes []json.RawMessage
+	if err := json.Unmarshal(data, &rawRoutes); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse routes: %w", err)
+	}
+	var routes []*Route
+	if rawRoutes != nil {
+		routes = make([]*Route, 0, len(rawRoutes))
+	}
+	for _, raw := range rawRoutes {
+		var identity struct {
+			ID    string   `json:"@id,omitempty"`
+			Match []*Match `json:"match,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &identity); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse route identity: %w", err)
+		}
+		routes = append(routes, &Route{ID: identity.ID, Match: identity.Match})
+	}
+	return rawRoutes, routes, nil
+}
+
+func parseReverseProxyIdentity(rawRoute json.RawMessage) (*Handler, int, error) {
+	var route struct {
+		Handle []json.RawMessage `json:"handle,omitempty"`
+	}
+	if err := json.Unmarshal(rawRoute, &route); err != nil {
+		return nil, -1, fmt.Errorf("failed to parse owned route handlers: %w", err)
+	}
+	for index, rawHandler := range route.Handle {
+		var identity struct {
+			Handler string `json:"handler"`
+		}
+		if err := json.Unmarshal(rawHandler, &identity); err != nil {
+			return nil, -1, fmt.Errorf("failed to parse handler identity: %w", err)
+		}
+		if identity.Handler != "reverse_proxy" {
+			continue
+		}
+		var handler Handler
+		if err := json.Unmarshal(rawHandler, &handler); err != nil {
+			return nil, -1, fmt.Errorf("failed to parse owned reverse_proxy handler: %w", err)
+		}
+		return &handler, index, nil
+	}
+	return nil, -1, fmt.Errorf("owned service route has no reverse_proxy handler")
+}
+
+var reverseProxyManagedSchema = map[string]interface{}{
+	"@id": nil, "handler": nil, "flush_interval": nil, "stream_close_delay": nil,
+	"buffer_requests": nil, "buffer_responses": nil,
+	"load_balancing": map[string]interface{}{
+		"selection_policy": map[string]interface{}{"policy": nil},
+		"try_duration":     nil, "try_interval": nil,
+	},
+	"health_checks": map[string]interface{}{
+		"active": map[string]interface{}{
+			"path": nil, "port": nil, "interval": nil, "timeout": nil, "headers": nil,
+		},
+		"passive": map[string]interface{}{
+			"fail_duration": nil, "max_fails": nil, "unhealthy_latency": nil,
+		},
+	},
+	"transport": map[string]interface{}{
+		"protocol": nil, "response_header_timeout": nil, "read_timeout": nil,
+		"versions": nil, "tls": map[string]interface{}{},
+	},
+	"headers": map[string]interface{}{
+		"request":  map[string]interface{}{"set": nil, "add": nil, "delete": nil},
+		"response": map[string]interface{}{"set": nil, "add": nil, "delete": nil},
+	},
+}
+
+var requestBodyManagedSchema = map[string]interface{}{
+	"@id": nil, "handler": nil, "max_size": nil,
+}
+
+// mergeOwnedRoute overlays every field Azud owns while preserving arbitrary
+// route fields, sibling handlers, nested module settings, and upstream fields
+// that Azud does not model.
+func mergeOwnedRoute(rawRoute json.RawMessage, desired *Route) (map[string]interface{}, error) {
+	existing, err := decodeJSONObject(rawRoute)
 	if err != nil {
-		config = m.buildBaseConfig()
+		return nil, fmt.Errorf("failed to decode owned route: %w", err)
+	}
+	desiredData, err := json.Marshal(desired)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode desired route: %w", err)
+	}
+	desiredObject, err := decodeJSONObject(desiredData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode desired route: %w", err)
+	}
+	for _, key := range []string{"@id", "match", "terminal"} {
+		copyOptionalJSONField(existing, desiredObject, key)
 	}
 
-	ensureHTTPServer(config)
-	m.applyProxySettings(config)
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if err := ensureNoForeignHostOwner(server.Routes, route); err != nil {
-		return err
+	existingHandlers, err := jsonObjectSlice(existing["handle"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode owned route handlers: %w", err)
 	}
-	found := false
-	for i, r := range server.Routes {
-		if routesHaveSameOwner(r, route, service.Host) {
-			server.Routes[i] = route
-			found = true
-			break
+	desiredHandlers, err := jsonObjectSlice(desiredObject["handle"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode desired route handlers: %w", err)
+	}
+	desiredReverse := findJSONHandler(desiredHandlers, "reverse_proxy")
+	if desiredReverse == nil {
+		return nil, fmt.Errorf("desired service route has no reverse_proxy handler")
+	}
+	desiredBody := findJSONHandler(desiredHandlers, "request_body")
+
+	bodyIndex := findJSONHandlerIndex(existingHandlers, "request_body")
+	switch {
+	case desiredBody != nil && bodyIndex >= 0:
+		mergeManagedJSONObject(existingHandlers[bodyIndex], desiredBody, requestBodyManagedSchema)
+	case desiredBody != nil:
+		reverseIndex := findJSONHandlerIndex(existingHandlers, "reverse_proxy")
+		if reverseIndex < 0 {
+			reverseIndex = len(existingHandlers)
+		}
+		existingHandlers = append(existingHandlers, nil)
+		copy(existingHandlers[reverseIndex+1:], existingHandlers[reverseIndex:])
+		existingHandlers[reverseIndex] = desiredBody
+	case desiredBody == nil && bodyIndex >= 0:
+		existingHandlers = append(existingHandlers[:bodyIndex], existingHandlers[bodyIndex+1:]...)
+	}
+
+	reverseIndex := findJSONHandlerIndex(existingHandlers, "reverse_proxy")
+	if reverseIndex < 0 {
+		existingHandlers = append(existingHandlers, desiredReverse)
+	} else {
+		mergeReverseProxyJSON(existingHandlers[reverseIndex], desiredReverse)
+	}
+	existing["handle"] = existingHandlers
+	return existing, nil
+}
+
+func mergeReverseProxyJSON(existing, desired map[string]interface{}) {
+	mergedUpstreams := mergeRawUpstreamValues(existing["upstreams"], desired["upstreams"])
+	mergeManagedJSONObject(existing, desired, reverseProxyManagedSchema)
+	if _, ok := desired["upstreams"]; ok {
+		existing["upstreams"] = mergedUpstreams
+	} else {
+		delete(existing, "upstreams")
+	}
+}
+
+func mergeManagedJSONObject(existing, desired map[string]interface{}, schema map[string]interface{}) {
+	for key, child := range schema {
+		desiredValue, ok := desired[key]
+		if !ok {
+			delete(existing, key)
+			continue
+		}
+		childSchema, nested := child.(map[string]interface{})
+		if !nested {
+			existing[key] = desiredValue
+			continue
+		}
+		desiredChild, desiredIsObject := desiredValue.(map[string]interface{})
+		if !desiredIsObject {
+			existing[key] = desiredValue
+			continue
+		}
+		existingChild, existingIsObject := existing[key].(map[string]interface{})
+		if !existingIsObject {
+			existingChild = make(map[string]interface{})
+		}
+		mergeManagedJSONObject(existingChild, desiredChild, childSchema)
+		existing[key] = existingChild
+	}
+}
+
+func mergeRawUpstreamValues(existingValue, desiredValue interface{}) []interface{} {
+	existing, _ := jsonObjectSlice(existingValue)
+	desired, _ := jsonObjectSlice(desiredValue)
+	byDial := make(map[string][]map[string]interface{})
+	for _, upstream := range existing {
+		if dial, ok := upstream["dial"].(string); ok {
+			byDial[dial] = append(byDial[dial], upstream)
 		}
 	}
-
-	if !found {
-		server.Routes = append(server.Routes, route)
+	used := make(map[string]int)
+	merged := make([]interface{}, 0, len(desired))
+	for _, wanted := range desired {
+		dial, _ := wanted["dial"].(string)
+		base := make(map[string]interface{})
+		candidates := byDial[dial]
+		if len(candidates) > 0 {
+			index := used[dial]
+			if index >= len(candidates) {
+				index = len(candidates) - 1
+			}
+			for key, value := range candidates[index] {
+				base[key] = value
+			}
+			used[dial]++
+		}
+		base["dial"] = dial
+		merged = append(merged, base)
 	}
+	return merged
+}
 
-	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply full config: %w", err)
+func jsonObjectSlice(value interface{}) ([]map[string]interface{}, error) {
+	if value == nil {
+		return nil, nil
 	}
+	if objects, ok := value.([]map[string]interface{}); ok {
+		return objects, nil
+	}
+	values, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected JSON array, got %T", value)
+	}
+	objects := make([]map[string]interface{}, 0, len(values))
+	for _, value := range values {
+		object, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("expected JSON object in array, got %T", value)
+		}
+		objects = append(objects, object)
+	}
+	return objects, nil
+}
 
-	return nil
+func findJSONHandler(handlers []map[string]interface{}, name string) map[string]interface{} {
+	index := findJSONHandlerIndex(handlers, name)
+	if index < 0 {
+		return nil
+	}
+	return handlers[index]
+}
+
+func findJSONHandlerIndex(handlers []map[string]interface{}, name string) int {
+	for index, handler := range handlers {
+		if handler["handler"] == name {
+			return index
+		}
+	}
+	return -1
 }
 
 type ServiceConfig struct {
@@ -1046,6 +1529,12 @@ type ServiceConfig struct {
 
 	// Response header timeout (maps to Caddy response_header_timeout)
 	ResponseHeaderTimeout string
+
+	// Response flush interval. Negative values enable low-latency mode.
+	FlushInterval string
+
+	// Delay closing streaming connections when Caddy reloads.
+	StreamCloseDelay string
 
 	// Forward proxy headers to upstream
 	ForwardHeaders bool
@@ -1153,6 +1642,8 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		}
 	}
 
+	handler.FlushInterval = service.FlushInterval
+	handler.StreamCloseDelay = service.StreamCloseDelay
 	handler.BufferRequests = service.BufferRequests
 	handler.BufferResponses = service.BufferResponses
 
@@ -1212,57 +1703,76 @@ const (
 // A host-only route is considered only as an adoption candidate when upstreams exist.
 func (m *Manager) ReconcileService(host string, service *ServiceConfig, repair bool) (ReconcileStatus, error) {
 	desired := m.buildServiceRoute(service)
-	config, err := m.caddyClient.GetConfig(host)
+	hasDesiredUpstreams := len(service.Upstreams)+len(service.UpstreamWeights) > 0
+	routesPath := "/config/apps/http/servers/srv0/routes"
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
 	if err != nil {
 		return "", err
 	}
-	hasDesiredUpstreams := len(service.Upstreams)+len(service.UpstreamWeights) > 0
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		return "", err
+	}
 	if hasDesiredUpstreams {
-		if ownerErr := ensureNoForeignHostOwner(serviceRoutes(config), desired); ownerErr != nil {
+		if ownerErr := ensureNoForeignHostOwner(routes, desired); ownerErr != nil {
 			return "", ownerErr
 		}
 	}
-	status, _, _ := reconcileRouteStatus(serviceRoutes(config), desired, service.Host, hasDesiredUpstreams)
+	status, _, _ := reconcileRawRouteStatus(rawRoutes, routes, desired, service.Host, hasDesiredUpstreams)
 	if !repair || status == ReconcileInSync {
 		return status, nil
 	}
 
 	err = m.withPersistedMutation(host, func() error {
-		// Re-read under the mutation lock and alter only the exact owner or an
-		// eligible ID-less legacy route. Path-specific operations preserve every
-		// unrelated Caddy field, including modules Azud does not model.
-		routesPath := "/config/apps/http/servers/srv0/routes"
 		data, getErr := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
 		if getErr != nil {
 			return getErr
 		}
-		var liveRoutes []*Route
-		if unmarshalErr := json.Unmarshal(data, &liveRoutes); unmarshalErr != nil {
-			return fmt.Errorf("failed to parse routes: %w", unmarshalErr)
+		liveRawRoutes, liveRoutes, parseErr := parseRouteIdentities(data)
+		if parseErr != nil {
+			return parseErr
 		}
 		if hasDesiredUpstreams {
 			if ownerErr := ensureNoForeignHostOwner(liveRoutes, desired); ownerErr != nil {
 				return ownerErr
 			}
 		}
-		_, owned, legacy := reconcileRouteStatus(liveRoutes, desired, service.Host, hasDesiredUpstreams)
 		if !hasDesiredUpstreams {
-			if owned >= 0 {
+			_, liveOwned, _ := reconcileRawRouteStatus(liveRawRoutes, liveRoutes, desired, service.Host, false)
+			if liveOwned >= 0 {
 				_, deleteErr := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(desired.ID), nil)
 				return deleteErr
 			}
 			return nil
-		} else if owned >= 0 {
-			_, patchErr := m.caddyClient.apiRequest(host, "PATCH", caddyIDPath(desired.ID), desired)
-			return patchErr
-		} else if legacy >= 0 {
-			_, patchErr := m.caddyClient.apiRequest(host, "PATCH", fmt.Sprintf("%s/%d", routesPath, legacy), desired)
-			return patchErr
 		}
-		_, postErr := m.caddyClient.apiRequest(host, "POST", routesPath, routeAppendPayload(liveRoutes, desired))
-		return postErr
+		return m.upsertRoute(host, service.Host, desired)
 	})
 	return status, err
+}
+
+func reconcileRawRouteStatus(rawRoutes []json.RawMessage, routes []*Route, desired *Route, serviceHost string, hasDesiredUpstreams bool) (ReconcileStatus, int, int) {
+	status, owned, legacy := reconcileRouteStatus(routes, desired, serviceHost, hasDesiredUpstreams)
+	// An owned route with no desired upstreams is intentionally stale so repair
+	// deletes it; raw equality must never reclassify that orphan as in-sync.
+	if !hasDesiredUpstreams {
+		return status, owned, legacy
+	}
+	if status != ReconcileStale || owned < 0 || owned >= len(rawRoutes) {
+		return status, owned, legacy
+	}
+	actual, err := decodeJSONObject(rawRoutes[owned])
+	if err != nil {
+		return ReconcileStale, owned, legacy
+	}
+	merged, err := mergeOwnedRoute(rawRoutes[owned], desired)
+	if err == nil {
+		actualJSON, actualErr := json.Marshal(actual)
+		mergedJSON, mergedErr := json.Marshal(merged)
+		if actualErr == nil && mergedErr == nil && bytes.Equal(actualJSON, mergedJSON) {
+			return ReconcileInSync, owned, legacy
+		}
+	}
+	return ReconcileStale, owned, legacy
 }
 
 // routeAppendPayload preserves Caddy's routes array shape when the routes key
@@ -1378,65 +1888,33 @@ func uniformUpstreamMultiplicity(upstreams []*Upstream) bool {
 	return len(counts) > 0
 }
 
-func serviceRoutes(config *CaddyConfig) []*Route {
-	if config == nil || config.Apps == nil || config.Apps.HTTP == nil || config.Apps.HTTP.Servers["srv0"] == nil {
-		return nil
-	}
-	return config.Apps.HTTP.Servers["srv0"].Routes
-}
-
-// DeregisterService removes a service from the proxy using route-specific
-// API operations. Falls back to full config replacement on error.
+// DeregisterService removes a service through a route-specific API operation
+// so unrelated Caddy JSON is never decoded and replaced.
 func (m *Manager) DeregisterService(host, serviceHost string) error {
 	m.log.Host(host, "Deregistering service for %s...", serviceHost)
 
 	if err := m.withPersistedMutation(host, func() error {
-		// Try route-specific deletion first
 		routesPath := "/config/apps/http/servers/srv0/routes"
 		data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
-		if err == nil {
-			var routes []*Route
-			if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
-				for i, r := range routes {
-					if routeMatchesHost(r, serviceHost) {
-						routePath := routeAPIPath(routesPath, i, r)
-						if _, delErr := m.caddyClient.apiRequest(host, "DELETE", routePath, nil); delErr == nil {
-							return nil
-						}
-						break
-					}
-				}
-			}
-		}
-
-		// Fall back to full config replacement
-		m.log.Debug("Route-specific deregister failed, falling back to full config")
-		config, err := m.caddyClient.GetConfig(host)
 		if err != nil {
-			return fmt.Errorf("failed to get config: %w", err)
+			return fmt.Errorf("failed to read routes for deregistration: %w", err)
 		}
-
-		if config.Apps == nil || config.Apps.HTTP == nil {
-			return nil
+		_, routes, err := parseRouteIdentities(data)
+		if err != nil {
+			return err
 		}
-
-		server := config.Apps.HTTP.Servers["srv0"]
-		if server == nil {
-			return nil
-		}
-
-		var filtered []*Route
-		for _, r := range server.Routes {
-			if !routeMatchesHost(r, serviceHost) {
-				filtered = append(filtered, r)
+		for i, route := range routes {
+			if !routeMatchesHost(route, serviceHost) {
+				continue
 			}
+			if !isAzudOwnedRoute(route) {
+				return fmt.Errorf("refusing to deregister foreign route for host %s", serviceHost)
+			}
+			if _, err := m.caddyClient.apiRequest(host, "DELETE", routeAPIPath(routesPath, i, route), nil); err != nil {
+				return fmt.Errorf("failed to delete owned route: %w", err)
+			}
+			return nil
 		}
-		server.Routes = filtered
-
-		if err := m.caddyClient.LoadConfig(host, config); err != nil {
-			return fmt.Errorf("failed to apply config: %w", err)
-		}
-
 		return nil
 	}); err != nil {
 		return err
@@ -1446,8 +1924,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 	return nil
 }
 
-// AddUpstream adds an upstream to an existing service using route-specific
-// API operations. Falls back to full config replacement on error.
+// AddUpstream adds an upstream using only the owned handler's API path.
 func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 	m.log.Host(host, "Adding upstream %s to %s...", upstream, serviceHost)
 
@@ -1488,8 +1965,7 @@ func reverseProxyHandler(route *Route) (*Handler, int, bool) {
 	return nil, -1, false
 }
 
-// RemoveUpstream removes an upstream from a service using route-specific
-// API operations. Falls back to full config replacement on error.
+// RemoveUpstream removes an upstream using only the owned handler's API path.
 func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 	m.log.Host(host, "Removing upstream %s from %s...", upstream, serviceHost)
 
@@ -1516,74 +1992,60 @@ func (m *Manager) RemoveUpstream(host, serviceHost, upstream string) error {
 }
 
 // modifyUpstreams finds the route for serviceHost and applies a transformation
-// function to its upstreams list. Uses route-specific API with fallback to
-// full config replacement.
+// to only the owned reverse proxy's upstream list.
 func (m *Manager) modifyUpstreams(host, serviceHost string, transform func([]*Upstream) []*Upstream) error {
 	routesPath := "/config/apps/http/servers/srv0/routes"
 
 	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
 	if err != nil {
-		return m.modifyUpstreamsFull(host, serviceHost, transform)
+		return fmt.Errorf("failed to read routes for upstream update: %w", err)
 	}
-
-	var routes []*Route
-	if err := json.Unmarshal(data, &routes); err != nil {
-		return m.modifyUpstreamsFull(host, serviceHost, transform)
-	}
-
-	for i, route := range routes {
-		if handler, handlerIndex, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok {
-			handler.Upstreams = transform(handler.Upstreams)
-
-			upstreamsPath := handlerAPIPath(routesPath, i, handlerIndex, handler) + "/upstreams"
-			_, err := m.caddyClient.apiRequest(host, "PATCH", upstreamsPath, handler.Upstreams)
-			if err != nil {
-				routePath := routeAPIPath(routesPath, i, route)
-				if _, routeErr := m.caddyClient.apiRequest(host, "PATCH", routePath, route); routeErr != nil {
-					return m.modifyUpstreamsFull(host, serviceHost, transform)
-				}
-			}
-			return nil
-		}
-	}
-
-	return fmt.Errorf("no route found for host %s", serviceHost)
-}
-
-// modifyUpstreamsFull is the fallback that reads and replaces the full config.
-func (m *Manager) modifyUpstreamsFull(host, serviceHost string, transform func([]*Upstream) []*Upstream) error {
-	config, err := m.caddyClient.GetConfig(host)
+	rawRoutes, routes, err := parseRouteIdentities(data)
 	if err != nil {
 		return err
 	}
 
-	if config.Apps == nil || config.Apps.HTTP == nil {
-		return fmt.Errorf("no HTTP config found")
-	}
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if server == nil {
-		return fmt.Errorf("server not found")
-	}
-
-	found := false
-	for _, route := range server.Routes {
-		if handler, _, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok {
-			handler.Upstreams = transform(handler.Upstreams)
-			found = true
-			break
+	for i, route := range routes {
+		if !routeMatchesHost(route, serviceHost) {
+			continue
 		}
+		if !isAzudOwnedRoute(route) {
+			return fmt.Errorf("refusing to update upstreams on foreign route for host %s", serviceHost)
+		}
+		handler, handlerIndex, err := parseReverseProxyIdentity(rawRoutes[i])
+		if err != nil {
+			return err
+		}
+		upstreams := transform(handler.Upstreams)
+		rawRoute, err := decodeJSONObject(rawRoutes[i])
+		if err != nil {
+			return err
+		}
+		rawHandlers, err := jsonObjectSlice(rawRoute["handle"])
+		if err != nil || handlerIndex >= len(rawHandlers) {
+			return fmt.Errorf("failed to locate owned reverse_proxy handler")
+		}
+		desiredData, err := json.Marshal(upstreams)
+		if err != nil {
+			return err
+		}
+		desiredValue, err := decodeJSONValue(desiredData)
+		if err != nil {
+			return err
+		}
+		merged := mergeRawUpstreamValues(rawHandlers[handlerIndex]["upstreams"], desiredValue)
+		method := "PATCH"
+		if _, exists := rawHandlers[handlerIndex]["upstreams"]; !exists {
+			method = "PUT"
+		}
+		upstreamsPath := handlerAPIPath(routesPath, i, handlerIndex, handler) + "/upstreams"
+		if _, err := m.caddyClient.apiRequest(host, method, upstreamsPath, merged); err != nil {
+			return fmt.Errorf("failed to update upstreams without replacing the owned handler: %w", err)
+		}
+		return nil
 	}
 
-	if !found {
-		return fmt.Errorf("no route found for host %s", serviceHost)
-	}
-
-	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply config: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("no route found for host %s", serviceHost)
 }
 
 // DrainUpstream waits for all in-flight requests to the given upstream to
@@ -1662,6 +2124,10 @@ func (m *Manager) GetUpstreamRequestCount(host, upstream string) (int, error) {
 	return m.caddyClient.GetUpstreamRequestCount(host, upstream)
 }
 
+func isAzudOwnedRoute(route *Route) bool {
+	return route != nil && strings.HasPrefix(route.ID, azudRouteIDPrefix)
+}
+
 func routeMatchesHost(route *Route, host string) bool {
 	if route == nil {
 		return false
@@ -1733,7 +2199,7 @@ func ensureNoForeignHostOwner(routes []*Route, desired *Route) error {
 			continue
 		}
 		// An ID-less route with the exact primary host is an Azud legacy route
-		// that the caller can safely adopt and replace in full.
+		// that the caller can safely adopt through a preserving managed overlay.
 		if route.ID == "" && routeMatchesHost(route, primaryHost) {
 			continue
 		}
@@ -1912,69 +2378,81 @@ func greatestCommonDivisor(a, b int) int {
 	return a
 }
 
-// modifyRoute finds the route for serviceHost and applies a transformation
-// to its reverse_proxy handler. Uses route-specific API with fallback.
+// modifyRoute finds the route for serviceHost and applies a transformation to
+// only its Azud-owned reverse_proxy handler.
 func (m *Manager) modifyRoute(host, serviceHost string, transform func(*Handler)) error {
 	routesPath := "/config/apps/http/servers/srv0/routes"
-
 	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
 	if err != nil {
-		return m.modifyRouteFull(host, serviceHost, transform)
+		return fmt.Errorf("failed to read routes: %w", err)
 	}
-
-	var routes []*Route
-	if err := json.Unmarshal(data, &routes); err != nil {
-		return m.modifyRouteFull(host, serviceHost, transform)
-	}
-
-	for i, route := range routes {
-		if handler, _, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok {
-			transform(handler)
-
-			routePath := routeAPIPath(routesPath, i, route)
-			if _, err := m.caddyClient.apiRequest(host, "PATCH", routePath, route); err != nil {
-				return m.modifyRouteFull(host, serviceHost, transform)
-			}
-			return nil
-		}
-	}
-
-	return fmt.Errorf("no route found for host %s", serviceHost)
-}
-
-// modifyRouteFull is the fallback that reads and replaces the full config.
-func (m *Manager) modifyRouteFull(host, serviceHost string, transform func(*Handler)) error {
-	config, err := m.caddyClient.GetConfig(host)
+	rawRoutes, routes, err := parseRouteIdentities(data)
 	if err != nil {
 		return err
 	}
-
-	if config.Apps == nil || config.Apps.HTTP == nil {
-		return fmt.Errorf("no HTTP config found")
-	}
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if server == nil {
-		return fmt.Errorf("server not found")
-	}
-
-	found := false
-	for _, route := range server.Routes {
-		if handler, _, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok {
-			transform(handler)
-			found = true
-			break
+	for i, route := range routes {
+		if !routeMatchesHost(route, serviceHost) {
+			continue
 		}
+		if !isAzudOwnedRoute(route) {
+			return fmt.Errorf("refusing to update canary weights on foreign route for host %s", serviceHost)
+		}
+		handler, handlerIndex, err := parseReverseProxyIdentity(rawRoutes[i])
+		if err != nil {
+			return err
+		}
+		rawRoute, err := decodeJSONObject(rawRoutes[i])
+		if err != nil {
+			return err
+		}
+		rawHandlers, err := jsonObjectSlice(rawRoute["handle"])
+		if err != nil || handlerIndex >= len(rawHandlers) {
+			return fmt.Errorf("failed to locate owned reverse_proxy handler")
+		}
+		rawHandler := rawHandlers[handlerIndex]
+		transform(handler)
+		if handler.LoadBalancing == nil || handler.LoadBalancing.SelectionPolicy == nil {
+			return fmt.Errorf("canary route has no selection policy")
+		}
+		desiredUpstreamsData, err := json.Marshal(handler.Upstreams)
+		if err != nil {
+			return err
+		}
+		desiredUpstreams, err := decodeJSONValue(desiredUpstreamsData)
+		if err != nil {
+			return err
+		}
+		mergedUpstreams := mergeRawUpstreamValues(rawHandler["upstreams"], desiredUpstreams)
+		handlerPath := handlerAPIPath(routesPath, i, handlerIndex, handler)
+		upstreamMethod := "PATCH"
+		if _, exists := rawHandler["upstreams"]; !exists {
+			upstreamMethod = "PUT"
+		}
+		if _, err := m.caddyClient.apiRequest(host, upstreamMethod, handlerPath+"/upstreams", mergedUpstreams); err != nil {
+			return fmt.Errorf("failed to update canary upstreams: %w", err)
+		}
+		rawLoadBalancingValue, loadBalancingExists := rawHandler["load_balancing"]
+		if !loadBalancingExists {
+			body := map[string]interface{}{"selection_policy": handler.LoadBalancing.SelectionPolicy}
+			if _, err := m.caddyClient.apiRequest(host, "PUT", handlerPath+"/load_balancing", body); err != nil {
+				return fmt.Errorf("failed to create canary load balancing policy: %w", err)
+			}
+			return nil
+		}
+		rawLoadBalancing, ok := rawLoadBalancingValue.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("owned route has invalid load_balancing configuration")
+		}
+		selectionMethod := "PATCH"
+		if _, exists := rawLoadBalancing["selection_policy"]; !exists {
+			selectionMethod = "PUT"
+		}
+		if _, err := m.caddyClient.apiRequest(host, selectionMethod, handlerPath+"/load_balancing/selection_policy", handler.LoadBalancing.SelectionPolicy); err != nil {
+			return fmt.Errorf("failed to update canary selection policy: %w", err)
+		}
+		return nil
 	}
-	if !found {
-		return fmt.Errorf("no route found for host %s", serviceHost)
-	}
-
-	if err := m.caddyClient.LoadConfig(host, config); err != nil {
-		return fmt.Errorf("failed to apply config: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("no route found for host %s", serviceHost)
 }
 
 type UpstreamWeight struct {
@@ -1985,41 +2463,28 @@ type UpstreamWeight struct {
 // GetUpstreamWeights returns all upstreams with their weights for a service
 // using route-specific API operations.
 func (m *Manager) GetUpstreamWeights(host, serviceHost string) ([]UpstreamWeight, error) {
-	// Try route-specific query first
 	routesPath := "/config/apps/http/servers/srv0/routes"
 	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
-	if err == nil {
-		var routes []*Route
-		if jsonErr := json.Unmarshal(data, &routes); jsonErr == nil {
-			for _, route := range routes {
-				if handler, _, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok && handler.Upstreams != nil {
-					return extractWeights(handler.Upstreams), nil
-				}
-			}
-		}
-	}
-
-	// Fall back to full config
-	config, err := m.caddyClient.GetConfig(host)
 	if err != nil {
 		return nil, err
 	}
-
-	if config.Apps == nil || config.Apps.HTTP == nil {
-		return nil, fmt.Errorf("no HTTP config found")
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		return nil, err
 	}
-
-	server := config.Apps.HTTP.Servers["srv0"]
-	if server == nil {
-		return nil, fmt.Errorf("server not found")
-	}
-
-	for _, route := range server.Routes {
-		if handler, _, ok := reverseProxyHandler(route); routeMatchesHost(route, serviceHost) && ok && handler.Upstreams != nil {
-			return extractWeights(handler.Upstreams), nil
+	for i, route := range routes {
+		if !routeMatchesHost(route, serviceHost) {
+			continue
 		}
+		if !isAzudOwnedRoute(route) {
+			return nil, fmt.Errorf("refusing to read canary weights from foreign route for host %s", serviceHost)
+		}
+		handler, _, err := parseReverseProxyIdentity(rawRoutes[i])
+		if err != nil {
+			return nil, err
+		}
+		return extractWeights(handler.Upstreams), nil
 	}
-
 	return nil, fmt.Errorf("service %s not found", serviceHost)
 }
 

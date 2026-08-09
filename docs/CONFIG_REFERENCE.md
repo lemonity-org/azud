@@ -138,6 +138,10 @@ Other useful fields:
 - `upstream_protocol` (`http`, `h2c`, or `https`)
 - `rootful` (run proxy container with rootful Podman)
 - `response_timeout`, `response_header_timeout`
+- `max_header_bytes` (client request-header limit; `0` keeps Caddy's default)
+- `enable_full_duplex` (concurrent HTTP/1 request reads and response writes)
+- `flush_interval` (use a negative duration such as `-1s` for immediate flushing)
+- `stream_close_delay` (keep streams open briefly while Caddy reloads)
 - `buffering`, `forward_headers`
 - `logging` (redaction and toggles)
 
@@ -151,6 +155,14 @@ check. When it is set, Azud does not configure Caddy's HTTP active health check.
 supports plaintext HTTP/2 applications such as typical gRPC containers;
 `https` requires the application certificate to be trusted and valid for the
 container hostname used as the upstream address.
+
+`max_header_bytes` and `enable_full_duplex` apply to the shared Caddy server.
+All services using one proxy should agree on those values. `flush_interval` and
+`stream_close_delay` apply to the service's reverse-proxy handler and are
+reconciled on later deploys without replacing active upstreams. A negative
+`flush_interval` is valid; `stream_close_delay` must not be negative. Enable
+`stream_close_delay` before admitting long-lived streams: the first reload that
+adds it cannot protect streams owned by the previous zero-delay handler.
 
 Note:
 - With `podman.rootless: true` and `proxy.rootful: false`, proxy

@@ -456,6 +456,37 @@ func TestMergeConfigs_ResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestMergeConfigs_ProxyStreamingOptionsUseFieldPresence(t *testing.T) {
+	base := &Config{Proxy: ProxyConfig{
+		MaxHeaderBytes:   2 * 1024 * 1024,
+		EnableFullDuplex: true,
+		FlushInterval:    "-1s",
+		StreamCloseDelay: "5m",
+	}}
+	destYAML := []byte(`
+proxy:
+  max_header_bytes: 0
+  enable_full_duplex: false
+  flush_interval: ""
+  stream_close_delay: ""
+`)
+
+	var dest Config
+	var node yaml.Node
+	if err := yaml.Unmarshal(destYAML, &dest); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(destYAML, &node); err != nil {
+		t.Fatal(err)
+	}
+
+	merged := mergeConfigs(base, &dest, &node)
+	if merged.Proxy.MaxHeaderBytes != 0 || merged.Proxy.EnableFullDuplex ||
+		merged.Proxy.FlushInterval != "" || merged.Proxy.StreamCloseDelay != "" {
+		t.Fatalf("explicit zero values did not clear streaming options: %#v", merged.Proxy)
+	}
+}
+
 func TestMergeConfigs_UpstreamProtocolAndReadinessCommand(t *testing.T) {
 	base := &Config{}
 	dest := &Config{Proxy: ProxyConfig{
