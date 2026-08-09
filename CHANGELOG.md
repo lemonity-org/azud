@@ -6,7 +6,7 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
-## 1.1.1 - 2026-08-08
+## 1.1.1 - 2026-08-09
 
 - Added safe leftmost wildcard proxy hosts, wildcard-aware DNS preflight, and
   Caddy route ownership checks that reject wildcard/exact host overlap across
