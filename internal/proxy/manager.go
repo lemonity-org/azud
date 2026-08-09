@@ -552,28 +552,17 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 
 	if running {
-		if _, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil); err != nil {
-			// Caddy may be healthy on the data plane but unreachable at Azud's
-			// configured admin endpoint after an out-of-band listener change.
-			// Stop it before reading and normalizing the authoritative autosave.
-			m.log.Host(host, "Recovering proxy admin access from autosaved state...")
-			if stopErr := m.podman.Stop(host, CaddyContainerName, 30); stopErr != nil {
-				return fmt.Errorf("failed to stop proxy for admin recovery: %w", stopErr)
+		m.log.Host(host, "Proxy already running")
+		// A normal deploy must fail closed when Azud's configured admin endpoint
+		// is unreachable; only explicit proxy reboot performs autosave recovery.
+		if config != nil {
+			if err := m.withPersistedMutation(host, func() error {
+				return m.applyConfigPreservingRoutes(host, config)
+			}); err != nil {
+				return fmt.Errorf("failed to apply proxy config: %w", err)
 			}
-		} else {
-			m.log.Host(host, "Proxy already running")
-			// Apply TLS/ACME and logging settings from deploy.yml while
-			// preserving existing routes so that registered services are
-			// not wiped out.
-			if config != nil {
-				if err := m.withPersistedMutation(host, func() error {
-					return m.applyConfigPreservingRoutes(host, config)
-				}); err != nil {
-					return fmt.Errorf("failed to apply proxy config: %w", err)
-				}
-			}
-			return nil
 		}
+		return nil
 	}
 
 	if exists {

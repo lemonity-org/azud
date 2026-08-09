@@ -428,7 +428,21 @@ func assertHTTPAvailable(t *testing.T, client *ssh.Client, host string, port int
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("application did not become reachable through Caddy: %s", last)
+	var diagnostics strings.Builder
+	for _, command := range []string{
+		"curl -sS http://127.0.0.1:2019/config/apps/http/servers/srv0/routes",
+		"curl -sS http://127.0.0.1:2019/reverse_proxy/upstreams",
+		"podman ps --format '{{.Names}} {{.Status}} {{.Networks}}'",
+	} {
+		result, err := client.Execute(host, command)
+		fmt.Fprintf(&diagnostics, "\n$ %s\n", command)
+		if err != nil {
+			fmt.Fprintf(&diagnostics, "transport error: %v\n", err)
+			continue
+		}
+		fmt.Fprintf(&diagnostics, "exit=%d\nstdout=%s\nstderr=%s\n", result.ExitCode, result.Stdout, result.Stderr)
+	}
+	t.Fatalf("application did not become reachable through Caddy: %s%s", last, diagnostics.String())
 }
 
 func assertAppLogsFollowStreams(
