@@ -303,6 +303,9 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 	tempName := fmt.Sprintf("caddy-autosave-%d.json", time.Now().UnixNano())
 	tempFile := state.ConfigFile(m.user, tempName)
 	tempFileQuoted := state.ConfigFileQuoted(m.user, tempName)
+	defer func() {
+		_, _ = m.sshClient.Execute(host, fmt.Sprintf("rm -f %s", tempFileQuoted)) // safe: tempFileQuoted comes from state.ConfigFileQuoted
+	}()
 	writeCommand := fmt.Sprintf("umask 077 && mkdir -p %s && chmod 700 %s && cat > %s && chmod 600 %s",
 		state.DirQuoted(m.user), state.DirQuoted(m.user), tempFileQuoted, tempFileQuoted)
 	result, err := m.sshClient.ExecuteWithStdin(host, writeCommand, bytes.NewReader(autosave))
@@ -312,15 +315,11 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 	if result.ExitCode != 0 {
 		return fmt.Errorf("failed to stage normalized Caddy autosave: %s", strings.TrimSpace(result.Stderr))
 	}
-	defer func() {
-		_, _ = m.sshClient.Execute(host, fmt.Sprintf("rm -f %s", tempFileQuoted)) // safe: tempFileQuoted comes from state.ConfigFileQuoted
-	}()
 
 	_, err = m.podman.Run(host, &podman.ContainerConfig{
 		Image:      CaddyImage,
 		Entrypoint: "/bin/sh",
-		Command: []string{"-c",
-			"mkdir -p /config/caddy && cp /azud-autosave.json /config/caddy/autosave.json && chmod 600 /config/caddy/autosave.json"},
+		Command:    []string{"-c", caddyAutosaveInstallCommand()},
 		Volumes: []string{
 			"caddy_config:/config",
 			tempFile + ":/azud-autosave.json:ro",
@@ -334,6 +333,14 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 		return fmt.Errorf("failed to install normalized Caddy autosave: %w", err)
 	}
 	return nil
+}
+
+func caddyAutosaveInstallCommand() string {
+	return "set -eu; mkdir -p /config/caddy; " +
+		"tmp=/config/caddy/autosave.json.azud-tmp; " +
+		"trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; " +
+		"cp /azud-autosave.json \"$tmp\"; chmod 600 \"$tmp\"; " +
+		"mv -f \"$tmp\" /config/caddy/autosave.json; trap - EXIT"
 }
 
 func (m *Manager) containerUsesHostNetwork(host, container string) (bool, error) {
@@ -545,18 +552,28 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 
 	if running {
-		m.log.Host(host, "Proxy already running")
-		// Apply TLS/ACME and logging settings from deploy.yml while
-		// preserving existing routes so that registered services are
-		// not wiped out.
-		if config != nil {
-			if err := m.withPersistedMutation(host, func() error {
-				return m.applyConfigPreservingRoutes(host, config)
-			}); err != nil {
-				return fmt.Errorf("failed to apply proxy config: %w", err)
+		if _, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil); err != nil {
+			// Caddy may be healthy on the data plane but unreachable at Azud's
+			// configured admin endpoint after an out-of-band listener change.
+			// Stop it before reading and normalizing the authoritative autosave.
+			m.log.Host(host, "Recovering proxy admin access from autosaved state...")
+			if stopErr := m.podman.Stop(host, CaddyContainerName, 30); stopErr != nil {
+				return fmt.Errorf("failed to stop proxy for admin recovery: %w", stopErr)
 			}
+		} else {
+			m.log.Host(host, "Proxy already running")
+			// Apply TLS/ACME and logging settings from deploy.yml while
+			// preserving existing routes so that registered services are
+			// not wiped out.
+			if config != nil {
+				if err := m.withPersistedMutation(host, func() error {
+					return m.applyConfigPreservingRoutes(host, config)
+				}); err != nil {
+					return fmt.Errorf("failed to apply proxy config: %w", err)
+				}
+			}
+			return nil
 		}
-		return nil
 	}
 
 	if exists {
@@ -1032,10 +1049,6 @@ func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 		return m.Boot(host, config)
 	}
 
-	autosave, hasAutosave, err := m.normalizedCaddyAutosave(host)
-	if err != nil {
-		return err
-	}
 	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy status: %w", err)
@@ -1044,6 +1057,12 @@ func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 		if err := m.podman.Stop(host, CaddyContainerName, 30); err != nil {
 			return fmt.Errorf("failed to stop proxy for reboot: %w", err)
 		}
+	}
+	// Snapshot only after Caddy has stopped and completed its final autosave,
+	// so no concurrent shutdown write can be lost when admin.listen is repaired.
+	autosave, hasAutosave, err := m.normalizedCaddyAutosave(host)
+	if err != nil {
+		return err
 	}
 	if hasAutosave {
 		if err := m.installCaddyAutosave(host, autosave); err != nil {

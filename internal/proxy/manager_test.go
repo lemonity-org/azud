@@ -551,6 +551,22 @@ func TestCustomTLSValidationPrecedesRebootAndEnsureConfigMutations(t *testing.T)
 	}
 }
 
+func TestCaddyAutosaveInstallUsesAtomicRenameAndCleanupTrap(t *testing.T) {
+	command := caddyAutosaveInstallCommand()
+	for _, required := range []string{
+		"autosave.json.azud-tmp",
+		"trap 'rm -f \"$tmp\"' EXIT HUP INT TERM",
+		"mv -f \"$tmp\" /config/caddy/autosave.json",
+	} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("autosave install command missing %q: %s", required, command)
+		}
+	}
+	if strings.Contains(command, "cp /azud-autosave.json /config/caddy/autosave.json") {
+		t.Fatalf("autosave install still truncates the authoritative file directly: %s", command)
+	}
+}
+
 func TestNormalizeCaddyAutosaveRepairsOnlyAdminListener(t *testing.T) {
 	normalized, err := normalizeCaddyAutosave([]byte(`{
 		"admin":{"listen":"127.0.0.1:2020","enforce_origin":true},
