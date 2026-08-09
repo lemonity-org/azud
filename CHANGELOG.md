@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.2.0 - 2026-08-09
+
 - Added explicit Caddy request-header, HTTP/1 full-duplex, response-flush, and
   stream-close-delay controls, including rolling reconciliation of streaming
   options without replacing active upstreams.
