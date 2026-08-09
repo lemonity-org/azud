@@ -1355,6 +1355,63 @@ func TestValidate_ResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestValidate_ProxyStreamingSettings(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Service: "test",
+			Image:   "test:latest",
+			Servers: map[string]RoleConfig{"web": {Hosts: []string{"localhost"}}},
+			Proxy:   ProxyConfig{Host: "test.example.com"},
+			SSH:     SSHConfig{Port: 22},
+		}
+	}
+
+	valid := base()
+	valid.Proxy.MaxHeaderBytes = 2 * 1024 * 1024
+	valid.Proxy.FlushInterval = "-1s"
+	valid.Proxy.StreamCloseDelay = "5m"
+	if err := Validate(valid); err != nil {
+		t.Fatalf("valid streaming settings rejected: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		configure func(*Config)
+		want      string
+	}{
+		{"negative header limit", func(cfg *Config) { cfg.Proxy.MaxHeaderBytes = -1 }, "max_header_bytes"},
+		{"invalid flush interval", func(cfg *Config) { cfg.Proxy.FlushInterval = "immediate" }, "flush_interval"},
+		{"invalid stream delay", func(cfg *Config) { cfg.Proxy.StreamCloseDelay = "later" }, "stream_close_delay"},
+		{"negative stream delay", func(cfg *Config) { cfg.Proxy.StreamCloseDelay = "-1s" }, "stream_close_delay"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.configure(cfg)
+			if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %s validation error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestValidate_CustomTLSReferencesMustBePaired(t *testing.T) {
+	cfg := &Config{
+		Service: "test",
+		Image:   "test:latest",
+		Servers: map[string]RoleConfig{"web": {Hosts: []string{"localhost"}}},
+		Proxy: ProxyConfig{
+			Host:           "test.example.com",
+			SSLCertificate: "TLS_CERT",
+		},
+		SSH: SSHConfig{Port: 22},
+	}
+
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "configured together") {
+		t.Fatalf("expected paired custom TLS validation error, got %v", err)
+	}
+}
+
 func TestValidate_UpstreamProtocol(t *testing.T) {
 	cfg := &Config{
 		Service: "test",

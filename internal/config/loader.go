@@ -476,8 +476,20 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if dest.Proxy.ResponseTimeout != "" {
 		merged.Proxy.ResponseTimeout = dest.Proxy.ResponseTimeout
 	}
-	if dest.Proxy.ResponseHeaderTimeout != "" {
+	if has("proxy", "response_header_timeout") || destNode == nil && dest.Proxy.ResponseHeaderTimeout != "" {
 		merged.Proxy.ResponseHeaderTimeout = dest.Proxy.ResponseHeaderTimeout
+	}
+	if has("proxy", "max_header_bytes") || destNode == nil && dest.Proxy.MaxHeaderBytes != 0 {
+		merged.Proxy.MaxHeaderBytes = dest.Proxy.MaxHeaderBytes
+	}
+	if has("proxy", "enable_full_duplex") || destNode == nil && dest.Proxy.EnableFullDuplex {
+		merged.Proxy.EnableFullDuplex = dest.Proxy.EnableFullDuplex
+	}
+	if has("proxy", "flush_interval") || destNode == nil && dest.Proxy.FlushInterval != "" {
+		merged.Proxy.FlushInterval = dest.Proxy.FlushInterval
+	}
+	if has("proxy", "stream_close_delay") || destNode == nil && dest.Proxy.StreamCloseDelay != "" {
+		merged.Proxy.StreamCloseDelay = dest.Proxy.StreamCloseDelay
 	}
 	if has("proxy", "forward_headers") || destNode == nil && dest.Proxy.ForwardHeaders {
 		merged.Proxy.ForwardHeaders = dest.Proxy.ForwardHeaders

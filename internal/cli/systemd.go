@@ -357,7 +357,7 @@ func buildProxyQuadletUnit() *quadlet.ContainerUnit {
 		Volume:         []string{"caddy_data:/data", "caddy_config:/config", stateDir + ":/azud-state:ro,Z"},
 		Network:        network,
 		Label:          map[string]string{"azud.managed": "true", "azud.type": "proxy"},
-		Exec:           fmt.Sprintf("/bin/sh -c 'if [ -s /azud-state/%s ]; then exec caddy run --config /azud-state/%s --watch; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --watch; fi'", proxy.CaddyConfigFileName, proxy.CaddyConfigFileName),
+		Exec:           fmt.Sprintf("/bin/sh -c 'if [ -s /azud-state/%s ]; then exec caddy run --config /azud-state/%s --resume; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --resume; fi'", proxy.CaddyConfigFileName, proxy.CaddyConfigFileName),
 		Restart:        "always",
 		TimeoutStopSec: 30,
 		WantedBy:       "default.target",

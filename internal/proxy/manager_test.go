@@ -173,15 +173,78 @@ func TestReconcileRouteStatusOnlyOwnsStableIDOrLegacyHost(t *testing.T) {
 	}
 }
 
+func TestReconcileRawRouteWithoutDesiredUpstreamsRemainsStaleForDeletion(t *testing.T) {
+	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{Name: "retired", Host: "retired.example.com"})
+	data, err := json.Marshal([]*Route{desired})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, owned, _ := reconcileRawRouteStatus(rawRoutes, routes, desired, desired.Match[0].Host[0], false)
+	if status != ReconcileStale || owned != 0 {
+		t.Fatalf("zero-upstream owned route = (%s, %d), want (stale, 0)", status, owned)
+	}
+}
+
 func TestRouteAppendPayloadCreatesMissingArrayAndAppendsToExistingArray(t *testing.T) {
+	var rawRoutes []json.RawMessage
+	var routes []*Route
+	var err error
+	rawRoutes, routes, err = parseRouteIdentities([]byte("null"))
+	if err != nil || rawRoutes != nil || routes != nil {
+		t.Fatalf("null routes lost missing-array state: raw=%#v routes=%#v err=%v", rawRoutes, routes, err)
+	}
+
 	route := &Route{ID: "azud-route-shop"}
-	missing, ok := routeAppendPayload(nil, route).([]*Route)
+	missing, ok := routeAppendPayload(routes, route).([]*Route)
 	if !ok || len(missing) != 1 || missing[0] != route {
 		t.Fatalf("missing routes payload = %#v", missing)
 	}
 	existing := make([]*Route, 0)
 	if got := routeAppendPayload(existing, route); got != route {
 		t.Fatalf("existing routes payload = %#v, want route", got)
+	}
+}
+
+func TestStringFieldMutationUsesPresenceForCaddyVerb(t *testing.T) {
+	tests := []struct {
+		name    string
+		actual  string
+		desired string
+		present bool
+		method  string
+		mutate  bool
+	}{
+		{name: "present null is replaced", desired: "-1s", present: true, method: "PATCH", mutate: true},
+		{name: "absent field is created", desired: "-1s", method: "PUT", mutate: true},
+		{name: "present field is removed", present: true, method: "DELETE", mutate: true},
+		{name: "equal present field is unchanged", actual: "-1s", desired: "-1s", present: true},
+		{name: "equal zero value but present null is removed", present: true, method: "DELETE", mutate: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			method, _, mutate := planStringFieldMutation(tt.actual, tt.desired, tt.present)
+			if method != tt.method || mutate != tt.mutate {
+				t.Fatalf("plan = (%q, %t), want (%q, %t)", method, mutate, tt.method, tt.mutate)
+			}
+		})
+	}
+}
+
+func TestCommandUsesResumeForDirectAndQuadletCommands(t *testing.T) {
+	for _, command := range [][]string{
+		{"caddy", "run", "--resume"},
+		{"/bin/sh", "-c", "if [ -s /azud-state/caddy-config.json ]; then exec caddy run --config /azud-state/caddy-config.json --resume; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --resume; fi"},
+	} {
+		if !commandUsesResume(command) {
+			t.Fatalf("resume was not detected in %#v", command)
+		}
+	}
+	if commandUsesResume([]string{"caddy", "run", "--watch"}) {
+		t.Fatal("watch command was mistaken for resume")
 	}
 }
 
@@ -400,6 +463,282 @@ func TestReverseProxyHeadersUseStockCaddySchema(t *testing.T) {
 	}
 	if !maps.EqualFunc(got.Request.Set, wantSet, slices.Equal) {
 		t.Fatalf("headers.request.set = %#v, want %#v", got.Request.Set, wantSet)
+	}
+}
+
+func TestBuildServiceRouteIncludesStreamingOptions(t *testing.T) {
+	route := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name:             "hooks",
+		Host:             "hook.events",
+		Upstreams:        []string{"hooks:4000"},
+		FlushInterval:    "-1s",
+		StreamCloseDelay: "5m",
+	})
+	handler, _, ok := reverseProxyHandler(route)
+	if !ok {
+		t.Fatal("generated route is missing reverse_proxy handler")
+	}
+	if handler.FlushInterval != "-1s" || handler.StreamCloseDelay != "5m" {
+		t.Fatalf("streaming options were not propagated: %#v", handler)
+	}
+}
+
+func TestApplyProxySettingsIncludesServerTransportContract(t *testing.T) {
+	manager := &Manager{}
+	cfg := manager.buildBaseConfig()
+	manager.applyProxySettingsFrom(cfg, &ProxyConfig{
+		MaxHeaderBytes:   2 * 1024 * 1024,
+		EnableFullDuplex: true,
+	})
+
+	server := cfg.Apps.HTTP.Servers["srv0"]
+	if server.MaxHeaderBytes != 2*1024*1024 || !server.EnableFullDuplex {
+		t.Fatalf("server transport contract was not applied: %#v", server)
+	}
+
+	manager.applyProxySettingsFrom(cfg, &ProxyConfig{})
+	if server.MaxHeaderBytes != 0 || server.EnableFullDuplex {
+		t.Fatalf("server transport contract was not cleared: %#v", server)
+	}
+}
+
+func TestCustomTLSDisablesAutomaticCertificateIssuance(t *testing.T) {
+	manager := &Manager{}
+	cfg := manager.buildBaseConfig()
+	manager.applyProxySettingsFrom(cfg, &ProxyConfig{
+		AutoHTTPS:         true,
+		SSLRedirect:       true,
+		SSLCertificate:    "certificate-pem",
+		SSLPrivateKey:     "private-key-pem",
+		CustomCertificate: true,
+	})
+	server := cfg.Apps.HTTP.Servers["srv0"]
+	if server.AutoHTTPS == nil || !server.AutoHTTPS.DisableCertificates {
+		t.Fatalf("custom TLS permits automatic issuance: %#v", server.AutoHTTPS)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"disable_certificates":true`) {
+		t.Fatalf("custom TLS JSON does not fail closed: %s", encoded)
+	}
+	if strings.Contains(string(encoded), `"issuers"`) {
+		t.Fatalf("custom TLS JSON contains misleading issuer policy: %s", encoded)
+	}
+}
+
+func TestValidateProxyConfigFailsClosedForCustomTLS(t *testing.T) {
+	for _, cfg := range []*ProxyConfig{
+		{CustomCertificate: true},
+		{CustomCertificate: true, SSLCertificate: "not a certificate", SSLPrivateKey: "not a key"},
+	} {
+		if err := validateProxyConfig(cfg); err == nil {
+			t.Fatalf("invalid custom TLS config was accepted: %#v", cfg)
+		}
+	}
+}
+
+func TestCustomTLSValidationPrecedesRebootAndEnsureConfigMutations(t *testing.T) {
+	invalid := &ProxyConfig{CustomCertificate: true}
+	manager := &Manager{proxyConfig: invalid}
+
+	if err := manager.Reboot("host", invalid); err == nil {
+		t.Fatal("reboot accepted missing custom TLS material")
+	}
+	if err := manager.EnsureConfig("host"); err == nil {
+		t.Fatal("EnsureConfig accepted missing custom TLS material")
+	}
+}
+
+func TestCaddyAutosaveInstallUsesAtomicRenameAndCleanupTrap(t *testing.T) {
+	command := caddyAutosaveInstallCommand()
+	for _, required := range []string{
+		"autosave.json.azud-tmp",
+		"trap 'rm -f \"$tmp\"' EXIT HUP INT TERM",
+		"cat > \"$tmp\"",
+		"mv -f \"$tmp\" /config/caddy/autosave.json",
+	} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("autosave install command missing %q: %s", required, command)
+		}
+	}
+	if strings.Contains(command, "cp /azud-autosave.json /config/caddy/autosave.json") {
+		t.Fatalf("autosave install still truncates the authoritative file directly: %s", command)
+	}
+}
+
+func TestNormalizeCaddyAutosaveRepairsOnlyAdminListener(t *testing.T) {
+	normalized, err := normalizeCaddyAutosave([]byte(`{
+		"admin":{"listen":"127.0.0.1:2020","enforce_origin":true},
+		"unknown_counter":9007199254740993,
+		"apps":{"custom":{"unmodeled":true}}
+	}`), "0.0.0.0:2019")
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := decodeJSONObject(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := object["admin"].(map[string]interface{})
+	if admin["listen"] != "0.0.0.0:2019" || admin["enforce_origin"] != true {
+		t.Fatalf("admin state was not selectively normalized: %#v", admin)
+	}
+	if object["unknown_counter"] != json.Number("9007199254740993") {
+		t.Fatalf("unmodeled integer changed: %#v", object)
+	}
+	if object["apps"].(map[string]interface{})["custom"].(map[string]interface{})["unmodeled"] != true {
+		t.Fatalf("unmodeled app state changed: %#v", object)
+	}
+}
+
+func TestRawConfigDecodePreservesLargeUnmodeledIntegers(t *testing.T) {
+	object, err := decodeJSONObject([]byte(`{"unknown_counter":9007199254740993}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"unknown_counter":9007199254740993}` {
+		t.Fatalf("large unmodeled integer changed: %s", encoded)
+	}
+}
+
+func TestRouteIdentityParsingIgnoresUnmodeledSiblingHandlers(t *testing.T) {
+	data := []byte(`[
+		{"handle":[{"handler":"static_response","status_code":"{http.error.status_code}"}]},
+		{"@id":"azud-route-hooks","match":[{"host":["hook.events"]}],"handle":[
+			{"handler":"encode","encodings":{"gzip":{}}},
+			{"@id":"azud-proxy-hooks","handler":"reverse_proxy","upstreams":[{"dial":"hooks:4000"}]}
+		]}
+	]`)
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 2 || routes[1].ID != "azud-route-hooks" {
+		t.Fatalf("route identities = %#v", routes)
+	}
+	handler, index, err := parseReverseProxyIdentity(rawRoutes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 1 || handler.ID != "azud-proxy-hooks" || handler.Upstreams[0].Dial != "hooks:4000" {
+		t.Fatalf("reverse proxy identity = %#v at %d", handler, index)
+	}
+}
+
+func TestMergeOwnedRouteRepairsManagedStateAndPreservesArbitraryJSON(t *testing.T) {
+	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name: "hooks", Host: "hook.events", Upstreams: []string{"hooks:4000"},
+		HealthPath: "/up", MaxRequestBody: 2048, FlushInterval: "-1", StreamCloseDelay: "5m",
+	})
+	raw := json.RawMessage(`{
+		"match":[{"host":["old.example"]}],"terminal":false,"manual_route_field":9007199254740993,
+		"handle":[
+			{"handler":"encode","encodings":{"gzip":{}}},
+			{"handler":"reverse_proxy","manual_handler_field":{"keep":true},
+			 "upstreams":[{"dial":"hooks:4000","max_requests":17}],
+			 "health_checks":{"active":{"path":"/old","manual_health_field":"keep"}}}
+		]
+	}`)
+	merged, err := mergeOwnedRoute(raw, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged["@id"] != desired.ID || merged["terminal"] != true {
+		t.Fatalf("route ownership/state was not repaired: %#v", merged)
+	}
+	if merged["manual_route_field"] != json.Number("9007199254740993") {
+		t.Fatalf("unmodeled large integer changed: %#v", merged["manual_route_field"])
+	}
+	handlers, err := jsonObjectSlice(merged["handle"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findJSONHandler(handlers, "encode") == nil || findJSONHandler(handlers, "request_body") == nil {
+		t.Fatalf("sibling or desired body handler missing: %#v", handlers)
+	}
+	reverse := findJSONHandler(handlers, "reverse_proxy")
+	if reverse["manual_handler_field"] == nil {
+		t.Fatalf("unmodeled reverse_proxy field was removed: %#v", reverse)
+	}
+	upstreams, err := jsonObjectSlice(reverse["upstreams"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upstreams[0]["max_requests"] != json.Number("17") {
+		t.Fatalf("unmodeled upstream field was removed: %#v", upstreams)
+	}
+	health := reverse["health_checks"].(map[string]interface{})["active"].(map[string]interface{})
+	if health["path"] != "/up" || health["manual_health_field"] != "keep" {
+		t.Fatalf("health check was not repaired/preserved: %#v", health)
+	}
+
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawRoutes, routes, err := parseRouteIdentities([]byte("[" + string(encoded) + "]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, _, _ := reconcileRawRouteStatus(rawRoutes, routes, desired, "hook.events", true)
+	if status != ReconcileInSync {
+		t.Fatalf("merged route status = %s, want in-sync", status)
+	}
+}
+
+func TestCopyManagedProxySettingsPreservesUnknownRoutesAndServerFields(t *testing.T) {
+	current := map[string]interface{}{
+		"admin": map[string]interface{}{"listen": "0.0.0.0:2019", "unknown": "keep"},
+		"apps": map[string]interface{}{
+			"http": map[string]interface{}{
+				"servers": map[string]interface{}{
+					"srv0": map[string]interface{}{
+						"listen":    []interface{}{":80"},
+						"protocols": []interface{}{"h1", "h2"},
+						"routes": []interface{}{map[string]interface{}{
+							"handle": []interface{}{map[string]interface{}{
+								"handler": "encode", "encodings": map[string]interface{}{"gzip": map[string]interface{}{}},
+							}},
+						}},
+					},
+				},
+			},
+		},
+	}
+	desired := map[string]interface{}{
+		"apps": map[string]interface{}{
+			"http": map[string]interface{}{
+				"servers": map[string]interface{}{
+					"srv0": map[string]interface{}{
+						"listen":             []interface{}{":443"},
+						"max_header_bytes":   float64(2 * 1024 * 1024),
+						"enable_full_duplex": true,
+					},
+				},
+			},
+			"tls": map[string]interface{}{"automation": map[string]interface{}{}},
+		},
+	}
+
+	beforeRoutes := current["apps"].(map[string]interface{})["http"].(map[string]interface{})["servers"].(map[string]interface{})["srv0"].(map[string]interface{})["routes"]
+	if err := copyManagedProxySettings(current, desired); err != nil {
+		t.Fatal(err)
+	}
+	server := current["apps"].(map[string]interface{})["http"].(map[string]interface{})["servers"].(map[string]interface{})["srv0"].(map[string]interface{})
+	if !reflect.DeepEqual(server["routes"], beforeRoutes) || !reflect.DeepEqual(server["protocols"], []interface{}{"h1", "h2"}) {
+		t.Fatalf("unmanaged server state changed: %#v", server)
+	}
+	if server["max_header_bytes"] != float64(2*1024*1024) || server["enable_full_duplex"] != true {
+		t.Fatalf("managed server state was not applied: %#v", server)
+	}
+	if current["admin"].(map[string]interface{})["unknown"] != "keep" {
+		t.Fatalf("unmanaged top-level state changed: %#v", current)
 	}
 }
 

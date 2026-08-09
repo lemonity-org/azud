@@ -33,20 +33,36 @@ func NewContainerManager(client *Client) *ContainerManager {
 }
 
 func (m *ContainerManager) Run(host string, config *ContainerConfig) (string, error) {
+	return m.run(host, config, nil)
+}
+
+// RunWithStdin starts a foreground container with stdin attached without
+// exposing the streamed content in the remote command line.
+func (m *ContainerManager) RunWithStdin(host string, config *ContainerConfig, stdin io.Reader) (string, error) {
+	copy := *config
+	copy.Stdin = true
+	return m.run(host, &copy, stdin)
+}
+
+func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Reader) (string, error) {
 	if err := ValidateOptions(config.Options); err != nil {
 		return "", err
 	}
 	cmd := config.BuildRunCommand()
 	cmd = m.client.RewriteCommand(cmd)
-	result, err := m.client.ssh.Execute(host, cmd)
+	var result *ssh.Result
+	var err error
+	if stdin == nil {
+		result, err = m.client.ssh.Execute(host, cmd)
+	} else {
+		result, err = m.client.ssh.ExecuteWithStdin(host, cmd, stdin)
+	}
 	if err != nil {
 		return "", err
 	}
-
 	if result.ExitCode != 0 {
 		return "", fmt.Errorf("failed to run container: %s", result.Stderr)
 	}
-
 	return strings.TrimSpace(result.Stdout), nil
 }
 

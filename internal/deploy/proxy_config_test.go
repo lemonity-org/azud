@@ -19,10 +19,14 @@ func TestNewProxyConfigFromCfgIncludesCustomCertificates(t *testing.T) {
 
 	cfg := &config.Config{
 		Proxy: config.ProxyConfig{
-			Host:           "app.example.com",
-			SSL:            true,
-			SSLCertificate: "CUSTOM_CERT",
-			SSLPrivateKey:  "CUSTOM_KEY",
+			Host:             "app.example.com",
+			SSL:              true,
+			SSLCertificate:   "CUSTOM_CERT",
+			SSLPrivateKey:    "CUSTOM_KEY",
+			MaxHeaderBytes:   2 * 1024 * 1024,
+			EnableFullDuplex: true,
+			FlushInterval:    "-1s",
+			StreamCloseDelay: "5m",
 		},
 	}
 
@@ -35,5 +39,13 @@ func TestNewProxyConfigFromCfgIncludesCustomCertificates(t *testing.T) {
 	}
 	if len(got.Hosts) != 1 || got.Hosts[0] != "app.example.com" {
 		t.Fatalf("Hosts = %v, want [app.example.com]", got.Hosts)
+	}
+	if !got.CustomCertificate || got.MaxHeaderBytes != 2*1024*1024 || !got.EnableFullDuplex {
+		t.Fatalf("proxy-wide settings were not propagated: %#v", got)
+	}
+
+	route := BuildProxyServiceConfig(cfg, []string{"app:4000"}, nil)
+	if route.FlushInterval != "-1s" || route.StreamCloseDelay != "5m" {
+		t.Fatalf("route streaming settings were not propagated: %#v", route)
 	}
 }

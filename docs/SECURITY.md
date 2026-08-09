@@ -54,6 +54,8 @@ Practical security recommendations for Azud deployments.
   rejects cross-scope reuse. `azud env push` excludes those references from the
   remote runtime file and delivers TLS material directly to Caddy over SSH
   stdin. Create a distinct application credential when one is also required.
+  Certificate and key references must be paired, present, non-empty, parseable,
+  and matching; proxy startup fails rather than falling back when they are not.
 
 ## Rootless Containers
 
