@@ -338,6 +338,11 @@ func TestValidate_ProxyHosts(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "valid leftmost wildcard hosts",
+			hosts:   []string{"example.com", "*.example.com", "*.hooks.example.com"},
+			wantErr: false,
+		},
+		{
 			name:      "invalid proxy host",
 			host:      "bad@host",
 			wantErr:   true,
@@ -348,6 +353,36 @@ func TestValidate_ProxyHosts(t *testing.T) {
 			hosts:     []string{"example.com", "bad@host"},
 			wantErr:   true,
 			errTarget: "proxy.hosts[1]",
+		},
+		{
+			name:      "invalid non-leftmost wildcard",
+			hosts:     []string{"api.*.example.com"},
+			wantErr:   true,
+			errTarget: "proxy.hosts[0]",
+		},
+		{
+			name:      "invalid repeated wildcard",
+			hosts:     []string{"*.*.example.com"},
+			wantErr:   true,
+			errTarget: "proxy.hosts[0]",
+		},
+		{
+			name:      "invalid wildcard IP",
+			hosts:     []string{"*.127.0.0.1"},
+			wantErr:   true,
+			errTarget: "proxy.hosts[0]",
+		},
+		{
+			name:      "invalid top-level wildcard",
+			hosts:     []string{"*.com"},
+			wantErr:   true,
+			errTarget: "proxy.hosts[0]",
+		},
+		{
+			name:      "invalid overlong wildcard host",
+			hosts:     []string{"*." + strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 60)},
+			wantErr:   true,
+			errTarget: "proxy.hosts[0]",
 		},
 	}
 

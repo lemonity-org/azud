@@ -252,14 +252,14 @@ func Validate(cfg *Config) error {
 			Message: "proxy.host or proxy.hosts is required",
 		})
 	}
-	if cfg.Proxy.Host != "" && !isValidHost(cfg.Proxy.Host) {
+	if cfg.Proxy.Host != "" && !isValidProxyHost(cfg.Proxy.Host) {
 		errs = append(errs, ValidationError{
 			Field:   "proxy.host",
 			Message: fmt.Sprintf("invalid host address: %s", cfg.Proxy.Host),
 		})
 	}
 	for i, host := range cfg.Proxy.Hosts {
-		if !isValidHost(host) {
+		if !isValidProxyHost(host) {
 			errs = append(errs, ValidationError{
 				Field:   fmt.Sprintf("proxy.hosts[%d]", i),
 				Message: fmt.Sprintf("invalid host address: %s", host),
@@ -862,7 +862,25 @@ func isValidRemoteSecretsPath(path string) bool {
 	return true
 }
 
-// isValidHost checks if a string is a valid hostname or IP address
+// isValidProxyHost accepts exact hosts and one leftmost wildcard DNS label.
+// Wildcards are valid for Caddy routing but never for SSH/server addresses.
+func isValidProxyHost(host string) bool {
+	if !strings.HasPrefix(host, "*.") {
+		return isValidHost(host)
+	}
+	if len(host) > 253 {
+		return false
+	}
+
+	suffix := strings.TrimPrefix(host, "*.")
+	if !strings.Contains(suffix, ".") || strings.Contains(suffix, "*") || net.ParseIP(suffix) != nil {
+		return false
+	}
+
+	return isValidHost(suffix)
+}
+
+// isValidHost checks if a string is a valid exact hostname or IP address.
 func isValidHost(host string) bool {
 	// Check if it's an IP address
 	if ip := net.ParseIP(host); ip != nil {

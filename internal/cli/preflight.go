@@ -73,13 +73,17 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// DNS check for proxy host
+	// DNS check for proxy host. Resolver APIs do not accept a literal `*`, so
+	// exercise wildcard records through a deterministic hostname beneath them.
 	proxyHosts := cfg.Proxy.AllHosts()
 	var blockers []string
 	for _, host := range proxyHosts {
-		if _, err := net.LookupHost(host); err != nil {
-			log.Error("DNS lookup failed for %s: %v", host, err)
+		lookupHost := proxyDNSLookupHost(host)
+		if _, err := net.LookupHost(lookupHost); err != nil {
+			log.Error("DNS lookup failed for %s via %s: %v", host, lookupHost, err)
 			blockers = append(blockers, fmt.Sprintf("dns/%s", host))
+		} else if lookupHost != host {
+			log.Success("DNS OK for %s via %s", host, lookupHost)
 		} else {
 			log.Success("DNS OK for %s", host)
 		}
@@ -132,6 +136,20 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("preflight failed: %s", strings.Join(blockers, ", "))
 	}
 	return nil
+}
+
+func proxyDNSLookupHost(host string) string {
+	if !strings.HasPrefix(host, "*.") {
+		return host
+	}
+
+	suffix := strings.TrimPrefix(host, "*.")
+	label := "azudwildcardpreflight"
+	maxLabelLength := 253 - len(suffix) - 1
+	if len(label) > maxLabelLength {
+		label = label[:maxLabelLength]
+	}
+	return label + "." + suffix
 }
 
 func validateLocalSecretRefs() error {
