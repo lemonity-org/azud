@@ -7,9 +7,11 @@ import (
 )
 
 func TestNewProxyConfigFromCfgIncludesCustomCertificates(t *testing.T) {
+	certificate := "-----BEGIN CERTIFICATE-----\ncert-pem\n-----END CERTIFICATE-----\n"
+	privateKey := "-----BEGIN PRIVATE KEY-----\nkey-pem\n-----END PRIVATE KEY-----\n"
 	config.SetLoadedSecrets(map[string]string{
-		"CUSTOM_CERT": "cert-pem",
-		"CUSTOM_KEY":  "key-pem",
+		"CUSTOM_CERT": certificate,
+		"CUSTOM_KEY":  privateKey,
 	})
 	t.Cleanup(func() {
 		config.SetLoadedSecrets(nil)
@@ -25,11 +27,11 @@ func TestNewProxyConfigFromCfgIncludesCustomCertificates(t *testing.T) {
 	}
 
 	got := newProxyConfigFromCfg(cfg)
-	if got.SSLCertificate != "cert-pem" {
-		t.Fatalf("SSLCertificate = %q, want cert-pem", got.SSLCertificate)
+	if got.SSLCertificate != certificate {
+		t.Fatalf("SSLCertificate = %q, want %q", got.SSLCertificate, certificate)
 	}
-	if got.SSLPrivateKey != "key-pem" {
-		t.Fatalf("SSLPrivateKey = %q, want key-pem", got.SSLPrivateKey)
+	if got.SSLPrivateKey != privateKey {
+		t.Fatalf("SSLPrivateKey = %q, want %q", got.SSLPrivateKey, privateKey)
 	}
 	if len(got.Hosts) != 1 || got.Hosts[0] != "app.example.com" {
 		t.Fatalf("Hosts = %v, want [app.example.com]", got.Hosts)

@@ -11,6 +11,9 @@ release notes for the corresponding signed tag.
 - Added safe leftmost wildcard proxy hosts, wildcard-aware DNS preflight, and
   Caddy route ownership checks that reject wildcard/exact host overlap across
   services.
+- Kept registry and custom TLS credentials out of remote application env files,
+  rejected cross-scope secret reuse, and delivered multiline custom certificates
+  directly to Caddy.
 - Fixed rolling deployments to reconcile Caddy host aliases added after the
   initial deployment without replacing existing upstreams, allowing Automatic
   HTTPS to provision certificates for new domains while preserving scaled and

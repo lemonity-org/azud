@@ -88,6 +88,82 @@ func TestValidateRemoteSecretsPath(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInfrastructureSecretReuse(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Config)
+		errTarget string
+	}{
+		{
+			name: "registry password",
+			configure: func(cfg *Config) {
+				cfg.Registry.Password = []string{"SHARED_SECRET"}
+			},
+			errTarget: "registry.password[0]",
+		},
+		{
+			name: "proxy certificate",
+			configure: func(cfg *Config) {
+				cfg.Proxy.SSLCertificate = "SHARED_SECRET"
+			},
+			errTarget: "proxy.ssl_certificate",
+		},
+		{
+			name: "proxy private key",
+			configure: func(cfg *Config) {
+				cfg.Proxy.SSLPrivateKey = "SHARED_SECRET"
+			},
+			errTarget: "proxy.ssl_private_key",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{
+				Service: "test",
+				Image:   "test:latest",
+				Servers: map[string]RoleConfig{
+					"web": {Hosts: []string{"localhost"}},
+				},
+				Proxy: ProxyConfig{Host: "test.example.com"},
+				Env:   EnvConfig{Secret: []string{"SHARED_SECRET"}},
+				SSH:   SSHConfig{Port: 22},
+			}
+			test.configure(cfg)
+
+			err := Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), test.errTarget) {
+				t.Fatalf("expected %s validation error, got %v", test.errTarget, err)
+			}
+			if !strings.Contains(err.Error(), "must not also appear in env.secret") {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAllowsDistinctInfrastructureSecrets(t *testing.T) {
+	cfg := &Config{
+		Service: "test",
+		Image:   "test:latest",
+		Servers: map[string]RoleConfig{
+			"web": {Hosts: []string{"localhost"}},
+		},
+		Registry: RegistryConfig{Password: []string{"REGISTRY_TOKEN"}},
+		Proxy: ProxyConfig{
+			Host:           "test.example.com",
+			SSLCertificate: "SSL_CERTIFICATE_PEM",
+			SSLPrivateKey:  "SSL_PRIVATE_KEY_PEM",
+		},
+		Env: EnvConfig{Secret: []string{"DATABASE_URL"}},
+		SSH: SSHConfig{Port: 22},
+	}
+
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("distinct infrastructure secrets were rejected: %v", err)
+	}
+}
+
 func TestSafeExpandEnvPreservesRemoteHome(t *testing.T) {
 	t.Setenv("HOME", "/local/home")
 	t.Setenv("AZUD_TEST_VALUE", "expanded")

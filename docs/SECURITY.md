@@ -50,6 +50,10 @@ Practical security recommendations for Azud deployments.
 - Keep `.azud/secrets` out of git
 - Store secrets in your CI secret store and reconstruct at runtime
 - Prefer environment variables or secret managers in production
+- Keep registry and custom TLS secret references out of `env.secret`; Azud
+  rejects cross-scope reuse. `azud env push` excludes those references from the
+  remote runtime file and delivers TLS material directly to Caddy over SSH
+  stdin. Create a distinct application credential when one is also required.
 
 ## Rootless Containers
 

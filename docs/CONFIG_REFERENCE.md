@@ -286,6 +286,15 @@ secrets_command: ./bin/print-secrets
 secrets_remote_path: "~/.azud/secrets"
 ```
 
+`azud env push` excludes `registry.password`, `proxy.ssl_certificate`, and
+`proxy.ssl_private_key` references from the remote runtime env file. Azud uses
+those values locally for registry login or sends custom TLS material directly
+to Caddy as JSON over SSH stdin. This keeps infrastructure credentials out of
+application containers and safely preserves multiline PEM values. Infrastructure
+secret references must use distinct names and cannot also appear under
+`env.secret`; create a separate application credential instead. Unreferenced
+provider values retain their existing runtime-delivery behavior.
+
 ## Volumes
 
 ```yaml

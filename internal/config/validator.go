@@ -366,6 +366,37 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	// Infrastructure credentials are consumed locally by Azud and must never
+	// be copied into the application runtime env file under the same name.
+	applicationSecretNames := make(map[string]struct{}, len(cfg.Env.Secret))
+	for _, key := range cfg.Env.Secret {
+		applicationSecretNames[key] = struct{}{}
+	}
+	infrastructureSecretRefs := []struct {
+		field string
+		key   string
+	}{
+		{field: "proxy.ssl_certificate", key: cfg.Proxy.SSLCertificate},
+		{field: "proxy.ssl_private_key", key: cfg.Proxy.SSLPrivateKey},
+	}
+	for i, key := range cfg.Registry.Password {
+		infrastructureSecretRefs = append(infrastructureSecretRefs, struct {
+			field string
+			key   string
+		}{field: fmt.Sprintf("registry.password[%d]", i), key: key})
+	}
+	for _, ref := range infrastructureSecretRefs {
+		if ref.key == "" {
+			continue
+		}
+		if _, shared := applicationSecretNames[ref.key]; shared {
+			errs = append(errs, ValidationError{
+				Field:   ref.field,
+				Message: fmt.Sprintf("infrastructure secret %s must not also appear in env.secret", ref.key),
+			})
+		}
+	}
+
 	// Validate logging header names
 	for i, header := range cfg.Proxy.Logging.RedactRequestHeaders {
 		if !isValidHeaderName(header) {

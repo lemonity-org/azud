@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,8 +30,9 @@ var envPushCmd = &cobra.Command{
 	Short: "Push secrets to servers",
 	Long: `Push secrets from local .azud/secrets file to remote servers.
 
-Secrets are stored in $HOME/.azud/secrets on the server and loaded
-when containers are started.
+Runtime secrets are stored in $HOME/.azud/secrets on the server and loaded
+when containers are started. Registry and proxy TLS credentials stay local to
+Azud and must use distinct names from application env.secret entries.
 
 Example:
   azud env push           # Push to all servers
@@ -139,16 +141,17 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
-	// Load secrets based on provider
-	secrets, err := loadSecretsForPush()
+	// Load secrets based on provider, then remove credentials that are consumed
+	// locally by Azud infrastructure rather than application containers.
+	loadedSecrets, err := loadSecretsForPush()
 	if err != nil {
 		return fmt.Errorf("failed to load secrets: %w", err)
 	}
-
-	if len(secrets) == 0 {
+	if len(loadedSecrets) == 0 {
 		log.Info("No secrets to push")
 		return nil
 	}
+	secrets := remoteRuntimeSecrets(cfg, loadedSecrets)
 
 	// Get target hosts
 	hosts := cfg.GetAllSSHHosts()
@@ -529,6 +532,33 @@ func getSecretsFilePath() string {
 func isFileSecretsProvider() bool {
 	provider := strings.ToLower(strings.TrimSpace(cfg.SecretsProvider))
 	return provider == "" || provider == "file"
+}
+
+func remoteRuntimeSecrets(cfg *config.Config, loaded map[string]string) map[string]string {
+	if cfg == nil {
+		return maps.Clone(loaded)
+	}
+
+	infrastructureSecrets := make(map[string]struct{}, len(cfg.Registry.Password)+2)
+	for _, key := range cfg.Registry.Password {
+		if key != "" {
+			infrastructureSecrets[key] = struct{}{}
+		}
+	}
+	for _, key := range []string{cfg.Proxy.SSLCertificate, cfg.Proxy.SSLPrivateKey} {
+		if key != "" {
+			infrastructureSecrets[key] = struct{}{}
+		}
+	}
+
+	filtered := make(map[string]string, len(loaded))
+	for key, value := range loaded {
+		if _, infrastructureOnly := infrastructureSecrets[key]; infrastructureOnly {
+			continue
+		}
+		filtered[key] = value
+	}
+	return filtered
 }
 
 func loadSecretsForPush() (map[string]string, error) {
