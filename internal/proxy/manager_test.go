@@ -551,6 +551,31 @@ func TestCustomTLSValidationPrecedesRebootAndEnsureConfigMutations(t *testing.T)
 	}
 }
 
+func TestNormalizeCaddyAutosaveRepairsOnlyAdminListener(t *testing.T) {
+	normalized, err := normalizeCaddyAutosave([]byte(`{
+		"admin":{"listen":"127.0.0.1:2020","enforce_origin":true},
+		"unknown_counter":9007199254740993,
+		"apps":{"custom":{"unmodeled":true}}
+	}`), "0.0.0.0:2019")
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := decodeJSONObject(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := object["admin"].(map[string]interface{})
+	if admin["listen"] != "0.0.0.0:2019" || admin["enforce_origin"] != true {
+		t.Fatalf("admin state was not selectively normalized: %#v", admin)
+	}
+	if object["unknown_counter"] != json.Number("9007199254740993") {
+		t.Fatalf("unmodeled integer changed: %#v", object)
+	}
+	if object["apps"].(map[string]interface{})["custom"].(map[string]interface{})["unmodeled"] != true {
+		t.Fatalf("unmodeled app state changed: %#v", object)
+	}
+}
+
 func TestRawConfigDecodePreservesLargeUnmodeledIntegers(t *testing.T) {
 	object, err := decodeJSONObject([]byte(`{"unknown_counter":9007199254740993}`))
 	if err != nil {
