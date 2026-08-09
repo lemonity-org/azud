@@ -319,6 +319,7 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 	_, err = m.podman.Run(host, &podman.ContainerConfig{
 		Image:      CaddyImage,
 		Entrypoint: "/bin/sh",
+		User:       "0",
 		Command:    []string{"-c", caddyAutosaveInstallCommand()},
 		Volumes: []string{
 			"caddy_config:/config",
