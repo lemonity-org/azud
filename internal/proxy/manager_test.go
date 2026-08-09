@@ -70,6 +70,23 @@ func TestBuildServiceRouteAssignsStableAzudIDs(t *testing.T) {
 	}
 }
 
+func TestBuildServiceRoutePreservesWildcardHosts(t *testing.T) {
+	route := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name:      "hooks",
+		Host:      "hooklistener.com",
+		Hosts:     []string{"*.hooklistener.com", "*.hook.events"},
+		Upstreams: []string{"hooks:4000"},
+	})
+
+	if len(route.Match) != 1 {
+		t.Fatalf("route matchers = %d, want 1", len(route.Match))
+	}
+	want := []string{"hooklistener.com", "*.hooklistener.com", "*.hook.events"}
+	if !slices.Equal(route.Match[0].Host, want) {
+		t.Fatalf("route hosts = %v, want %v", route.Match[0].Host, want)
+	}
+}
+
 func TestBuildServiceRouteRetriesWhileNoUpstreamIsAvailable(t *testing.T) {
 	// A container swap can leave the route without an available upstream for a
 	// moment, and passive health checking can extend that to a full
@@ -185,6 +202,50 @@ func TestRoutesEquivalentIgnoresUpstreamOrderAndCompletedCanaryPolicy(t *testing
 	}
 }
 
+func TestProxyHostsOverlapMatchesCaddySemantics(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+		want   bool
+	}{
+		{name: "same exact host", first: "api.example.com", second: "API.EXAMPLE.COM", want: true},
+		{name: "wildcard and direct child", first: "*.example.com", second: "api.example.com", want: true},
+		{name: "direct child and wildcard", first: "api.example.com", second: "*.example.com", want: true},
+		{name: "same wildcard", first: "*.example.com", second: "*.EXAMPLE.COM", want: true},
+		{name: "wildcard excludes apex", first: "*.example.com", second: "example.com", want: false},
+		{name: "wildcard covers one label only", first: "*.example.com", second: "v1.api.example.com", want: false},
+		{name: "nested wildcards do not overlap", first: "*.example.com", second: "*.api.example.com", want: false},
+		{name: "different wildcard suffix", first: "*.example.com", second: "*.example.net", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := proxyHostsOverlap(test.first, test.second); got != test.want {
+				t.Fatalf("overlap(%q, %q) = %t, want %t", test.first, test.second, got, test.want)
+			}
+		})
+	}
+}
+
+func TestEnsureNoForeignHostOwnerRejectsWildcardOverlap(t *testing.T) {
+	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
+		Name: "hooks", Host: "hooks.example.com", Hosts: []string{"*.example.com"}, Upstreams: []string{"hooks:4000"},
+	})
+
+	for name, foreignHost := range map[string]string{
+		"foreign exact child": "tenant.example.com",
+		"foreign wildcard":    "*.example.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			foreign := &Route{ID: "other-route", Match: []*Match{{Host: []string{foreignHost}}}}
+			if err := ensureNoForeignHostOwner([]*Route{foreign}, desired); err == nil {
+				t.Fatalf("foreign host %q overlap was not detected", foreignHost)
+			}
+		})
+	}
+}
+
 func TestEnsureNoForeignHostOwnerChecksAllAliases(t *testing.T) {
 	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
 		Name: "shop", Host: "shop.example.com", Hosts: []string{"www.example.com"}, Upstreams: []string{"shop:3000"},
@@ -194,8 +255,12 @@ func TestEnsureNoForeignHostOwnerChecksAllAliases(t *testing.T) {
 		t.Fatal("foreign owner of an alias was not detected")
 	}
 	foreign.ID = ""
+	if err := ensureNoForeignHostOwner([]*Route{foreign}, desired); err == nil {
+		t.Fatal("overlapping ID-less alias route was not rejected")
+	}
+	foreign.Match[0].Host = []string{"shop.example.com"}
 	if err := ensureNoForeignHostOwner([]*Route{foreign}, desired); err != nil {
-		t.Fatalf("ID-less legacy route should remain adoptable: %v", err)
+		t.Fatalf("ID-less route with the exact primary host should remain adoptable: %v", err)
 	}
 }
 

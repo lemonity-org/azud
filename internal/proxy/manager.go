@@ -1671,7 +1671,7 @@ func routeMatchesHost(route *Route, host string) bool {
 			continue
 		}
 		for _, h := range match.Host {
-			if h == host {
+			if strings.EqualFold(h, host) {
 				return true
 			}
 		}
@@ -1679,26 +1679,74 @@ func routeMatchesHost(route *Route, host string) bool {
 	return false
 }
 
+func proxyHostsOverlap(first, second string) bool {
+	first = strings.ToLower(first)
+	second = strings.ToLower(second)
+	if first == second {
+		return true
+	}
+
+	firstSuffix, firstWildcard := strings.CutPrefix(first, "*.")
+	secondSuffix, secondWildcard := strings.CutPrefix(second, "*.")
+	switch {
+	case firstWildcard && secondWildcard:
+		return firstSuffix == secondSuffix
+	case firstWildcard:
+		return wildcardMatchesExactHost(firstSuffix, second)
+	case secondWildcard:
+		return wildcardMatchesExactHost(secondSuffix, first)
+	default:
+		return false
+	}
+}
+
+func wildcardMatchesExactHost(suffix, exact string) bool {
+	prefix, found := strings.CutSuffix(exact, "."+suffix)
+	return found && prefix != "" && !strings.Contains(prefix, ".")
+}
+
+func routeHosts(route *Route) []string {
+	if route == nil {
+		return nil
+	}
+	var hosts []string
+	for _, match := range route.Match {
+		if match != nil {
+			hosts = append(hosts, match.Host...)
+		}
+	}
+	return hosts
+}
+
 func ensureNoForeignHostOwner(routes []*Route, desired *Route) error {
 	if desired == nil {
 		return nil
 	}
-	desiredHosts := make(map[string]struct{})
-	for _, match := range desired.Match {
-		if match == nil {
-			continue
-		}
-		for _, host := range match.Host {
-			desiredHosts[host] = struct{}{}
-		}
+	desiredHosts := routeHosts(desired)
+	primaryHost := ""
+	if len(desiredHosts) > 0 {
+		primaryHost = desiredHosts[0]
 	}
+
 	for _, route := range routes {
-		if route == nil || route.ID == "" || route.ID == desired.ID {
+		if route == nil || route.ID == desired.ID {
 			continue
 		}
-		for host := range desiredHosts {
-			if routeMatchesHost(route, host) {
-				return fmt.Errorf("host %s is already owned by Caddy route %s", host, route.ID)
+		// An ID-less route with the exact primary host is an Azud legacy route
+		// that the caller can safely adopt and replace in full.
+		if route.ID == "" && routeMatchesHost(route, primaryHost) {
+			continue
+		}
+		for _, desiredHost := range desiredHosts {
+			for _, existingHost := range routeHosts(route) {
+				if !proxyHostsOverlap(desiredHost, existingHost) {
+					continue
+				}
+				owner := route.ID
+				if owner == "" {
+					owner = "an ID-less route"
+				}
+				return fmt.Errorf("proxy host %s overlaps %s already owned by Caddy route %s", desiredHost, existingHost, owner)
 			}
 		}
 	}

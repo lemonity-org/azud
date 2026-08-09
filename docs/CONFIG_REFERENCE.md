@@ -110,6 +110,27 @@ proxy:
     interval: 3s
 ```
 
+`proxy.host` and `proxy.hosts` accept exact hostnames, IP addresses, and a single
+leftmost wildcard label:
+
+```yaml
+proxy:
+  hosts:
+    - "*.example.com"
+  ssl: false
+```
+
+The suffix must contain at least two DNS labels; embedded, repeated, top-level,
+overlong, and IP wildcards are rejected. Preflight verifies wildcard DNS through
+a deterministic hostname beneath the wildcard suffix.
+
+The stock Caddy image cannot obtain wildcard certificates through its default
+HTTP challenge. For HTTPS wildcard routes, configure `ssl_certificate` and
+`ssl_private_key` with an existing wildcard certificate, or provide a Caddy
+build and configuration with an appropriate DNS-01 provider. Do not combine a
+wildcard host with automatic `ssl: true` and assume certificate issuance will
+succeed.
+
 Other useful fields:
 
 - `ssl_redirect`, `acme_email`, `acme_staging`
@@ -264,6 +285,15 @@ secrets_env_prefix: AZUD_
 secrets_command: ./bin/print-secrets
 secrets_remote_path: "~/.azud/secrets"
 ```
+
+`azud env push` excludes `registry.password`, `proxy.ssl_certificate`, and
+`proxy.ssl_private_key` references from the remote runtime env file. Azud uses
+those values locally for registry login or sends custom TLS material directly
+to Caddy as JSON over SSH stdin. This keeps infrastructure credentials out of
+application containers and safely preserves multiline PEM values. Infrastructure
+secret references must use distinct names and cannot also appear under
+`env.secret`; create a separate application credential instead. Unreferenced
+provider values retain their existing runtime-delivery behavior.
 
 ## Volumes
 

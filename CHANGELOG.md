@@ -6,6 +6,21 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.1.1 - 2026-08-09
+
+- Added safe leftmost wildcard proxy hosts, wildcard-aware DNS preflight, and
+  Caddy route ownership checks that reject wildcard/exact host overlap across
+  services.
+- Kept registry and custom TLS credentials out of remote application env files,
+  rejected cross-scope secret reuse, and delivered multiline custom certificates
+  directly to Caddy.
+- Fixed rolling deployments to reconcile Caddy host aliases added after the
+  initial deployment without replacing existing upstreams, allowing Automatic
+  HTTPS to provision certificates for new domains while preserving scaled and
+  canary routes.
+- Updated the Go build, test, release, and container toolchain to Go 1.26.5 and
+  the CI and contributor lint tooling to `golangci-lint` v2.12.2.
+
 ## 1.1.0 - 2026-07-25
 
 - Added typed per-role container hardening and a rollback-safe `stop_first`
