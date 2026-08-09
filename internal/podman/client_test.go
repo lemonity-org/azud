@@ -100,6 +100,14 @@ func TestBuildRunCommand_WithPorts(t *testing.T) {
 	}
 }
 
+func TestBuildRunCommand_WithStdin(t *testing.T) {
+	cfg := &ContainerConfig{Image: "alpine:latest", Stdin: true}
+	cmd := cfg.BuildRunCommand()
+	if !strings.Contains(cmd, "run -i alpine:latest") {
+		t.Fatalf("expected stdin-attached run command, got %q", cmd)
+	}
+}
+
 func TestBuildRunCommand_WithVolumes(t *testing.T) {
 	cfg := &ContainerConfig{
 		Image:   "nginx:latest",

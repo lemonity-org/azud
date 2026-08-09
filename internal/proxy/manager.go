@@ -300,36 +300,17 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 	if !json.Valid(autosave) {
 		return fmt.Errorf("refusing to install invalid Caddy autosave JSON")
 	}
-	tempName := fmt.Sprintf("caddy-autosave-%d.json", time.Now().UnixNano())
-	tempFile := state.ConfigFile(m.user, tempName)
-	tempFileQuoted := state.ConfigFileQuoted(m.user, tempName)
-	defer func() {
-		_, _ = m.sshClient.Execute(host, fmt.Sprintf("rm -f %s", tempFileQuoted)) // safe: tempFileQuoted comes from state.ConfigFileQuoted
-	}()
-	writeCommand := fmt.Sprintf("umask 077 && mkdir -p %s && chmod 700 %s && cat > %s && chmod 600 %s",
-		state.DirQuoted(m.user), state.DirQuoted(m.user), tempFileQuoted, tempFileQuoted)
-	result, err := m.sshClient.ExecuteWithStdin(host, writeCommand, bytes.NewReader(autosave))
-	if err != nil {
-		return fmt.Errorf("failed to stage normalized Caddy autosave: %w", err)
-	}
-	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to stage normalized Caddy autosave: %s", strings.TrimSpace(result.Stderr))
-	}
-
-	_, err = m.podman.Run(host, &podman.ContainerConfig{
-		Image:      CaddyImage,
-		Entrypoint: "/bin/sh",
-		User:       "0",
-		Command:    []string{"-c", caddyAutosaveInstallCommand()},
-		Volumes: []string{
-			"caddy_config:/config",
-			tempFile + ":/azud-autosave.json:ro",
-		},
+	_, err := m.podman.RunWithStdin(host, &podman.ContainerConfig{
+		Image:           CaddyImage,
+		Entrypoint:      "/bin/sh",
+		User:            "0",
+		Command:         []string{"-c", caddyAutosaveInstallCommand()},
+		Volumes:         []string{"caddy_config:/config"},
 		ReadOnly:        true,
 		CapDrop:         []string{"all"},
 		NoNewPrivileges: true,
 		Remove:          true,
-	})
+	}, bytes.NewReader(autosave))
 	if err != nil {
 		return fmt.Errorf("failed to install normalized Caddy autosave: %w", err)
 	}
@@ -337,10 +318,10 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 }
 
 func caddyAutosaveInstallCommand() string {
-	return "set -eu; mkdir -p /config/caddy; " +
+	return "set -eu; umask 077; mkdir -p /config/caddy; " +
 		"tmp=/config/caddy/autosave.json.azud-tmp; " +
 		"trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; " +
-		"cp /azud-autosave.json \"$tmp\"; chmod 600 \"$tmp\"; " +
+		"cat > \"$tmp\"; chmod 600 \"$tmp\"; " +
 		"mv -f \"$tmp\" /config/caddy/autosave.json; trap - EXIT"
 }
 

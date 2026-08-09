@@ -556,6 +556,7 @@ func TestCaddyAutosaveInstallUsesAtomicRenameAndCleanupTrap(t *testing.T) {
 	for _, required := range []string{
 		"autosave.json.azud-tmp",
 		"trap 'rm -f \"$tmp\"' EXIT HUP INT TERM",
+		"cat > \"$tmp\"",
 		"mv -f \"$tmp\" /config/caddy/autosave.json",
 	} {
 		if !strings.Contains(command, required) {

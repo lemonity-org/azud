@@ -118,6 +118,7 @@ type ContainerConfig struct {
 	StopTimeout     int
 	Detach          bool
 	Remove          bool
+	Stdin           bool // Keep stdin open for ExecuteWithStdin callers
 	Pull            bool
 
 	// Healthcheck
@@ -149,6 +150,10 @@ func (c *ContainerConfig) buildContainerCommand(subcommand string) string {
 
 	if subcommand == "run" && c.Remove {
 		args = append(args, "--rm")
+	}
+
+	if subcommand == "run" && c.Stdin {
+		args = append(args, "-i")
 	}
 
 	if c.Name != "" {
