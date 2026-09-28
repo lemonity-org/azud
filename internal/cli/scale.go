@@ -432,12 +432,37 @@ func scaleDown(cm *podman.ContainerManager, pm *proxy.Manager, host, role string
 				}
 			}
 		}
-		if err := cm.Remove(host, containerName, true); err != nil {
-			return fmt.Errorf("failed to remove %s: %w", containerName, err)
+		if err := retireInstance(cm, host, containerName, cfg.GetRoleStopTimeout(role)); err != nil {
+			return err
 		}
 		log.Host(host, "Instance %s stopped", containerName)
 	}
 
+	return nil
+}
+
+// instanceRetirer is the part of podman.ContainerManager needed to retire a
+// scaled instance.
+type instanceRetirer interface {
+	Stop(host, container string, timeout int) error
+	Remove(host, container string, force bool) error
+}
+
+// retireInstance stops an instance that is already out of the proxy route and
+// then removes it. Every app container carries the stable role name as a
+// network alias, so until it stops, the surviving upstream (for example
+// azud-it:80) resolves to it as well. Removing it in one forced step can cut
+// connections Caddy already holds, and passive health checking then marks the
+// only remaining upstream unavailable for its whole fail_duration window, a
+// route-wide 503. Stopping first, as rolling deploys and canary rollback do,
+// takes the container out of Podman's DNS before it is removed.
+func retireInstance(cm instanceRetirer, host, name string, stopTimeout int) error {
+	if err := cm.Stop(host, name, stopTimeout); err != nil {
+		return fmt.Errorf("failed to stop %s: %w", name, err)
+	}
+	if err := cm.Remove(host, name, true); err != nil {
+		return fmt.Errorf("failed to remove %s: %w", name, err)
+	}
 	return nil
 }
 

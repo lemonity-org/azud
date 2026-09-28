@@ -6,6 +6,14 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Fixed `azud scale` scale-down intermittently leaving the route with no usable
+  upstream. The removed instance was force-removed while the stable role name's
+  network alias still resolved to it, so the proxy could lose connections it
+  already held and passive health checking answered 503 for the whole 30s
+  `fail_duration`. Instances are now stopped gracefully, and leave Podman's
+  DNS, before they are removed, as rolling deploys and canary rollback already
+  do.
+
 ## 1.2.1 - 2026-09-28
 
 - Fixed first deployments of a service whose image shares its name (for
