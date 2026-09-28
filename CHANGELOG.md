@@ -13,6 +13,9 @@ release notes for the corresponding signed tag.
   `fail_duration`. Instances are now stopped gracefully, and leave Podman's
   DNS, before they are removed, as rolling deploys and canary rollback already
   do.
+- Changed the release workflow to wait for the required test and live
+  integration checks on the tagged commit to finish instead of failing when a
+  tag is pushed while they are still running.
 
 ## 1.2.1 - 2026-09-28
 
