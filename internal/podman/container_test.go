@@ -1,6 +1,11 @@
 package podman
 
-import "testing"
+import (
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+)
 
 func TestParseHostPort(t *testing.T) {
 	tests := []struct {
@@ -60,5 +65,23 @@ func TestParseHostPort(t *testing.T) {
 				t.Fatalf("unexpected port: want %d got %d", tt.wantPort, port)
 			}
 		})
+	}
+}
+
+// A bare `podman inspect NAME` also matches images, volumes and networks, so
+// an image called like the service made a first deploy believe an old
+// container existed. Every container lookup by name must be typed.
+func TestContainerInspectsAreTyped(t *testing.T) {
+	untyped := regexp.MustCompile(`Execute\(host,\s*"inspect"`)
+	for _, file := range []string{"container.go", "../deploy/container.go", "../deploy/deployer.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("reading %s: %v", file, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if untyped.MatchString(line) {
+				t.Errorf("%s:%d: use `container inspect` (or `image inspect`), not a bare inspect: %s", file, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }

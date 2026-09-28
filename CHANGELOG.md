@@ -6,6 +6,12 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Fixed first deployments of a service whose image shares its name (for
+  example `ghcr.io/org/app` deployed as service `app`) failing with
+  "failed to preserve old container ... no such container": container lookups
+  used a bare `podman inspect`, which also matches images, volumes and
+  networks. All container lookups now use `podman container inspect`.
+
 ## 1.2.0 - 2026-08-09
 
 - Added explicit Caddy request-header, HTTP/1 full-duplex, response-flush, and

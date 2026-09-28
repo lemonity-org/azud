@@ -217,7 +217,7 @@ func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, ss
 		livenessHealthy := !livenessEnabled
 		// Check Podman HEALTHCHECK status (liveness)
 		if livenessEnabled {
-			result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{.State.Health.Status}}'")
+			result, err := podmanClient.Execute(host, "container", "inspect", container, "--format", "'{{.State.Health.Status}}'")
 			if err == nil && result.ExitCode == 0 {
 				status := strings.Trim(result.Stdout, "'\n ")
 				switch status {
@@ -301,7 +301,7 @@ func readinessCommandProbe(podmanClient *podman.Client, host, container, command
 }
 
 func healthcheckUnsupported(podmanClient *podman.Client, host, container string) bool {
-	result, err := podmanClient.Execute(host, "inspect", container, "--format", "'{{json .State.Health}}'")
+	result, err := podmanClient.Execute(host, "container", "inspect", container, "--format", "'{{json .State.Health}}'")
 	if err != nil || result.ExitCode != 0 {
 		return false
 	}
