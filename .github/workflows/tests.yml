@@ -72,22 +72,36 @@ jobs:
 
   integration:
     name: Integration (${{ matrix.mode }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     needs: test
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        # Runner images are chosen per mode. Ubuntu 24.04 ships netavark 1.4.0,
+        # which leaves rootless container name resolution unavailable for seconds
+        # (occasionally longer than these tests wait) after container starts and
+        # stops, intermittently failing the rootless bridge job that resolves its
+        # upstreams by container name. Ubuntu 26.04 (Podman 5.7, netavark 1.16) is
+        # unaffected. ubuntu-latest moves to 26.04 from 2026-10-19.
+        #
+        # The mixed mode addresses upstreams by loopback port, so it does not
+        # depend on container DNS. Its sudoers rule for the rootful proxy uses a
+        # wildcard argument that sudo-rs, the default sudo on 26.04, rejects, so
+        # it stays on ubuntu-24.04 until that rule is rewritten.
         include:
           - mode: rootful-bridge
+            runner: ubuntu-latest
             user: root
             rootless: "false"
             proxy_rootful: "false"
           - mode: rootless-bridge
+            runner: ubuntu-26.04
             user: deploy
             rootless: "true"
             proxy_rootful: "false"
           - mode: mixed-rootless-app-rootful-proxy
+            runner: ubuntu-24.04
             user: deploy
             rootless: "true"
             proxy_rootful: "true"
