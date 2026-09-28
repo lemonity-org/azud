@@ -6,6 +6,10 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Changed the release workflow to wait for the required test and live
+  integration checks on the tagged commit to finish instead of failing when a
+  tag is pushed while they are still running.
+
 ## 1.2.1 - 2026-09-28
 
 - Fixed first deployments of a service whose image shares its name (for

@@ -63,22 +63,56 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # A tag is usually pushed right after the merge, while the live
+          # integration matrix for that commit is still queued or running, so wait
+          # for the required checks to finish instead of sampling them once. A
+          # required check that finishes without success fails the release at once.
           required_checks=(
             "Go test & lint"
             "Integration (rootful-bridge)"
             "Integration (rootless-bridge)"
             "Integration (mixed-rootless-app-rootful-proxy)"
           )
-          for check_name in "${required_checks[@]}"; do
-            conclusions=$(gh api --paginate \
+          poll_seconds=20
+          max_polls=60
+          for ((poll = 1; poll <= max_polls; poll++)); do
+            if ! check_runs=$(gh api --paginate \
               -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
-              --jq ".check_runs[] | select(.name == \"${check_name}\") | .conclusion")
-            if ! grep -qx success <<<"$conclusions"; then
-              echo "Required check is not successful: ${check_name}" >&2
-              exit 1
+              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100" \
+              --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'); then
+              echo "Could not read check runs (poll ${poll}/${max_polls}); retrying" >&2
+              sleep "$poll_seconds"
+              continue
             fi
+
+            pending=()
+            for check_name in "${required_checks[@]}"; do
+              # The API lists only the latest run of each check, so a re-run
+              # replaces the failed attempt it supersedes.
+              matches=$(awk -F'\t' -v name="$check_name" '$1 == name' <<<"$check_runs")
+              if [ -z "$matches" ]; then
+                pending+=("${check_name} (not started)")
+              elif awk -F'\t' '$3 == "success" { found = 1 } END { exit !found }' <<<"$matches"; then
+                continue
+              elif awk -F'\t' '$2 != "completed" { found = 1 } END { exit !found }' <<<"$matches"; then
+                state=$(awk -F'\t' '$2 != "completed" { print $2; exit }' <<<"$matches")
+                pending+=("${check_name} (${state})")
+              else
+                conclusions=$(cut -f3 <<<"$matches" | paste -sd, -)
+                echo "Required check is not successful: ${check_name} (${conclusions})" >&2
+                exit 1
+              fi
+            done
+
+            if [ "${#pending[@]}" -eq 0 ]; then
+              echo "All required checks succeeded for ${GITHUB_SHA}"
+              exit 0
+            fi
+            echo "Waiting for required checks (poll ${poll}/${max_polls}): ${pending[*]}"
+            sleep "$poll_seconds"
           done
+          echo "Timed out waiting for required checks: ${pending[*]:-none could be read}" >&2
+          exit 1
 
   release:
     # Updating the stable major tag below triggers this workflow once more;
