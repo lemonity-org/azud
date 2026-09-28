@@ -250,7 +250,7 @@ func (m *ContainerManager) List(host string, all bool, filters map[string]string
 }
 
 func (m *ContainerManager) Inspect(host, container string) (string, error) {
-	result, err := m.client.Execute(host, "inspect", container)
+	result, err := m.client.Execute(host, "container", "inspect", container)
 	if err != nil {
 		return "", err
 	}
@@ -263,7 +263,7 @@ func (m *ContainerManager) Inspect(host, container string) (string, error) {
 }
 
 func (m *ContainerManager) Exists(host, container string) (bool, error) {
-	result, err := m.client.Execute(host, "inspect", container, "--format", "{{.Id}}")
+	result, err := m.client.Execute(host, "container", "inspect", container, "--format", "{{.Id}}")
 	if err != nil {
 		return false, err
 	}
@@ -272,7 +272,7 @@ func (m *ContainerManager) Exists(host, container string) (bool, error) {
 }
 
 func (m *ContainerManager) IsRunning(host, container string) (bool, error) {
-	result, err := m.client.Execute(host, "inspect", container, "--format", "{{.State.Running}}")
+	result, err := m.client.Execute(host, "container", "inspect", container, "--format", "{{.State.Running}}")
 	if err != nil {
 		return false, err
 	}
@@ -288,7 +288,7 @@ func (m *ContainerManager) WaitHealthy(host, container string, timeout time.Dura
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		result, err := m.client.Execute(host, "inspect", container, "--format", "{{.State.Health.Status}}")
+		result, err := m.client.Execute(host, "container", "inspect", container, "--format", "{{.State.Health.Status}}")
 		if err != nil {
 			return err
 		}
@@ -309,7 +309,7 @@ func (m *ContainerManager) WaitHealthy(host, container string, timeout time.Dura
 
 // HasHealthcheck checks whether the container has a Podman HEALTHCHECK defined.
 func (m *ContainerManager) HasHealthcheck(host, container string) (bool, error) {
-	result, err := m.client.Execute(host, "inspect", container, "--format", "{{len .Config.Healthcheck.Test}}")
+	result, err := m.client.Execute(host, "container", "inspect", container, "--format", "{{len .Config.Healthcheck.Test}}")
 	if err != nil {
 		return false, err
 	}
@@ -334,7 +334,7 @@ func (m *ContainerManager) WaitRunning(host, container string, stabilize time.Du
 		return fmt.Errorf("failed to check container status: %w", err)
 	}
 	if !running {
-		result, inspectErr := m.client.Execute(host, "inspect", container, "--format", "{{.State.ExitCode}}")
+		result, inspectErr := m.client.Execute(host, "container", "inspect", container, "--format", "{{.State.ExitCode}}")
 		exitCode := "unknown"
 		if inspectErr == nil && result.ExitCode == 0 {
 			exitCode = strings.TrimSpace(result.Stdout)
