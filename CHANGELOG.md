@@ -6,11 +6,16 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.2.1 - 2026-09-28
+
 - Fixed first deployments of a service whose image shares its name (for
   example `ghcr.io/org/app` deployed as service `app`) failing with
   "failed to preserve old container ... no such container": container lookups
   used a bare `podman inspect`, which also matches images, volumes and
   networks. All container lookups now use `podman container inspect`.
+- Updated Go to 1.26.6 and `golang.org/x/crypto` to v0.56.0 for
+  GO-2026-5972 (`encoding/asn1`) and GO-2026-6354 / GO-2026-6355 (SSH channel
+  denial of service).
 
 ## 1.2.0 - 2026-08-09
 
