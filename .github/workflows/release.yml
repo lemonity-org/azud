@@ -19,7 +19,9 @@ jobs:
     if: github.ref_name != 'v1'
     name: Verify release commit
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The live-matrix gate below can wait up to 20 minutes (plus API latency) on
+    # top of the test steps that precede it, so leave room for both.
+    timeout-minutes: 45
     permissions:
       contents: read
       checks: read
