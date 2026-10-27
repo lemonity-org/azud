@@ -2,7 +2,9 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -250,25 +252,67 @@ func (l *Loader) loadSecretsFromEnv(cfg *Config) error {
 	return nil
 }
 
+// secretsCommandTimeout and secretsCommandWaitDelay bound secrets_command.
+// They are variables so tests can shorten them.
+var (
+	secretsCommandTimeout   = 30 * time.Second
+	secretsCommandWaitDelay = 2 * time.Second
+)
+
+// maxSecretsCommandOutput is the maximum size of secrets_command's stdout.
+const maxSecretsCommandOutput = 1 << 20 // 1 MiB
+
+// cappedBuffer keeps at most max bytes and discards the rest, so the command
+// is never blocked on a full pipe.
+type cappedBuffer struct {
+	buf      bytes.Buffer
+	max      int
+	overflow bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.buf.Len(); len(p) > room {
+		b.overflow = true
+		if room > 0 {
+			b.buf.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.buf.Write(p)
+}
+
 func (l *Loader) loadSecretsFromCommand(cfg *Config) error {
 	if strings.TrimSpace(cfg.SecretsCommand) == "" {
 		return fmt.Errorf("secrets_command is required when secrets_provider=command")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), secretsCommandTimeout)
 	defer cancel()
 
+	// Only stdout carries secrets. It is never printed or included in errors,
+	// because a failing command may already have printed secret values.
+	// stderr is the command's diagnostics channel and is passed through.
+	stdout := &cappedBuffer{max: maxSecretsCommandOutput}
 	cmd := exec.CommandContext(ctx, "sh", "-c", cfg.SecretsCommand)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("secrets_command timed out after 30s")
+	cmd.Stdout = stdout
+	cmd.Stderr = os.Stderr
+	// Bound Wait when a background child keeps the output pipe open.
+	cmd.WaitDelay = secretsCommandWaitDelay
+	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("secrets_command timed out after %s", secretsCommandTimeout)
 		}
-		return fmt.Errorf("secrets_command failed: %w (%s)", err, strings.TrimSpace(string(out)))
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return fmt.Errorf("secrets_command exited but a background process kept its output open")
+		}
+		return fmt.Errorf("secrets_command failed: %w", err)
+	}
+	if stdout.overflow {
+		return fmt.Errorf("secrets_command output exceeds maximum size (%d bytes)", maxSecretsCommandOutput)
 	}
 
 	secrets := make(map[string]string)
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	scanner := bufio.NewScanner(&stdout.buf)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
