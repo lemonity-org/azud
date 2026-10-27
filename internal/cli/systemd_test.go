@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -150,19 +149,58 @@ func TestBuildProxyQuadletUnit_DefaultNetworkPublishesConfiguredPorts(t *testing
 		t.Fatalf("expected azud network, got %v", unit.Network)
 	}
 
-	want := []string{
-		"8080:80",
-		"8443:443",
-		fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort),
-	}
+	want := []string{"8080:80", "8443:443"}
 	if !reflect.DeepEqual(unit.PublishPort, want) {
 		t.Fatalf("unexpected published ports: want %v got %v", want, unit.PublishPort)
 	}
-	if !strings.Contains(unit.Exec, "/azud-state/"+proxy.CaddyConfigFileName) {
-		t.Fatalf("proxy unit does not restore persisted Caddy file: %q", unit.Exec)
-	}
 	if len(unit.After) != 0 || len(unit.Requires) != 0 {
 		t.Fatalf("rootless proxy references system-manager targets: after=%v requires=%v", unit.After, unit.Requires)
+	}
+}
+
+func TestBuildProxyQuadletUnit_ServesAdminOnlyOnPrivateSocket(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+
+	for _, tt := range []struct {
+		name    string
+		proxy   config.ProxyConfig
+		podman  config.PodmanConfig
+		sshUser string
+	}{
+		{name: "rootless bridge", podman: config.PodmanConfig{Rootless: true}, sshUser: "deploy"},
+		{name: "rootful bridge", sshUser: "root"},
+		{name: "mixed host network", podman: config.PodmanConfig{Rootless: true}, proxy: config.ProxyConfig{Rootful: true}, sshUser: "deploy"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg = &config.Config{Podman: tt.podman, Proxy: tt.proxy, SSH: config.SSHConfig{User: tt.sshUser}}
+			unit := buildProxyQuadletUnit()
+			file := quadlet.GenerateContainerFile(unit)
+
+			if unit.Environment["CADDY_ADMIN"] != proxy.CaddyAdminListen {
+				t.Fatalf("CADDY_ADMIN = %q", unit.Environment["CADDY_ADMIN"])
+			}
+			if !strings.Contains(file, `Environment="CADDY_ADMIN=unix//run/azud-admin/admin.sock|0600"`) {
+				t.Fatalf("unit does not set the socket listener:\n%s", file)
+			}
+			if !reflect.DeepEqual(unit.PodmanArgs, []string{"--tmpfs=" + proxy.CaddyAdminTmpfs}) {
+				t.Fatalf("admin socket tmpfs missing: %v", unit.PodmanArgs)
+			}
+			if unit.Label[proxy.ProxySpecLabel] != proxy.ProxySpecVersion {
+				t.Fatalf("spec label = %q", unit.Label[proxy.ProxySpecLabel])
+			}
+			if unit.Exec != "caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --resume" {
+				t.Fatalf("unexpected Exec: %q", unit.Exec)
+			}
+			if !reflect.DeepEqual(unit.Volume, []string{"caddy_data:/data", "caddy_config:/config"}) {
+				t.Fatalf("proxy unit mounts more than Caddy's volumes: %v", unit.Volume)
+			}
+			for _, forbidden := range []string{"2019", "0.0.0.0", "/azud-state", ".local/share/azud", "/var/lib/azud"} {
+				if strings.Contains(file, forbidden) {
+					t.Fatalf("proxy unit contains %q:\n%s", forbidden, file)
+				}
+			}
+		})
 	}
 }
 

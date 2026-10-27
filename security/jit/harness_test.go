@@ -459,6 +459,20 @@ func commandDump(commands []commandRecord) string {
 // "shop" service.
 const fakeBuildDir = "/tmp/azud-build-shop.jit0000001"
 
+// isCaddyAdminCall reports whether a command is a Caddy admin API request:
+// `<podman> exec [-i] azud-proxy curl ... --unix-socket <sock> ...`.
+func isCaddyAdminCall(command string) bool {
+	return strings.Contains(command, " exec ") &&
+		strings.Contains(command, "azud-proxy curl ") &&
+		strings.Contains(command, "--unix-socket ")
+}
+
+// isCaddyAdminWrite reports whether a command is a Caddy admin API request
+// that streams its JSON body on stdin.
+func isCaddyAdminWrite(command string) bool {
+	return isCaddyAdminCall(command) && strings.Contains(command, "--data-binary @-")
+}
+
 // permissive returns a handler that succeeds everything and returns {} for
 // Caddy admin GET requests. It is enough for most non-proxy commands.
 func permissive() fakeHandler {
@@ -467,10 +481,10 @@ func permissive() fakeHandler {
 		case strings.Contains(command, "echo LOCKED"):
 			// WithRemoteLock waits for this line before running its callback.
 			return fakeResult{Stdout: "LOCKED\n"}
-		case strings.Contains(command, "curl") && strings.Contains(command, "-d @-"):
+		case isCaddyAdminWrite(command):
 			_, _ = io.ReadAll(stdin)
 			return fakeResult{}
-		case strings.Contains(command, "curl") && strings.Contains(command, "/config/"):
+		case isCaddyAdminCall(command) && strings.Contains(command, "/config/"):
 			return fakeResult{Stdout: "{}"}
 		case strings.Contains(command, "test -f"):
 			return fakeResult{Exit: 1}
@@ -504,10 +518,10 @@ func proxyBootHandler() fakeHandler {
 		case strings.Contains(command, "container inspect"):
 			// Nothing exists yet: IsRunning and Exists both false.
 			return fakeResult{Exit: 1, Stderr: "no such container"}
-		case strings.Contains(command, "curl") && strings.Contains(command, "-d @-"):
+		case isCaddyAdminWrite(command):
 			_, _ = io.ReadAll(stdin)
 			return fakeResult{}
-		case strings.Contains(command, "curl") && strings.Contains(command, "/config/"):
+		case isCaddyAdminCall(command) && strings.Contains(command, "/config/"):
 			return fakeResult{Stdout: "{}"}
 		case strings.Contains(command, "test -f"):
 			return fakeResult{Exit: 1}

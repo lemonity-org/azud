@@ -136,6 +136,12 @@ security:
 - Only expose ports 80/443 (or your LB ingress)
 - Keep app ports internal; proxy forwards traffic
 - Lock down SSH with firewall rules
+- The Caddy admin API is never bound to TCP or published to the host. It
+  listens on a unix socket in a tmpfs private to the `azud-proxy` container,
+  so application, accessory and cron containers on the `azud` network cannot
+  read the proxy configuration (including custom TLS keys) or replace it.
+  Azud reaches the socket only through `podman exec` over SSH. See
+  `docs/TROUBLESHOOTING.md` for the operator command.
 
 ## TLS / HTTPS
 

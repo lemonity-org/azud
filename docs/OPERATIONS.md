@@ -108,13 +108,28 @@ azud proxy reboot
 azud proxy remove --force
 ```
 
+The Caddy admin API is only reachable through the proxy container's private
+unix socket, not on `localhost:2019`:
+
+```bash
+azud server exec --role web -- "podman exec azud-proxy curl -s --unix-socket /run/azud-admin/admin.sock http://localhost/config/"
+```
+
+Use `sudo -n podman` instead of `podman` for a rootful proxy managed by a
+non-root SSH user. The first boot or deploy after upgrading recreates a proxy
+created by an older release once.
+
 ## Systemd / Quadlet
 
 ```bash
 azud systemd enable
 ```
 
-Use this to auto-start services on reboot.
+Use this to auto-start services on reboot. The proxy unit resumes Caddy's
+autosave, which `systemd enable` normalizes (or seeds from Azud's protected
+copy) before restarting the unit; it does not mount Azud's state directory.
+Rerun it after upgrading so an existing proxy unit picks up the current
+container definition.
 
 ## Server Admin Commands
 

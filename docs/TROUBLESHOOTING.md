@@ -61,6 +61,44 @@ Fixes:
 - Ensure ports 80/443 are open
 - Check proxy logs: `azud proxy logs -f`
 
+## Caddy admin API is unreachable
+
+Symptoms:
+- `caddy admin socket /run/azud-admin/admin.sock is not accepting connections`
+- `proxy on <host> uses an outdated container definition`
+- `proxy on <host> is managed by systemd unit azud-proxy.service and uses an outdated container definition`
+
+The admin API listens only on a unix socket inside the `azud-proxy`
+container; there is no `localhost:2019` endpoint on the host. Query it on the
+proxy host with:
+
+```bash
+podman exec azud-proxy curl -s --unix-socket /run/azud-admin/admin.sock http://localhost/config/
+# rootful proxy (proxy.rootful: true) with a non-root SSH user:
+sudo -n podman exec azud-proxy curl -s --unix-socket /run/azud-admin/admin.sock http://localhost/config/
+```
+
+Fixes:
+- A proxy created by an older Azud release still serves the admin API on TCP.
+  Run `azud proxy reboot` (or any `azud deploy`) to recreate it once; routes
+  are kept through Caddy's autosave.
+- For a proxy started by `azud systemd enable`, rerun `azud systemd enable` so
+  the unit is regenerated and restarted.
+- If the admin listener was moved by hand, `azud proxy reboot` rewrites the
+  autosave back to the socket.
+- Downgrading to an older Azud cannot reach the new socket. For a proxy
+  started by `azud proxy boot` or `azud deploy`, remove it with
+  `podman rm -f azud-proxy` (`sudo podman` for a rootful proxy) and run that
+  release's `azud proxy boot`, which rewrites Caddy's autosave to its TCP admin
+  address.
+- For a proxy started by `azud systemd enable`, `podman rm -f` does not help:
+  the unit restarts the newer container. Stop the unit with
+  `systemctl --user stop azud-proxy` (`sudo systemctl stop azud-proxy` for a
+  rootful proxy), run the older release's `azud proxy boot`, and then its
+  `azud systemd enable` to install its own unit. Keep that order: the older
+  unit resumes Caddy's autosave, and while the autosave names the private
+  socket, Caddy cannot start under that unit and it fails in a restart loop.
+
 ## Rootless proxy cannot bind 80/443
 
 Symptoms:

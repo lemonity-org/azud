@@ -469,7 +469,10 @@ to use instead.
 **Flags:** `--host`
 
 #### `azud proxy reboot`
-Restart the proxy.
+Restart the proxy. A proxy container created by an older Azud release is
+recreated with the current definition (private admin socket and hardening);
+routes are kept through Caddy's autosave. If the new container does not
+answer, the previous one is restored and the command fails.
 **Flags:** `--host`
 
 #### `azud proxy logs`
@@ -563,6 +566,7 @@ Generate and install systemd/quadlet units for the application and proxy. This i
 Notes:
 *   With `podman.rootless: true` + `proxy.rootful: true`, app units stay rootless while the proxy unit is installed as a system unit.
 *   When `ssh.user` is non-root and a system unit is managed, passwordless `sudo` is required for `systemctl` and quadlet file writes.
+*   The proxy unit resumes Caddy's autosave. Before starting it, `systemd enable` stops the previous proxy unit or container, rewrites the autosave's admin listener to the private socket (or seeds the autosave from Azud's protected copy), and then starts the unit. If that preparation fails, the unit is still started so the host keeps a proxy, and the command fails. With `--no-start` only the autosave is prepared. Rerun it after upgrading Azud; Boot refuses to recreate a systemd-managed proxy itself.
 
 ---
 

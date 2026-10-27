@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -36,6 +37,15 @@ Checks:
 `,
 	RunE: runPreflight,
 }
+
+// proxyOutdatedStatus marks a running proxy created by an older Azud release.
+// It is a warning: the next proxy boot, reboot or deploy recreates it.
+const proxyOutdatedStatus = "outdated"
+
+// proxyOutdatedUnitStatus marks an outdated proxy owned by a Quadlet unit.
+// It blocks: Boot never recreates such a proxy, so every deploy fails until
+// 'azud systemd enable' regenerates the unit.
+const proxyOutdatedUnitStatus = "outdated-unit"
 
 var (
 	preflightHost string
@@ -117,7 +127,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	wg.Wait()
 
-	headings := []string{"Host", "SSH", "Trust", "Podman", "Rootless", "Secrets", "Proxy", "Helper", "Curl", "SSHD", "Firewall", "Cron"}
+	headings := []string{"Host", "SSH", "Trust", "Podman", "Rootless", "Secrets", "Proxy", "Helper", "SSHD", "Firewall", "Cron"}
 	log.Table(headings, rows)
 	var warnings []string
 	for _, row := range rows {
@@ -125,7 +135,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 			status := strings.ToLower(strings.TrimSpace(row[column]))
 			switch status {
 			case "ok", "n/a":
-			case "warn", "unknown":
+			case "warn", "unknown", proxyOutdatedStatus:
 				warnings = append(warnings, fmt.Sprintf("%s/%s=%s", row[0], strings.ToLower(headings[column]), status))
 			default:
 				blockers = append(blockers, fmt.Sprintf("%s/%s=%s", row[0], strings.ToLower(headings[column]), status))
@@ -359,7 +369,6 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 	var podmanStatus string
 	proxyStatus := "n/a"
 	helperStatus := "n/a"
-	var curlStatus string
 	var sshdStatus string
 	var firewallStatus string
 	proxyHosts := cfg.Proxy.AllHosts()
@@ -437,10 +446,11 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 
 	// Proxy status
 	if len(proxyHosts) > 0 && isProxyHost {
-		if status, err := proxyManager.Status(host); err == nil && status.Running {
-			proxyStatus = "ok"
-		} else {
-			proxyStatus = "down"
+		status, err := proxyManager.Status(host)
+		proxyStatus = preflightProxyStatus(status, err)
+		if proxyStatus == proxyOutdatedUnitStatus {
+			// The error names the unit and the 'azud systemd enable' fix.
+			output.DefaultLogger.HostError(host, "%v", err)
 		}
 	}
 
@@ -459,13 +469,6 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 		helperStatus = checkRemoteCommand(bootstrapper, host, cmd)
 	}
 
-	// Host dependencies
-	if len(proxyHosts) > 0 && isProxyHost {
-		curlStatus = checkRemoteCommand(bootstrapper, host, "command -v curl >/dev/null 2>&1")
-	} else {
-		curlStatus = "n/a"
-	}
-
 	// SSH hardening checks
 	sshdStatus = checkSSHDHardening(bootstrapper, host)
 
@@ -482,7 +485,22 @@ func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.B
 		cronStatus = checkCronDeps(bootstrapper, host)
 	}
 
-	return []string{host, sshStatus, trustStatus, podmanStatus, rootlessStatus, secretsStatus, proxyStatus, helperStatus, curlStatus, sshdStatus, firewallStatus, cronStatus}
+	return []string{host, sshStatus, trustStatus, podmanStatus, rootlessStatus, secretsStatus, proxyStatus, helperStatus, sshdStatus, firewallStatus, cronStatus}
+}
+
+// preflightProxyStatus maps a proxy status check to its preflight column.
+func preflightProxyStatus(status *proxy.ProxyStatus, err error) string {
+	switch {
+	case errors.Is(err, proxy.ErrOutdatedManagedProxy):
+		return proxyOutdatedUnitStatus
+	case errors.Is(err, proxy.ErrOutdatedProxy):
+		// The next boot or deploy recreates it; see proxyOutdatedStatus.
+		return proxyOutdatedStatus
+	case err == nil && status.Running:
+		return "ok"
+	default:
+		return "down"
+	}
 }
 
 func verifyTrustedHost(host string) bool {

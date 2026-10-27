@@ -164,6 +164,7 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid proxy quadlet unit: %w", err)
 		}
 		unitName := fmt.Sprintf("%s.container", proxy.CaddyContainerName)
+		proxyManager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 		for _, host := range cfg.GetRoleHosts("web") {
 			if systemdHost != "" && host != systemdHost {
 				continue
@@ -173,11 +174,9 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 				hasErrors = true
 				continue
 			}
-			if !systemdNoStart {
-				if err := proxyDeployer.Start(host, proxy.CaddyContainerName); err != nil {
-					log.HostError(host, "Failed to start proxy unit: %v", err)
-					hasErrors = true
-				}
+			if err := enableProxyUnit(proxyDeployer, proxyManager, host, !systemdNoStart); err != nil {
+				log.HostError(host, "%v", err)
+				hasErrors = true
 			}
 		}
 	}
@@ -187,6 +186,36 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Success("systemd units installed")
+	return nil
+}
+
+// enableProxyUnit migrates a host's proxy to the freshly deployed unit.
+// `systemctl start` does nothing for a unit that is already running, so a
+// started migration stops the previous unit and any imperative container
+// first; Caddy's autosave is then normalized to the private admin socket
+// before the new unit resumes it. Without start, only the autosave is
+// prepared and the running proxy is left untouched.
+func enableProxyUnit(deployer *quadlet.QuadletDeployer, manager *proxy.Manager, host string, start bool) error {
+	if !start {
+		if err := manager.PrepareQuadletStart(host, false); err != nil {
+			return fmt.Errorf("failed to prepare proxy state for its unit: %w", err)
+		}
+		return nil
+	}
+	if err := deployer.Stop(host, proxy.CaddyContainerName); err != nil {
+		return fmt.Errorf("failed to stop previous proxy unit: %w", err)
+	}
+	if err := manager.PrepareQuadletStart(host, true); err != nil {
+		// The proxy was stopped above. Start the installed unit anyway, as the
+		// next host boot would, rather than leave the host without a proxy.
+		if startErr := deployer.Start(host, proxy.CaddyContainerName); startErr != nil {
+			return fmt.Errorf("failed to prepare proxy state for its unit: %v (starting the unit anyway also failed: %v)", err, startErr)
+		}
+		return fmt.Errorf("failed to prepare proxy state for its unit; started the unit with its existing autosave: %w", err)
+	}
+	if err := deployer.Start(host, proxy.CaddyContainerName); err != nil {
+		return fmt.Errorf("failed to start proxy unit: %w", err)
+	}
 	return nil
 }
 
@@ -328,48 +357,60 @@ func buildAppQuadletUnit(image, role string) *quadlet.ContainerUnit {
 	return unit
 }
 
+// buildProxyQuadletUnit renders the same container definition Azud boots
+// imperatively. The unit no longer mounts Azud's state directory: before the
+// unit starts, `systemd enable` normalizes Caddy's autosave to the private
+// admin socket or seeds it from the protected persisted copy, and Caddy
+// resumes from that autosave.
 func buildProxyQuadletUnit() *quadlet.ContainerUnit {
 	proxyRootless := cfg.Podman.Rootless && !cfg.Proxy.Rootful
 	after, requires := quadletNetworkOnlineDependencies(proxyRootless)
+	containerCfg := proxy.NewProxyContainerConfig(cfg.Proxy.EffectiveHTTPPort(), cfg.Proxy.EffectiveHTTPSPort(), cfg.UseHostPortUpstreams())
+	// Refer to the Quadlet filename so systemd orders the proxy after the
+	// generated network unit.
 	network := []string{"azud.network"}
-	publishPorts := []string{
-		fmt.Sprintf("%d:80", cfg.Proxy.EffectiveHTTPPort()),
-		fmt.Sprintf("%d:443", cfg.Proxy.EffectiveHTTPSPort()),
-		fmt.Sprintf("127.0.0.1:%d:%d", proxy.CaddyAdminPort, proxy.CaddyAdminPort),
-	}
-	if cfg.UseHostPortUpstreams() {
+	if containerCfg.Network == "host" {
 		network = []string{"host"}
-		publishPorts = []string{}
-	}
-	adminListen := "0.0.0.0:2019" // safe: container-only; Quadlet publishes the admin port to host loopback
-	if cfg.UseHostPortUpstreams() {
-		adminListen = "127.0.0.1:2019"
-	}
-	stateDir := "%h/.local/share/azud"
-	if cfg.SSH.User == "" || cfg.SSH.User == "root" {
-		stateDir = "/var/lib/azud"
-	} else if !proxyRootless {
-		stateDir = "/home/" + cfg.SSH.User + "/.local/share/azud"
 	}
 
 	unit := &quadlet.ContainerUnit{
 		Description:    "Azud Caddy proxy",
 		After:          after,
 		Requires:       requires,
-		Image:          proxy.CaddyImage,
-		ContainerName:  proxy.CaddyContainerName,
-		Environment:    map[string]string{"CADDY_ADMIN": adminListen},
-		PublishPort:    publishPorts,
-		Volume:         []string{"caddy_data:/data", "caddy_config:/config", stateDir + ":/azud-state:ro,Z"},
+		Image:          containerCfg.Image,
+		ContainerName:  containerCfg.Name,
+		Environment:    containerCfg.Env,
+		PublishPort:    containerCfg.Ports,
+		Volume:         containerCfg.Volumes,
 		Network:        network,
-		Label:          map[string]string{"azud.managed": "true", "azud.type": "proxy"},
-		Exec:           fmt.Sprintf("/bin/sh -c 'if [ -s /azud-state/%s ]; then exec caddy run --config /azud-state/%s --resume; else exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --resume; fi'", proxy.CaddyConfigFileName, proxy.CaddyConfigFileName),
+		Label:          containerCfg.Labels,
+		Exec:           strings.Join(containerCfg.Command, " "),
+		PodmanArgs:     proxyQuadletPodmanArgs(containerCfg),
 		Restart:        "always",
 		TimeoutStopSec: 30,
 		WantedBy:       "default.target",
 	}
 
 	return unit
+}
+
+// proxyQuadletPodmanArgs renders the proxy's isolation settings as Quadlet
+// PodmanArgs so the unit and imperative boots cannot drift apart.
+func proxyQuadletPodmanArgs(containerCfg *podman.ContainerConfig) []string {
+	var args []string
+	if containerCfg.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	for _, capability := range containerCfg.CapDrop {
+		args = append(args, "--cap-drop="+capability)
+	}
+	if containerCfg.NoNewPrivileges {
+		args = append(args, "--security-opt=no-new-privileges")
+	}
+	for _, mount := range containerCfg.Tmpfs {
+		args = append(args, "--tmpfs="+mount)
+	}
+	return args
 }
 
 // network-online.target belongs to the system manager and is not generally

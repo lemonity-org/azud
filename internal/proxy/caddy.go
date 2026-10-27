@@ -4,27 +4,41 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"time"
+	"sort"
+	"strings"
+	"unicode"
 
+	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/shell"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
 
-// CaddyClient manages Caddy proxy via its admin API
+// CaddyClient manages the Caddy proxy through its admin API. The API listens
+// only on a unix socket inside the proxy container, so every request runs the
+// image's curl through `podman exec`.
 type CaddyClient struct {
-	sshClient  *ssh.Client
-	adminPort  int
-	httpClient *http.Client
+	sshClient *ssh.Client
+	podmanCmd string
+	container string
+	log       *output.Logger
 }
 
-// NewCaddyClient creates a new Caddy client
-func NewCaddyClient(sshClient *ssh.Client) *CaddyClient {
+// NewCaddyClient creates a Caddy client. podmanCmd is the command prefix used
+// to reach the proxy container, for example "sudo -n podman" for a rootful
+// proxy managed by a non-root SSH user.
+func NewCaddyClient(sshClient *ssh.Client, podmanCmd string, log *output.Logger) *CaddyClient {
+	podmanCmd = strings.TrimSpace(podmanCmd)
+	if podmanCmd == "" {
+		podmanCmd = "podman"
+	}
+	if log == nil {
+		log = output.DefaultLogger
+	}
 	return &CaddyClient{
 		sshClient: sshClient,
-		adminPort: 2019, // Caddy's default admin API port
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		podmanCmd: podmanCmd,
+		container: CaddyContainerName,
+		log:       log,
 	}
 }
 
@@ -251,10 +265,15 @@ type ServerLogs struct {
 	DefaultLoggerName string `json:"default_logger_name,omitempty"`
 }
 
-// apiRequest executes an HTTP request against Caddy's admin API via SSH tunnel
+// apiRequest executes an HTTP request against Caddy's admin API through the
+// private unix socket inside the proxy container.
 func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([]byte, error) {
 	var bodyJSON []byte
 	var err error
+
+	if isCaddyAdminPath(path) {
+		return nil, fmt.Errorf("refusing Caddy admin request %s %s: Azud manages the admin endpoint", method, path)
+	}
 
 	if body != nil {
 		bodyJSON, err = json.Marshal(body)
@@ -263,32 +282,158 @@ func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([
 		}
 	}
 
-	// Execute curl command via SSH to reach Caddy's admin API.
-	// Use -f (--fail) so curl returns a non-zero exit code on HTTP 4xx/5xx
-	// errors, preventing silent failures when Caddy rejects a config change.
-	// Body is piped via stdin (-d @-) to avoid single-quote breakout issues
-	// when JSON values contain quote characters.
-	curlCmd := fmt.Sprintf("curl -sSf -X %s", method)
-	if len(bodyJSON) > 0 {
-		curlCmd += " -H 'Content-Type: application/json' -d @-"
+	// A complete configuration carries its own admin object. Replace it at
+	// this single choke point so no load, restore or rollback can move the
+	// admin endpoint off the private socket.
+	if len(bodyJSON) > 0 && replacesWholeCaddyConfig(path) {
+		normalized, dropped, err := normalizeAdminConfig(bodyJSON)
+		if err != nil {
+			return nil, fmt.Errorf("invalid Caddy configuration for %s: %w", path, err)
+		}
+		if len(dropped) > 0 {
+			c.log.Warn("Removed unexpected Caddy admin settings (%s) on %s", strings.Join(dropped, ", "), host)
+		}
+		bodyJSON = normalized
 	}
-	curlCmd += fmt.Sprintf(" http://localhost:%d%s", c.adminPort, path)
 
+	cmd, err := c.adminCommand(method, path, len(bodyJSON) > 0)
+	if err != nil {
+		return nil, err
+	}
+
+	// The body is piped via stdin so configuration content, including TLS
+	// keys, never appears in a remote command line.
 	var result *ssh.Result
 	if len(bodyJSON) > 0 {
-		result, err = c.sshClient.ExecuteWithStdin(host, curlCmd, bytes.NewReader(bodyJSON))
+		result, err = c.sshClient.ExecuteWithStdin(host, cmd, bytes.NewReader(bodyJSON))
 	} else {
-		result, err = c.sshClient.Execute(host, curlCmd)
+		result, err = c.sshClient.Execute(host, cmd)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute API request: %w", err)
 	}
 
 	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("API request failed: %s", result.Stderr)
+		return nil, adminRequestError(result)
 	}
 
 	return []byte(result.Stdout), nil
+}
+
+// adminCommand builds the remote command for one admin API request. curl's
+// -f (--fail) turns HTTP 4xx/5xx answers into a non-zero exit so a rejected
+// configuration change cannot fail silently.
+func (c *CaddyClient) adminCommand(method, path string, withBody bool) (string, error) {
+	if !validAdminMethod(method) || !validAdminPath(path) {
+		return "", fmt.Errorf("invalid Caddy admin request %s %q", method, path)
+	}
+
+	args := []string{"exec"}
+	if withBody {
+		args = append(args, "-i")
+	}
+	args = append(args, c.container,
+		"curl", "-sSf", "--max-time", "30",
+		"--unix-socket", CaddyAdminSocket,
+		"-X", method,
+	)
+	if withBody {
+		args = append(args, "-H", "Content-Type: application/json", "--data-binary", "@-")
+	}
+	args = append(args, "http://localhost"+path)
+
+	return c.podmanCmd + " " + shell.Join(args...), nil
+}
+
+func validAdminMethod(method string) bool {
+	switch method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAdminPath(path string) bool {
+	if !strings.HasPrefix(path, "/") {
+		return false
+	}
+	for _, r := range path {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isCaddyAdminPath reports whether a request addresses the admin endpoint's
+// own configuration. Changing it through the API could move the listener off
+// the private socket, so Azud never sends such requests.
+func isCaddyAdminPath(path string) bool {
+	return path == "/config/admin" || strings.HasPrefix(path, "/config/admin/")
+}
+
+// replacesWholeCaddyConfig reports whether a request body is a complete Caddy
+// configuration, which carries its own admin object.
+func replacesWholeCaddyConfig(path string) bool {
+	switch path {
+	case "/load", "/config", "/config/":
+		return true
+	default:
+		return false
+	}
+}
+
+// errProxyNotRunning marks an admin request that failed because the proxy
+// container does not exist or is not running.
+var errProxyNotRunning = fmt.Errorf("proxy container %s is not running", CaddyContainerName)
+
+// adminRequestError maps the failure modes of `podman exec ... curl` to
+// actionable errors. Older Azud releases served the admin API on TCP, so a
+// proxy container they created has no socket until it is recreated.
+func adminRequestError(result *ssh.Result) error {
+	stderr := strings.TrimSpace(result.Stderr)
+	lower := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lower, "no such container"),
+		strings.Contains(lower, "container state improper"),
+		strings.Contains(lower, "can only create exec sessions on running containers"):
+		return fmt.Errorf("caddy admin API unavailable: %w: %s", errProxyNotRunning, stderr)
+	case result.ExitCode == 7,
+		strings.Contains(lower, "failed to connect"),
+		strings.Contains(lower, "could not connect"):
+		return fmt.Errorf("caddy admin socket %s is not accepting connections; if this proxy was created by an older Azud release, run 'azud proxy reboot': %s", CaddyAdminSocket, stderr)
+	default:
+		return fmt.Errorf("API request failed: %s", result.Stderr)
+	}
+}
+
+// normalizeAdminConfig replaces the admin object of a complete Caddy
+// configuration with Azud's private socket listener and keeps every other key
+// unchanged, including large integers. It returns the admin keys other than
+// listen that were removed. Keys such as remote, identity or config.load would
+// otherwise let a previously modified configuration reopen or replace the
+// control plane on the next load or restart.
+func normalizeAdminConfig(data []byte) ([]byte, []string, error) {
+	config, err := decodeJSONObject(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	var dropped []string
+	if admin, ok := config["admin"].(map[string]interface{}); ok {
+		for key := range admin {
+			if key != "listen" {
+				dropped = append(dropped, key)
+			}
+		}
+	}
+	sort.Strings(dropped)
+	config["admin"] = map[string]interface{}{"listen": CaddyAdminListen}
+	normalized, err := json.Marshal(config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode normalized Caddy configuration: %w", err)
+	}
+	return normalized, dropped, nil
 }
 
 // GetConfig retrieves the current Caddy configuration
@@ -320,6 +465,7 @@ func (c *CaddyClient) LoadConfig(host string, config *CaddyConfig) error {
 
 // LoadRawConfig loads already validated JSON without discarding fields Azud
 // does not model. This is required for safe rollback and persisted restores.
+// apiRequest still replaces the admin object with the private socket listener.
 func (c *CaddyClient) LoadRawConfig(host string, data []byte) error {
 	if !json.Valid(data) {
 		return fmt.Errorf("invalid raw Caddy configuration")
