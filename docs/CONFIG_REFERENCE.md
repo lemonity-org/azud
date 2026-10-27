@@ -285,6 +285,12 @@ builder:
       ref: ghcr.io/your-org/my-app-cache
 ```
 
+With `builder.remote.host`, Azud streams the build context to a private
+directory created with `mktemp -d` (mode `0700`) as
+`/tmp/azud-build-<service>.XXXXXXXXXX` on the builder, and removes it after the
+build or as soon as a sync step fails. The builder needs `mktemp`, which every
+supported Linux distribution provides.
+
 ## Deployment Settings
 
 ```yaml

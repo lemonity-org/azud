@@ -9,8 +9,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
-	"time"
 
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/shell"
@@ -20,7 +20,7 @@ import (
 // syncBuildContext archives the local build context and streams it to the
 // remote builder host over SSH. Returns the remote directory path where
 // the context was extracted.
-func syncBuildContext(sshClient *ssh.Client, host, localContext string) (string, error) {
+func syncBuildContext(sshClient *ssh.Client, host, localContext string) (_ string, retErr error) {
 	log := output.DefaultLogger
 
 	if localContext == "" {
@@ -37,17 +37,29 @@ func syncBuildContext(sshClient *ssh.Client, host, localContext string) (string,
 		return "", fmt.Errorf("build context directory does not exist: %s", absContext)
 	}
 
-	remotePath := fmt.Sprintf("/tmp/azud-build-%s-%d", cfg.Service, time.Now().UnixNano())
-
-	log.Info("Syncing build context to %s:%s...", host, remotePath)
-
-	// Create remote directory
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", shell.Quote(remotePath))
-	if result, err := sshClient.Execute(host, mkdirCmd); err != nil {
+	// Create a private, unpredictable remote directory. mktemp -d creates it
+	// with mode 0700, so other users on a shared builder cannot read the
+	// context.
+	result, err := sshClient.Execute(host, remoteBuildDirCommand(cfg.Service))
+	if err != nil {
 		return "", fmt.Errorf("failed to create remote build directory: %w", err)
 	} else if result.ExitCode != 0 {
 		return "", fmt.Errorf("failed to create remote build directory: %s", result.Stderr)
 	}
+	remotePath, err := parseRemoteBuildDir(cfg.Service, result.Stdout)
+	if err != nil {
+		return "", err
+	}
+
+	// Remove the directory on every failure from here on; the caller only
+	// schedules cleanup after a successful sync.
+	defer func() {
+		if retErr != nil {
+			cleanupBuildContext(sshClient, host, remotePath)
+		}
+	}()
+
+	log.Info("Syncing build context to %s:%s...", host, remotePath)
 
 	// Read ignore patterns
 	patterns := readContainerIgnore(absContext)
@@ -65,7 +77,7 @@ func syncBuildContext(sshClient *ssh.Client, host, localContext string) (string,
 	}()
 
 	extractCmd := fmt.Sprintf("tar xzf - -C %s", shell.Quote(remotePath))
-	result, err := sshClient.ExecuteWithStdin(host, extractCmd, pr)
+	result, err = sshClient.ExecuteWithStdin(host, extractCmd, pr)
 	_ = pr.Close()
 	archiveBuildErr := <-archiveErr
 	if err != nil {
@@ -84,19 +96,53 @@ func syncBuildContext(sshClient *ssh.Client, host, localContext string) (string,
 	return remotePath, nil
 }
 
+// remoteBuildDirPrefix is the only location remote build contexts are
+// created in and removed from.
+const remoteBuildDirPrefix = "/tmp/azud-build-"
+
+// remoteBuildDirRegex matches a single directory directly under /tmp. It has
+// no slash after the prefix, so a value cannot escape with "..".
+var remoteBuildDirRegex = regexp.MustCompile(`^/tmp/azud-build-[A-Za-z0-9_.-]+$`)
+
+// remoteBuildDirCommand creates a private remote build directory with mktemp
+// and prints its path. The template keeps the azud-build-<service>. prefix so
+// stale directories remain recognisable.
+func remoteBuildDirCommand(service string) string {
+	template := remoteBuildDirPrefix + service + ".XXXXXXXXXX"
+	return fmt.Sprintf(`umask 077 && d=$(mktemp -d %s) && chmod 700 "$d" && test -d "$d" && test ! -L "$d" && printf '%%s\n' "$d"`, shell.Quote(template))
+}
+
+// parseRemoteBuildDir extracts the directory created by remoteBuildDirCommand.
+// The last non-empty line is used so login banners cannot be mistaken for the
+// path, and the result must match the expected template.
+func parseRemoteBuildDir(service, stdout string) (string, error) {
+	var remotePath string
+	for _, line := range strings.Split(stdout, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			remotePath = line
+		}
+	}
+	if !remoteBuildDirRegex.MatchString(remotePath) || !strings.HasPrefix(remotePath, remoteBuildDirPrefix+service+".") {
+		return "", fmt.Errorf("failed to create remote build directory: unexpected path %q", remotePath)
+	}
+	return remotePath, nil
+}
+
 // cleanupBuildContext removes the remote build context directory.
 func cleanupBuildContext(sshClient *ssh.Client, host, remotePath string) {
-	if remotePath == "" {
-		return
-	}
-	// Safety check: only remove paths under /tmp/azud-build-
-	if !strings.HasPrefix(remotePath, "/tmp/azud-build-") {
+	// Safety check: only remove a single directory under /tmp/azud-build-
+	if !remoteBuildDirRegex.MatchString(remotePath) {
 		return
 	}
 	log := output.DefaultLogger
-	cmd := fmt.Sprintf("rm -rf %s", shell.Quote(remotePath))
-	if _, err := sshClient.Execute(host, cmd); err != nil {
+	cmd := fmt.Sprintf("rm -rf -- %s", shell.Quote(remotePath))
+	result, err := sshClient.Execute(host, cmd)
+	if err != nil {
 		log.Warn("Failed to clean up remote build context: %v", err)
+		return
+	}
+	if !result.Success() {
+		log.Warn("Failed to clean up remote build context %s: %s", remotePath, strings.TrimSpace(result.Stderr))
 	}
 }
 
