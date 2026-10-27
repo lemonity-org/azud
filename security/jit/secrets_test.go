@@ -164,11 +164,11 @@ func itoa(n int) string {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: only the literal ".azud/secrets" is excluded from the build
-// context. A custom secrets_path is uploaded to a remote builder.
+// Control: the configured secrets_path and any nested .azud/secrets are never
+// uploaded in a remote build context, even when an ignore file negates them.
 // ---------------------------------------------------------------------------
 
-func TestFinding_BuildContextUploadsCustomSecretsPath(t *testing.T) {
+func TestControl_BuildContextExcludesConfiguredSecretsPath(t *testing.T) {
 	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
 	dir := newWorkdir(t)
 
@@ -176,6 +176,7 @@ func TestFinding_BuildContextUploadsCustomSecretsPath(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n", 0o644)
 	writeFile(t, filepath.Join(dir, "config", "prod.secrets"), "CUSTOM_SECRET=leaked-to-builder\n", 0o600)
 	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "DEFAULT_SECRET=should-not-upload\n", 0o600)
+	writeFile(t, filepath.Join(dir, ".dockerignore"), "!config/prod.secrets\n", 0o644)
 
 	configPath := writeConfig(t, dir, `service: shop
 image: example/shop:v1
@@ -183,7 +184,7 @@ servers:
   worker:
     hosts: [127.0.0.1]
 secrets_provider: file
-secrets_path: config/prod.secrets
+secrets_path: ./config/prod.secrets
 builder:
   context: `+dir+`
   remote:
@@ -202,21 +203,44 @@ ssh:
 		t.Fatalf("remote build failed: %s", res)
 	}
 
-	extract := fake.waitCommand(t, "tar xzf -", 5_000_000_000)
+	extract := fake.waitCommand(t, "tar xzf -", 5*time.Second)
 	if len(extract.Stdin) == 0 {
 		t.Fatalf("no build context archive captured:\n%s", commandDump(fake.snapshot()))
 	}
 	entries := tarEntries(t, extract.Stdin)
-	if _, ok := entries["config/prod.secrets"]; !ok {
-		t.Fatalf("custom secrets file was not uploaded; entries: %v", keys(entries))
+	if _, ok := entries["Dockerfile"]; !ok {
+		t.Fatalf("Dockerfile missing from the build context; entries: %v", keys(entries))
 	}
-	if strings.Contains(string(entries[".azud/secrets"]), "should-not-upload") {
-		t.Fatalf("default secrets file was uploaded despite the mandatory exclude")
+	for _, secret := range []string{"config/prod.secrets", ".azud/secrets"} {
+		if _, ok := entries[secret]; ok {
+			t.Fatalf("secrets file %s was uploaded to the remote builder; entries: %v", secret, keys(entries))
+		}
 	}
-	if !strings.Contains(string(entries["config/prod.secrets"]), "leaked-to-builder") {
-		t.Fatalf("custom secrets content missing")
+}
+
+func TestControl_BuildContextExcludesNestedProjectSecrets(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+	repo := t.TempDir()
+	project := filepath.Join(repo, "services", "shop")
+	writeFile(t, filepath.Join(repo, "Dockerfile"), "FROM scratch\n", 0o644)
+	writeFile(t, filepath.Join(project, ".azud", "secrets"), "NESTED=leaked\n", 0o600)
+
+	// The project lives below the build context (monorepo layout), so the
+	// default secrets file is at services/shop/.azud/secrets in the archive.
+	configPath := writeConfig(t, project, remoteBuildConfig(t, repo, fake.port()))
+	res := runAzud(t, project, nil, "-c", configPath, "build", "--no-push")
+	if res.Exit != 0 {
+		t.Fatalf("remote build failed: %s", res)
 	}
-	t.Logf("VULNERABLE: custom secrets_path config/prod.secrets was included in the remote build context")
+
+	extract := fake.waitCommand(t, "tar xzf -", 5*time.Second)
+	entries := tarEntries(t, extract.Stdin)
+	if _, ok := entries["Dockerfile"]; !ok {
+		t.Fatalf("Dockerfile missing from the build context; entries: %v", keys(entries))
+	}
+	if _, ok := entries["services/shop/.azud/secrets"]; ok {
+		t.Fatalf("nested project secrets were uploaded to the remote builder; entries: %v", keys(entries))
+	}
 }
 
 func keys[V any](m map[string]V) []string {
