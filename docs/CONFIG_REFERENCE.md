@@ -10,6 +10,13 @@ service: my-app
 image: ghcr.io/your-org/my-app
 ```
 
+`image`, `accessories.*.image`, and `proxy.healthcheck.helper_image` must be
+OCI image references: `[registry[:port]/]path[:tag][@digest]`. Repository
+path components are lowercase letters and digits joined by `.`, `_`, `__`, or
+`-`; tags are up to 128 letters, digits, `_`, `.`, or `-` and cannot start
+with `.` or `-`. Surrounding whitespace, uppercase repository paths, and
+values such as `--privileged` are rejected when the config is loaded.
+
 ## Servers and Roles
 
 ```yaml

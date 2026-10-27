@@ -1268,12 +1268,43 @@ func TestIsValidImageRef(t *testing.T) {
 		{"docker.io/library/redis:7-alpine", true},
 		{"myimage@sha256:abcdef1234567890", true},
 		{"registry.example.com/image:tag", true},
+		{"localhost/app", true},
+		{"registry.example.com:5000/team/app:1.0", true},
+		{"[::1]:5000/app:v1", true},
+		{"Registry.Example.com/app", true},
+		{"a/b/c", true},
+		{"my_org/my__app", true},
+		{"a--b", true},
+		{"ghcr.io/org/app:v1@sha256:abcdef1234567890", true},
+		{"docker.io/curlimages/curl:8.5.0@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", true},
 
 		{"", false},
 		{"image with spaces", false},
 		{"image:tag with spaces", false},
 		{"image:tag!invalid", false},
 		{"image@baddigest", false},
+		{"--privileged", false},
+		{"-nginx", false},
+		{"-x/y", false},
+		{"foo;bar", false},
+		{"$(id)", false},
+		{"Org/app", false},
+		{"ghcr.io/Org/app", false},
+		{"nginx:", false},
+		{":tag", false},
+		{"nginx:-x", false},
+		{"nginx:.x", false},
+		{"a//b", false},
+		{"a/", false},
+		{"/a", false},
+		{"a..b", false},
+		{" nginx", false},
+		{"nginx ", false},
+		{"nginx\n", false},
+		{"nginx@sha256:", false},
+		{"nginx@SHA256:ab", false},
+		{"bad_host:5000/app", false},
+		{strings.Repeat("a", 256), false},
 	}
 
 	for _, tt := range tests {
@@ -1300,6 +1331,41 @@ func TestValidate_ImageRefValidation(t *testing.T) {
 	err := Validate(cfg)
 	if err == nil || !strings.Contains(err.Error(), "invalid image reference") {
 		t.Fatalf("expected image reference error, got %v", err)
+	}
+}
+
+func TestValidate_ImageRefErrorQuotesValue(t *testing.T) {
+	cfg := &Config{
+		Service: "test",
+		Image:   "app\x1b]0;owned\x07",
+		Servers: map[string]RoleConfig{
+			"web": {Hosts: []string{"localhost"}},
+		},
+		Proxy: ProxyConfig{
+			Host:        "test.example.com",
+			Healthcheck: HealthcheckConfig{HelperImage: "--privileged"},
+		},
+		Accessories: map[string]AccessoryConfig{
+			"db": {Image: "foo;bar", Host: "localhost"},
+		},
+		SSH: SSHConfig{Port: 22},
+	}
+
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected image reference errors")
+	}
+	for _, want := range []string{
+		`image: invalid image reference: "app\x1b]0;owned\a"`,
+		`proxy.healthcheck.helper_image: invalid image reference: "--privileged"`,
+		`accessories.db.image: invalid image reference: "foo;bar"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("error contains a raw control character: %q", err)
 	}
 }
 
