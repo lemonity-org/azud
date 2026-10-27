@@ -262,21 +262,13 @@ func (l *Loader) loadSecretsFromEnv(cfg *Config) error {
 		return fmt.Errorf("secrets_env_prefix is required when secrets_provider=env")
 	}
 
-	secrets := make(map[string]string)
-	for _, entry := range os.Environ() {
-		parts := strings.SplitN(entry, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
-		name := strings.TrimPrefix(key, prefix)
-		if name == "" {
-			continue
-		}
-		secrets[name] = parts[1]
+	if prefix == "AZUD_" || prefix == "AZUD" {
+		fmt.Fprintf(os.Stderr, "  WARN   secrets_env_prefix %s overlaps Azud's own AZUD_* variables; use a dedicated prefix such as AZUD_SECRET_\n", prefix)
+	}
+
+	secrets, skipped := envSecrets(os.Environ(), prefix, infrastructureSecretRefs(cfg))
+	if len(skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "  WARN   secrets_env_prefix %s matched Azud-owned or infrastructure variables %s; they were not loaded as application secrets\n", prefix, strings.Join(skipped, ", "))
 	}
 
 	cfg.loadedSecrets = secrets

@@ -273,14 +273,12 @@ func TestFinding_WorldReadableSecretsFileOnlyWarns(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: the documented AZUD_ prefix can capture unrelated AZUD_* values and
-// env push will deliver them to every host.
+// Control: a broad AZUD_ prefix never captures Azud-owned AZUD_* variables or
+// infrastructure credentials as application secrets, and it is warned about.
 // ---------------------------------------------------------------------------
 
-func TestFinding_EnvPrefixPushesUnrelatedSecrets(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
-	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, `service: shop
+func envPrefixConfig(t *testing.T, port int, extra string) string {
+	return `service: shop
 image: example/shop:v1
 servers:
   web:
@@ -289,26 +287,77 @@ proxy:
   host: shop.example.com
 secrets_provider: env
 secrets_env_prefix: AZUD_
-ssh:
-  user: `+currentUser()+`
-  port: `+itoa(fake.port())+`
-  keys: ["`+filepath.ToSlash(clientKeyPath(t))+`"]
+` + extra + `ssh:
+  user: ` + currentUser() + `
+  port: ` + itoa(port) + `
+  keys: ["` + filepath.ToSlash(clientKeyPath(t)) + `"]
   connect_timeout: 2s
   command_timeout: 40s
   insecure_ignore_host_key: true
-`)
+`
+}
+
+func TestControl_EnvPrefixSkipsReservedAzudVariables(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, envPrefixConfig(t, fake.port(), ""))
+	stateDir := t.TempDir()
 	res := runAzud(t, dir, []string{
 		"AZUD_SSH_KEY=ssh-key-material",
+		"AZUD_STATE_DIR=" + stateDir,
 		"AZUD_APP_SECRET=app-secret-value",
 	}, "-c", configPath, "env", "push")
 	if res.Exit != 0 {
 		t.Fatalf("env push failed: %s", res)
 	}
 	write := fake.waitCommand(t, "cat > \"$tmp\"", 5*time.Second)
-	if !strings.Contains(string(write.Stdin), "ssh-key-material") {
-		t.Fatalf("expected unrelated AZUD_* value to be pushed, got:\n%s", write.Stdin)
+	if !strings.Contains(string(write.Stdin), "APP_SECRET=app-secret-value") {
+		t.Fatalf("application secret was not pushed:\n%s", write.Stdin)
 	}
-	t.Logf("VULNERABLE (low/medium): secrets_env_prefix=AZUD_ captured AZUD_SSH_KEY and pushed it to the host")
+	for _, leaked := range []string{"ssh-key-material", "SSH_KEY=", "STATE_DIR="} {
+		if strings.Contains(string(write.Stdin), leaked) {
+			t.Fatalf("Azud-owned variable leaked into the runtime secrets (%s):\n%s", leaked, write.Stdin)
+		}
+	}
+	if !strings.Contains(res.Stderr, "WARN") || !strings.Contains(res.Stderr, "AZUD_SECRET_") || !strings.Contains(res.Stderr, "AZUD_SSH_KEY") {
+		t.Fatalf("expected broad-prefix and skipped-variable warnings on stderr, got: %s", res)
+	}
+	if strings.Contains(res.Combined, "ssh-key-material") {
+		t.Fatalf("warning printed a secret value: %s", res)
+	}
+}
+
+func TestControl_EnvPrefixDoesNotPushRegistryCredential(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, envPrefixConfig(t, fake.port(), `registry:
+  server: ghcr.io
+  username: deployer
+  password: [AZUD_REGISTRY_PASSWORD]
+`))
+	env := []string{
+		"AZUD_REGISTRY_PASSWORD=reg-token-xyz",
+		"AZUD_APP_SECRET=app-secret-value",
+	}
+
+	res := runAzud(t, dir, env, "-c", configPath, "env", "push")
+	if res.Exit != 0 {
+		t.Fatalf("env push failed: %s", res)
+	}
+	write := fake.waitCommand(t, "cat > \"$tmp\"", 5*time.Second)
+	if strings.Contains(string(write.Stdin), "reg-token-xyz") {
+		t.Fatalf("registry credential was pushed into the runtime secrets:\n%s", write.Stdin)
+	}
+
+	// Registry login still resolves the credential from the environment.
+	res = runAzud(t, dir, env, "-c", configPath, "registry", "login")
+	if res.Exit != 0 {
+		t.Fatalf("registry login failed: %s", res)
+	}
+	login := fake.waitCommand(t, "--password-stdin", 5*time.Second)
+	if !strings.Contains(string(login.Stdin), "reg-token-xyz") {
+		t.Fatalf("registry login did not receive the credential:\n%s", login.Stdin)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -412,7 +412,7 @@ security:
 ```yaml
 secrets_provider: file   # file, env, command
 secrets_path: .azud/secrets
-secrets_env_prefix: AZUD_
+secrets_env_prefix: AZUD_SECRET_
 secrets_command: ./bin/print-secrets
 secrets_remote_path: "~/.azud/secrets"
 ```
@@ -424,6 +424,24 @@ off stderr (for example, avoid `set -x`). If the command fails, Azud reports
 only its exit status, never its output. The command must finish within 30
 seconds, its stdout is limited to 1 MiB, and a background process that keeps
 stdout open after the command exits is an error.
+
+With `secrets_provider: env`, every environment variable that starts with
+`secrets_env_prefix` is loaded with the prefix removed, so
+`AZUD_SECRET_DATABASE_URL` becomes the secret `DATABASE_URL`. Use a dedicated
+prefix such as `AZUD_SECRET_`. Azud never loads its own variables as secrets,
+even when they match the prefix: `AZUD_STATE_DIR`, the hook variables
+(`AZUD_SERVICE`, `AZUD_IMAGE`, `AZUD_VERSION`, `AZUD_HOSTS`,
+`AZUD_DESTINATION`, `AZUD_PERFORMER`, `AZUD_ROLE`, `AZUD_HOOK`,
+`AZUD_RECORDED_AT`, `AZUD_RUNTIME`), `AZUD_INSTALL_DIR`, `AZUD_INSTALL_TMP`,
+`AZUD_SSH_KEY`, `AZUD_TEST_BIN`, and `AZUD_INTEGRATION*`. A variable whose full
+name is a `registry.password`, `proxy.ssl_certificate`, or
+`proxy.ssl_private_key` reference is also skipped. Registry login reads such a
+`registry.password` variable directly from the environment, but custom TLS
+material is read only from the loaded secrets: set `proxy.ssl_certificate` and
+`proxy.ssl_private_key` to the name without the prefix (for example `TLS_CERT`
+for `AZUD_SECRET_TLS_CERT`), not to the full variable name. Skipped names
+(never values) are reported as a warning, and a bare `AZUD_` prefix prints a
+warning recommending `AZUD_SECRET_`.
 
 `azud env push` excludes `registry.password`, `proxy.ssl_certificate`, and
 `proxy.ssl_private_key` references from the remote runtime env file. Azud uses
