@@ -262,7 +262,32 @@ cron:
   backup:
     schedule: "0 2 * * *"
     command: bin/backup
+    lock: true      # skip a run while another run of this job holds the lock
+    timeout: 1h
 ```
+
+`lock: true` makes the scheduled container and `azud cron run` exclude each
+other through `flock`, so the image must provide `flock`. Azud creates one lock
+directory per job outside its state directory
+(`/var/lib/azud-locks/cron/<service>/<job>` for root,
+`~/.local/share/azud-locks/cron/<service>/<job>` otherwise) and mounts only
+that directory into the scheduled container, read-only, at
+`/run/azud-cron-lock`. The job cannot create files or symlinks there, and it
+never sees the Azud state directory, which holds the Caddy configuration and
+deploy locks. The lock file is readable by any container user, so images that
+run as a non-root user can take the lock too.
+
+Older releases mounted the whole state directory read-write for `lock: true`.
+Run `azud cron boot` after upgrading: it recreates cron containers that still
+have that mount. Until then, `azud cron run` takes both the old and the new
+lock.
+
+Older releases lock only the old file, so their `azud cron run` does not
+exclude a cron container recreated by `azud cron boot`. Upgrade every machine
+and CI job that runs `azud cron run` before you run `azud cron boot`. To
+downgrade, run `azud cron stop <job>` first and then the older release's
+`azud cron boot`, because older releases leave a running cron container as it
+is.
 
 ## SSH and Security
 

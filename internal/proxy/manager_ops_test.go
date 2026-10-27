@@ -1,8 +1,115 @@
 package proxy
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+// runStateCommand runs a generated state-directory command with /bin/sh the
+// way a remote login shell would, using home as ${HOME}.
+func runStateCommand(t *testing.T, home, command, stdin string) error {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("command output: %s", out)
+	}
+	return err
+}
+
+func TestPersistConfigCommandDoesNotFollowPlantedSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	home := t.TempDir()
+	outside := t.TempDir()
+	stateDir := filepath.Join(home, ".local", "share", "azud")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Both the old fixed temp name and the final path point at the victim.
+	for _, name := range []string{CaddyConfigFileName + ".tmp", CaddyConfigFileName} {
+		if err := os.Symlink(victim, filepath.Join(stateDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := runStateCommand(t, home, persistConfigCommand("deploy"), `{"apps":{}}`); err != nil {
+		t.Fatalf("persist failed: %v", err)
+	}
+
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" || info.Mode().Perm() != 0o644 {
+		t.Fatalf("persist wrote through a symlink: victim = %q mode %o", data, info.Mode().Perm())
+	}
+	configFile := filepath.Join(stateDir, CaddyConfigFileName)
+	linfo, err := os.Lstat(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !linfo.Mode().IsRegular() || linfo.Mode().Perm() != 0o600 {
+		t.Fatalf("persisted config mode = %v, want regular 0600", linfo.Mode())
+	}
+	if data, _ := os.ReadFile(configFile); string(data) != `{"apps":{}}` {
+		t.Fatalf("persisted config = %q", data)
+	}
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "."+CaddyConfigFileName+".") {
+			t.Fatalf("persist left temp file %s behind", entry.Name())
+		}
+	}
+}
+
+func TestRestoreConfigCommandRefusesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	home := t.TempDir()
+	outside := t.TempDir()
+	stateDir := filepath.Join(home, ".local", "share", "azud")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte(`{"secret":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(stateDir, CaddyConfigFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runStateCommand(t, home, restoreConfigCommand("deploy"), ""); err == nil {
+		t.Fatal("restore accepted a symlinked config file")
+	}
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("restore changed the symlink target's mode to %o", info.Mode().Perm())
+	}
+}
 
 func TestSystemdUnitFromInspect(t *testing.T) {
 	tests := []struct {
