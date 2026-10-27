@@ -12,12 +12,13 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Finding: environment expansion happens on the raw YAML bytes, before the
-// document is parsed. A value containing a newline is therefore YAML syntax,
-// not data.
+// Control: environment references are expanded inside parsed YAML scalar
+// values only. An environment value is data and can never become YAML syntax.
+// The tests run `env list`, which loads secrets, so an injected
+// secrets_command would execute.
 // ---------------------------------------------------------------------------
 
-func TestFinding_ConfigEnvExpansionBecomesYAMLStructure(t *testing.T) {
+func TestControl_ConfigEnvExpansionCannotInjectYAMLStructure(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, `service: ${SERVICE_VALUE}
 image: example/shop:v1
@@ -26,23 +27,23 @@ servers:
     hosts: [127.0.0.1]
 `)
 	canary := filepath.Join(dir, "CANARY")
-	// The injected value closes the scalar and appends top-level keys. The
-	// command is executed by loadSecretsFromCommand during `azud config`.
 	injected := "shop\nsecrets_provider: command\nsecrets_command: \"touch " + canary + "\""
-	res := runAzud(t, dir, []string{"SERVICE_VALUE=" + injected}, "-c", configPath, "config")
-	if res.Exit != 0 {
-		t.Fatalf("azud config failed unexpectedly: %s", res)
+	res := runAzud(t, dir, []string{"SERVICE_VALUE=" + injected}, "-c", configPath, "env", "list")
+	if res.Exit == 0 {
+		t.Fatalf("multi-line environment value was accepted: %s", res)
 	}
-	if _, err := os.Stat(canary); err != nil {
-		t.Fatalf("YAML injection did not execute secrets_command; canary absent: %s", res)
+	if _, err := os.Stat(canary); !os.IsNotExist(err) {
+		t.Fatalf("injected secrets_command executed (stat err: %v): %s", err, res)
 	}
-	if !strings.Contains(res.Combined, "Service: shop") {
-		t.Fatalf("expected injected service value in output: %s", res)
+	if !strings.Contains(res.Combined, "SERVICE_VALUE") || !strings.Contains(res.Combined, "control character") {
+		t.Fatalf("expected an error naming the variable: %s", res)
 	}
-	t.Logf("VULNERABLE: env value %q was parsed as YAML and executed secrets_command", injected)
+	if strings.Contains(res.Combined, "touch") {
+		t.Fatalf("error echoed the environment value: %s", res)
+	}
 }
 
-func TestFinding_ConfigEnvExpansionOverridesSSHSecurity(t *testing.T) {
+func TestControl_ConfigEnvExpansionCannotOverrideSSHSecurity(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, `service: ${SERVICE_VALUE}
 image: example/shop:v1
@@ -52,18 +53,54 @@ servers:
 proxy:
   host: shop.example.com
 `)
-	injected := "shop\nssh:\n  insecure_ignore_host_key: true"
-	t.Setenv("SERVICE_VALUE", injected)
+	t.Setenv("SERVICE_VALUE", "shop\nssh:\n  insecure_ignore_host_key: true")
 
-	loader := config.NewLoader(configPath, "")
-	cfg, err := loader.Load()
-	if err != nil {
-		t.Fatalf("load injected config: %v", err)
+	cfg, err := config.NewLoader(configPath, "").Load()
+	if err == nil {
+		t.Fatalf("injected config loaded; insecure_ignore_host_key=%v", cfg.SSH.InsecureIgnoreHostKey)
 	}
-	if !cfg.SSH.InsecureIgnoreHostKey {
-		t.Fatalf("injected ssh.insecure_ignore_host_key did not take effect")
+	if cfg != nil {
+		t.Fatalf("Load returned a config alongside error %v", err)
 	}
-	t.Logf("VULNERABLE: env injection silently enabled ssh.insecure_ignore_host_key")
+}
+
+func TestControl_ConfigEnvExpansionInCommentIsInert(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, `# built from ${BRANCH}
+service: shop
+image: example/shop:v1
+servers:
+  worker:
+    hosts: [127.0.0.1]
+`)
+	canary := filepath.Join(dir, "CANARY")
+	injected := "main\nsecrets_provider: command\nsecrets_command: \"touch " + canary + "\""
+	res := runAzud(t, dir, []string{"BRANCH=" + injected}, "-c", configPath, "env", "list")
+	if res.Exit != 0 {
+		t.Fatalf("a reference in a comment broke loading: %s", res)
+	}
+	if _, err := os.Stat(canary); !os.IsNotExist(err) {
+		t.Fatalf("reference in a comment executed secrets_command (stat err: %v): %s", err, res)
+	}
+}
+
+func TestControl_ConfigEnvExpansionFlowSequenceStaysOneScalar(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, `service: shop
+image: example/shop:v1
+servers:
+  web:
+    hosts: [${HOSTS}]
+proxy:
+  host: shop.example.com
+`)
+	res := runAzud(t, dir, []string{"HOSTS=127.0.0.1, 10.6.6.6"}, "-c", configPath, "env", "list")
+	if res.Exit == 0 {
+		t.Fatalf("comma in an environment value added a deploy host: %s", res)
+	}
+	if !strings.Contains(res.Combined, "servers.web.hosts[0]: invalid host address") {
+		t.Fatalf("expected the value to stay one invalid host: %s", res)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -127,13 +127,18 @@ accessories:
     image: redis:7-alpine
     host: 192.168.1.1
     port: 6379
-    cmd: "redis-server --appendonly yes --requirepass $REDIS_PASSWORD"
+    cmd: 'redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"'
     env:
       secret:
         - REDIS_PASSWORD
     volumes:
       - /var/lib/redis/data:/data
 ```
+
+`$$` keeps Azud from expanding `REDIS_PASSWORD` from your local environment
+when it loads the config. The command reaches the container as
+`redis-server ... "$REDIS_PASSWORD"` and runs through `sh -c` there, so the
+container's shell reads the secret from its own environment.
 
 ### Worker Servers (Sidekiq / Background Jobs)
 
