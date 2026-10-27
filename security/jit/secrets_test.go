@@ -288,40 +288,94 @@ ssh:
 }
 
 // ---------------------------------------------------------------------------
-// Finding: remote build contexts live in a predictable, world-listable /tmp
-// directory created with mkdir -p (default umask), not mktemp -d.
+// Control: remote build contexts live in a private mktemp directory that is
+// removed on success and on every failure after it was created.
 // ---------------------------------------------------------------------------
 
-func TestFinding_BuildContextTempDirIsPredictable(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
-	dir := newWorkdir(t)
-	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n", 0o644)
-	configPath := writeConfig(t, dir, `service: shop
+func remoteBuildConfig(t *testing.T, dir string, port int) string {
+	return `service: shop
 image: example/shop:v1
 servers:
   worker:
     hosts: [127.0.0.1]
 builder:
-  context: `+dir+`
+  context: ` + dir + `
   remote:
     host: 127.0.0.1
 ssh:
-  user: `+currentUser()+`
-  port: `+itoa(fake.port())+`
-  keys: ["`+filepath.ToSlash(clientKeyPath(t))+`"]
+  user: ` + currentUser() + `
+  port: ` + itoa(port) + `
+  keys: ["` + filepath.ToSlash(clientKeyPath(t)) + `"]
   connect_timeout: 2s
   command_timeout: 40s
   insecure_ignore_host_key: true
-`)
+`
+}
+
+func TestControl_BuildContextUsesPrivateTempDir(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+	dir := newWorkdir(t)
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n", 0o644)
+	configPath := writeConfig(t, dir, remoteBuildConfig(t, dir, fake.port()))
 	res := runAzud(t, dir, nil, "-c", configPath, "build", "--no-push")
 	if res.Exit != 0 {
 		t.Fatalf("build failed: %s", res)
 	}
-	mkdir := fake.waitCommand(t, "mkdir -p /tmp/azud-build-", 5*time.Second)
-	if strings.Contains(mkdir.Command, "chmod 700") || strings.Contains(mkdir.Command, "mktemp") {
-		t.Fatalf("remote build dir now uses a private temporary directory; finding may be fixed:\n%s", mkdir.Command)
+	mktemp := fake.waitCommand(t, "mktemp -d /tmp/azud-build-shop.", 5*time.Second)
+	for _, want := range []string{"umask 077", "chmod 700"} {
+		if !strings.Contains(mktemp.Command, want) {
+			t.Fatalf("remote build dir command lacks %q:\n%s", want, mktemp.Command)
+		}
 	}
-	t.Logf("VULNERABLE (low): remote build context is created with a predictable name and default umask: %s", mkdir.Command)
+	if got := fake.commandsMatching("mkdir -p /tmp/azud-build-"); len(got) != 0 {
+		t.Fatalf("remote build dir still created with mkdir -p:\n%s", commandDump(got))
+	}
+	extract := fake.waitCommand(t, "tar xzf -", 5*time.Second)
+	if !strings.Contains(extract.Command, fakeBuildDir) {
+		t.Fatalf("context was not extracted into the mktemp directory:\n%s", extract.Command)
+	}
+	fake.waitCommand(t, "rm -rf -- "+fakeBuildDir, 5*time.Second)
+}
+
+func TestControl_BuildContextCleanedUpOnSyncFailure(t *testing.T) {
+	base := permissive()
+	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
+		if strings.Contains(command, "tar xzf -") {
+			_, _ = io.ReadAll(stdin)
+			return fakeResult{Stderr: "tar: write error", Exit: 2}
+		}
+		return base(command, stdin)
+	})
+	dir := newWorkdir(t)
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n", 0o644)
+	configPath := writeConfig(t, dir, remoteBuildConfig(t, dir, fake.port()))
+	res := runAzud(t, dir, nil, "-c", configPath, "build", "--no-push")
+	if res.Exit == 0 {
+		t.Fatalf("build succeeded despite a failed context extraction: %s", res)
+	}
+	fake.waitCommand(t, "rm -rf -- "+fakeBuildDir, 5*time.Second)
+}
+
+func TestControl_BuildContextRejectsUnexpectedTempDir(t *testing.T) {
+	base := permissive()
+	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
+		if strings.Contains(command, "mktemp -d") {
+			return fakeResult{Stdout: "/etc\n"}
+		}
+		return base(command, stdin)
+	})
+	dir := newWorkdir(t)
+	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n", 0o644)
+	configPath := writeConfig(t, dir, remoteBuildConfig(t, dir, fake.port()))
+	res := runAzud(t, dir, nil, "-c", configPath, "build", "--no-push")
+	if res.Exit == 0 || !strings.Contains(res.Combined, "unexpected path") {
+		t.Fatalf("expected an unexpected-path failure, got: %s", res)
+	}
+	for _, forbidden := range []string{"tar xzf -", "rm -rf"} {
+		if got := fake.commandsMatching(forbidden); len(got) != 0 {
+			t.Fatalf("CLI ran %q against an unexpected build directory:\n%s", forbidden, commandDump(got))
+		}
+	}
 }
 
 // Control: env pull writes the local secrets file atomically with private

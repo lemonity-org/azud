@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -235,5 +236,95 @@ func TestCreateContextArchiveRejectsEscapingSymlink(t *testing.T) {
 	err := createContextArchive(&archive, dir, nil)
 	if err == nil || !strings.Contains(err.Error(), "outside the build context") {
 		t.Fatalf("expected escaping symlink error, got %v", err)
+	}
+}
+
+func TestRemoteBuildDirCommandUsesPrivateMktemp(t *testing.T) {
+	cmd := remoteBuildDirCommand("shop")
+	for _, want := range []string{"umask 077", "mktemp -d /tmp/azud-build-shop.XXXXXXXXXX", `chmod 700 "$d"`, `test ! -L "$d"`} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("remoteBuildDirCommand() = %q, missing %q", cmd, want)
+		}
+	}
+	if strings.Contains(cmd, "mkdir -p") {
+		t.Errorf("remoteBuildDirCommand() still uses mkdir -p: %q", cmd)
+	}
+}
+
+func TestRemoteBuildDirCommandCreatesPrivateDirectory(t *testing.T) {
+	if _, err := exec.LookPath("mktemp"); err != nil {
+		t.Skipf("mktemp unavailable: %v", err)
+	}
+	base := t.TempDir()
+	// Run the real shell command with the /tmp prefix redirected into the
+	// test directory so the test leaves nothing behind.
+	cmd := strings.Replace(remoteBuildDirCommand("shop"), "/tmp/", base+"/", 1)
+	out, err := exec.Command("sh", "-c", cmd).Output()
+	if err != nil {
+		t.Fatalf("run %q: %v", cmd, err)
+	}
+	created := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(created, filepath.Join(base, "azud-build-shop.")) {
+		t.Fatalf("created %q, want prefix %q", created, filepath.Join(base, "azud-build-shop."))
+	}
+	info, err := os.Lstat(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("created directory mode = %v, want drwx------", info.Mode())
+	}
+}
+
+func TestParseRemoteBuildDir(t *testing.T) {
+	tests := []struct {
+		name   string
+		stdout string
+		want   string
+	}{
+		{name: "mktemp path", stdout: "/tmp/azud-build-shop.Ab3dE6gH9j\n", want: "/tmp/azud-build-shop.Ab3dE6gH9j"},
+		{name: "banner before path", stdout: "Welcome to builder\n/tmp/azud-build-shop.Ab3dE6gH9j\n\n", want: "/tmp/azud-build-shop.Ab3dE6gH9j"},
+		{name: "empty", stdout: ""},
+		{name: "traversal", stdout: "/tmp/azud-build-shop.x/../../etc\n"},
+		{name: "outside tmp", stdout: "/etc\n"},
+		{name: "other service", stdout: "/tmp/azud-build-other.Ab3dE6gH9j\n"},
+		{name: "space", stdout: "/tmp/azud-build-shop.a b\n"},
+		{name: "old timestamp format", stdout: "/tmp/azud-build-shop-1793124359593662960\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseRemoteBuildDir("shop", tt.stdout)
+			if tt.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "unexpected path") {
+					t.Fatalf("parseRemoteBuildDir(%q) = %q, %v; want unexpected path error", tt.stdout, got, err)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("parseRemoteBuildDir(%q) = %q, %v; want %q", tt.stdout, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoteBuildDirRegexOnlyAllowsDirectChildren(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/tmp/azud-build-shop.Ab3dE6gH9j", true},
+		{"/tmp/azud-build-my.app.Ab3dE6gH9j", true},
+		{"/tmp/azud-build-", false},
+		{"/tmp/azud-build-x/../etc", false},
+		{"/tmp/azud-build-x/sub", false},
+		{"/etc", false},
+		{"", false},
+		{"/tmp/azud-build-x y", false},
+	}
+	for _, tt := range tests {
+		if got := remoteBuildDirRegex.MatchString(tt.path); got != tt.want {
+			t.Errorf("remoteBuildDirRegex.MatchString(%q) = %v, want %v", tt.path, got, tt.want)
+		}
 	}
 }

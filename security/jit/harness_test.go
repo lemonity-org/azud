@@ -455,6 +455,10 @@ func commandDump(commands []commandRecord) string {
 // Shared handlers
 // ---------------------------------------------------------------------------
 
+// fakeBuildDir is the remote build directory the fake builder reports for the
+// "shop" service.
+const fakeBuildDir = "/tmp/azud-build-shop.jit0000001"
+
 // permissive returns a handler that succeeds everything and returns {} for
 // Caddy admin GET requests. It is enough for most non-proxy commands.
 func permissive() fakeHandler {
@@ -470,6 +474,10 @@ func permissive() fakeHandler {
 			return fakeResult{Stdout: "{}"}
 		case strings.Contains(command, "test -f"):
 			return fakeResult{Exit: 1}
+		case strings.Contains(command, "mktemp -d /tmp/azud-build-"):
+			// Remote build contexts live in a mktemp directory whose path
+			// the CLI reads back and validates.
+			return fakeResult{Stdout: fakeBuildDir + "\n"}
 		case strings.Contains(command, "cat > \"") || strings.Contains(command, "cat > "):
 			_, _ = io.ReadAll(stdin)
 			return fakeResult{}
