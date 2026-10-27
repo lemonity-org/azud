@@ -555,6 +555,11 @@ Fetch and add SSH host keys to your local `known_hosts` file.
 #### `azud config`
 Display the resolved configuration (merging destination-specific configs).
 
+`azud config` validates the configuration but does not load secrets: it does
+not run `secrets_command` or read the secrets file. Use `azud env list` to
+check that secrets load. Shell completion (`azud completion <shell>` and the
+completion requests your shell sends) does not load the configuration at all.
+
 #### `azud version`
 Show the Azud CLI version.
 

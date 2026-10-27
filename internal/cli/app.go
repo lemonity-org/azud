@@ -728,10 +728,14 @@ var configCmd = &cobra.Command{
 	Short: "Show resolved configuration",
 	Long: `Display the resolved configuration after merging destination config.
 
+Secrets are not loaded: secrets_command is not executed and the secrets file
+is not read.
+
 Example:
   azud config
   azud config -d staging`,
-	RunE: runConfig,
+	Annotations: map[string]string{skipSecretsAnnotation: "true"},
+	RunE:        runConfig,
 }
 
 func init() {
