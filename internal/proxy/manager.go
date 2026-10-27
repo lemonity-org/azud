@@ -797,6 +797,13 @@ func copyManagedProxySettings(current, desired map[string]interface{}) error {
 	for _, key := range []string{"listen", "automatic_https", "logs", "max_header_bytes", "enable_full_duplex"} {
 		copyOptionalJSONField(currentServer, desiredServer, key)
 	}
+	// Caddy's log_credentials option is logs.should_log_credentials in JSON.
+	// Azud never sets it, so deleting it keeps Caddy's default redaction of
+	// Authorization, Cookie, Proxy-Authorization and Set-Cookie in access
+	// logs even if the live config enabled it.
+	if logs, ok := currentServer["logs"].(map[string]interface{}); ok {
+		delete(logs, "should_log_credentials")
+	}
 	copyOptionalJSONField(current, desired, "logging")
 	copyOptionalJSONField(currentApps, desiredApps, "tls")
 	return nil

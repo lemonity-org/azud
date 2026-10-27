@@ -105,9 +105,9 @@ cannot contain the release metadata injected into official binaries.
      #   responses: true
      #   max_request_body: 10485760
      #   memory: 1048576
-     # logging:
-     #   request_headers: [Authorization, Cookie] # redacted from logs
-     #   response_headers: [Set-Cookie] # redacted from logs
+     # logging: # Caddy always redacts Authorization, Cookie, Proxy-Authorization, Set-Cookie
+     #   request_headers: [X-Api-Key] # other credential headers to remove from logs
+     #   response_headers: [X-Session-Token] # other response headers to remove
      healthcheck:
        path: /up
        # readiness_path: /ready
@@ -305,9 +305,9 @@ proxy:
   #   responses: true
   #   max_request_body: 10485760
   #   memory: 1048576
-  # logging:
-  #   request_headers: [Authorization, Cookie] # redacted from logs
-  #   response_headers: [Set-Cookie] # redacted from logs
+  # logging: # Caddy always redacts Authorization, Cookie, Proxy-Authorization, Set-Cookie
+  #   request_headers: [X-Api-Key] # other credential headers to remove from logs
+  #   response_headers: [X-Session-Token] # other response headers to remove
   healthcheck:
     path: /up
     interval: 3s

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +109,53 @@ func TestRestoreConfigCommandRefusesSymlink(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o644 {
 		t.Fatalf("restore changed the symlink target's mode to %o", info.Mode().Perm())
+	}
+}
+
+func TestCopyManagedProxySettingsRemovesLogCredentials(t *testing.T) {
+	newConfig := func(server map[string]interface{}) map[string]interface{} {
+		return map[string]interface{}{
+			"apps": map[string]interface{}{
+				"http": map[string]interface{}{
+					"servers": map[string]interface{}{"srv0": server},
+				},
+			},
+		}
+	}
+	for _, loggingEnabled := range []bool{true, false} {
+		current := newConfig(map[string]interface{}{
+			"listen": []interface{}{":80"},
+			"logs": map[string]interface{}{
+				"default_logger_name":    "access",
+				"should_log_credentials": true,
+			},
+		})
+		manager := &Manager{}
+		desiredConfig := manager.buildBaseConfig()
+		manager.applyProxySettingsFrom(desiredConfig, &ProxyConfig{LoggingEnabled: loggingEnabled})
+		data, err := json.Marshal(desiredConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var desired map[string]interface{}
+		if err := json.Unmarshal(data, &desired); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := copyManagedProxySettings(current, desired); err != nil {
+			t.Fatal(err)
+		}
+		server := current["apps"].(map[string]interface{})["http"].(map[string]interface{})["servers"].(map[string]interface{})["srv0"].(map[string]interface{})
+		logs, hasLogs := server["logs"].(map[string]interface{})
+		if hasLogs != loggingEnabled {
+			t.Fatalf("logging enabled=%v but reconciled logs=%#v", loggingEnabled, server["logs"])
+		}
+		if _, ok := logs["should_log_credentials"]; ok {
+			t.Fatalf("should_log_credentials survived reconciliation (logging enabled=%v): %#v", loggingEnabled, server)
+		}
+		if strings.Contains(string(data), "log_credentials") {
+			t.Fatalf("desired Caddy config enables credential logging: %s", data)
+		}
 	}
 }
 
