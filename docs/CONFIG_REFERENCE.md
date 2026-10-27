@@ -291,6 +291,13 @@ directory created with `mktemp -d` (mode `0700`) as
 build or as soon as a sync step fails. The builder needs `mktemp`, which every
 supported Linux distribution provides.
 
+Remote build contexts never include the local secrets file: the configured
+`secrets_path` (resolved from the working directory, including through
+symlinks and hard links) and any `.azud/secrets` at any depth are excluded even
+if `.containerignore`/`.dockerignore` tries to re-include them. Local
+`podman build` still sends the context as-is, so keep secrets out of it with an
+ignore file.
+
 ## Deployment Settings
 
 ```yaml

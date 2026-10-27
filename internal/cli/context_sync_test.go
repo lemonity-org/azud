@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/lemonity-org/azud/internal/config"
 )
 
 func TestParseIgnorePatterns(t *testing.T) {
@@ -108,6 +111,7 @@ func TestReadContainerIgnoreAlwaysExcludesAzudSecrets(t *testing.T) {
 		{".azud/secrets", false, true},
 		{".azud/secrets/api", false, true},
 		{".azud/hooks/post-deploy", false, false},
+		{"services/shop/.azud/secrets", false, true},
 		{"debug.log", false, true},
 	}
 
@@ -162,8 +166,13 @@ func TestMatchIgnorePattern(t *testing.T) {
 
 func archiveHeaders(t *testing.T, dir string, patterns []ignorePattern) map[string]*tar.Header {
 	t.Helper()
+	return archiveHeadersExcluding(t, dir, patterns, contextExclusions{})
+}
+
+func archiveHeadersExcluding(t *testing.T, dir string, patterns []ignorePattern, excluded contextExclusions) map[string]*tar.Header {
+	t.Helper()
 	var archive bytes.Buffer
-	if err := createContextArchive(&archive, dir, patterns); err != nil {
+	if err := createContextArchive(&archive, dir, patterns, excluded); err != nil {
 		t.Fatalf("createContextArchive: %v", err)
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(archive.Bytes()))
@@ -233,9 +242,116 @@ func TestCreateContextArchiveRejectsEscapingSymlink(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	var archive bytes.Buffer
-	err := createContextArchive(&archive, dir, nil)
+	err := createContextArchive(&archive, dir, nil, contextExclusions{})
 	if err == nil || !strings.Contains(err.Error(), "outside the build context") {
 		t.Fatalf("expected escaping symlink error, got %v", err)
+	}
+}
+
+// useSecretsPath points the package config at secretsPath and runs the test
+// from workDir, matching how the loader resolves relative secrets paths.
+func useSecretsPath(t *testing.T, workDir, secretsPath string) {
+	t.Helper()
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+	cfg = &config.Config{SecretsPath: secretsPath}
+	t.Chdir(workDir)
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecretContextExclusions(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	writeTestFile(t, filepath.Join(project, "config", "prod.secrets"), "A=1\n")
+	writeTestFile(t, filepath.Join(project, "config", "[prod].secrets"), "A=1\n")
+	writeTestFile(t, filepath.Join(project, "config", "real.secrets"), "A=1\n")
+	writeTestFile(t, filepath.Join(outside, "prod.secrets"), "A=1\n")
+	if err := os.Symlink("real.secrets", filepath.Join(project, "config", "link.secrets")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	linkedContext := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(project, linkedContext); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		secretsPath string
+		context     string
+		want        []string
+		notWant     []string
+	}{
+		{name: "relative", secretsPath: "config/prod.secrets", context: project, want: []string{"config/prod.secrets", ".azud/secrets"}},
+		{name: "dot relative", secretsPath: "./config/prod.secrets", context: project, want: []string{"config/prod.secrets"}},
+		{name: "absolute inside context", secretsPath: filepath.Join(project, "config", "prod.secrets"), context: project, want: []string{"config/prod.secrets"}},
+		{name: "absolute outside context", secretsPath: filepath.Join(outside, "prod.secrets"), context: project, want: []string{".azud/secrets"}, notWant: []string{"prod.secrets", "../"}},
+		{name: "glob characters", secretsPath: "config/[prod].secrets", context: project, want: []string{"config/[prod].secrets"}},
+		{name: "context through symlink", secretsPath: "config/prod.secrets", context: linkedContext, want: []string{"config/prod.secrets"}},
+		{name: "secrets path is a symlink", secretsPath: "config/link.secrets", context: project, want: []string{"config/link.secrets", "config/real.secrets"}},
+		{name: "missing file", secretsPath: "config/missing.secrets", context: project, want: []string{"config/missing.secrets"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useSecretsPath(t, project, tt.secretsPath)
+			got := secretContextExclusions(tt.context)
+			for _, want := range tt.want {
+				if !slices.Contains(got.paths, want) {
+					t.Errorf("secretContextExclusions(%q) paths = %v, missing %q", tt.context, got.paths, want)
+				}
+			}
+			for _, path := range got.paths {
+				for _, notWant := range tt.notWant {
+					if strings.HasPrefix(path, notWant) {
+						t.Errorf("secretContextExclusions(%q) paths = %v, unexpected %q", tt.context, got.paths, path)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCreateContextArchiveExcludesConfiguredSecretsPath(t *testing.T) {
+	project := t.TempDir()
+	for name, content := range map[string]string{
+		"Dockerfile":                  "FROM scratch\n",
+		"config/prod.secrets":         "CUSTOM_SECRET=1\n",
+		"config/[prod].secrets":       "GLOB_SECRET=1\n",
+		".azud/secrets":               "DEFAULT_SECRET=1\n",
+		"services/shop/.azud/secrets": "NESTED_SECRET=1\n",
+		".dockerignore":               "!config/prod.secrets\n!.azud/secrets\n",
+	} {
+		writeTestFile(t, filepath.Join(project, filepath.FromSlash(name)), content)
+	}
+	if err := os.Link(filepath.Join(project, "config", "prod.secrets"), filepath.Join(project, "copy.env")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	for _, secretsPath := range []string{"config/prod.secrets", "config/[prod].secrets"} {
+		t.Run(secretsPath, func(t *testing.T) {
+			useSecretsPath(t, project, secretsPath)
+			headers := archiveHeadersExcluding(t, project, readContainerIgnore(project), secretContextExclusions(project))
+			if _, ok := headers["Dockerfile"]; !ok {
+				t.Fatal("Dockerfile missing from archive")
+			}
+			for _, secret := range []string{secretsPath, ".azud/secrets", "services/shop/.azud/secrets"} {
+				if _, ok := headers[secret]; ok {
+					t.Errorf("secrets file %s was archived despite the exclusion", secret)
+				}
+			}
+			if _, ok := headers["copy.env"]; ok == (secretsPath == "config/prod.secrets") {
+				t.Errorf("hard link to config/prod.secrets archived = %v with secrets_path %s", ok, secretsPath)
+			}
+		})
 	}
 }
 

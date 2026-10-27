@@ -48,6 +48,9 @@ Practical security recommendations for Azud deployments.
 ## Secrets Handling
 
 - Keep `.azud/secrets` out of git
+- Remote builds never upload the configured `secrets_path` or any nested
+  `.azud/secrets`; ignore-file negations cannot re-include them. Local builds
+  send the context unchanged, so exclude secrets with `.containerignore`.
 - Store secrets in your CI secret store and reconstruct at runtime
 - Prefer environment variables or secret managers in production
 - `azud env push` and `azud setup` deliver the runtime secrets file only to

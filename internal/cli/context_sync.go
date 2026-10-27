@@ -63,12 +63,16 @@ func syncBuildContext(sshClient *ssh.Client, host, localContext string) (_ strin
 
 	// Read ignore patterns
 	patterns := readContainerIgnore(absContext)
+	excluded := secretContextExclusions(absContext)
+	for _, rel := range excluded.paths {
+		log.Debug("Excluding secrets file %s from build context", rel)
+	}
 
 	// Stream tar.gz archive to remote via SSH pipe
 	pr, pw := io.Pipe()
 	archiveErr := make(chan error, 1)
 	go func() {
-		if err := createContextArchive(pw, absContext, patterns); err != nil {
+		if err := createContextArchive(pw, absContext, patterns, excluded); err != nil {
 			_ = pw.CloseWithError(err)
 			archiveErr <- err
 			return
@@ -146,9 +150,88 @@ func cleanupBuildContext(sshClient *ssh.Client, host, remotePath string) {
 	}
 }
 
+// contextExclusions lists local secrets files that are never archived,
+// regardless of ignore patterns or negations.
+type contextExclusions struct {
+	// paths are context-relative, slash-separated paths.
+	paths []string
+	// files identify the same secrets files by inode so hard links and
+	// aliased paths are excluded too.
+	files []os.FileInfo
+}
+
+// matchesPath reports whether relSlash is an excluded path or lies below one.
+func (e contextExclusions) matchesPath(relSlash string) bool {
+	for _, excluded := range e.paths {
+		if relSlash == excluded || strings.HasPrefix(relSlash, excluded+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesFile reports whether info refers to an excluded secrets file.
+func (e contextExclusions) matchesFile(info os.FileInfo) bool {
+	for _, secret := range e.files {
+		if os.SameFile(info, secret) {
+			return true
+		}
+	}
+	return false
+}
+
+// secretContextExclusions resolves the configured local secrets file paths
+// against the build context. Paths are compared exactly rather than as ignore
+// patterns, so file names containing glob characters are still excluded.
+// Relative secrets paths are resolved against the working directory, which is
+// how the config loader reads them.
+func secretContextExclusions(absContext string) contextExclusions {
+	var candidates []string
+	if cfg != nil && cfg.SecretsPath != "" {
+		candidates = append(candidates, cfg.SecretsPath)
+	}
+	candidates = append(candidates, getSecretsFilePath(), filepath.Join(".azud", "secrets"))
+
+	contexts := []string{absContext}
+	if real, err := filepath.EvalSymlinks(absContext); err == nil && real != absContext {
+		contexts = append(contexts, real)
+	}
+
+	var excluded contextExclusions
+	seenPaths := make(map[string]bool)
+	for _, candidate := range candidates {
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		variants := []string{abs}
+		if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+			variants = append(variants, real)
+		}
+		if info, err := os.Stat(abs); err == nil && info.Mode().IsRegular() {
+			excluded.files = append(excluded.files, info)
+		}
+		for _, contextDir := range contexts {
+			for _, variant := range variants {
+				rel, err := filepath.Rel(contextDir, variant)
+				if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					continue
+				}
+				rel = filepath.ToSlash(rel)
+				if !seenPaths[rel] {
+					seenPaths[rel] = true
+					excluded.paths = append(excluded.paths, rel)
+				}
+			}
+		}
+	}
+	return excluded
+}
+
 // createContextArchive creates a tar.gz archive of the build context,
-// excluding files that match the container ignore patterns.
-func createContextArchive(w io.Writer, contextDir string, patterns []ignorePattern) (err error) {
+// excluding the given secrets files and files that match the container
+// ignore patterns.
+func createContextArchive(w io.Writer, contextDir string, patterns []ignorePattern, excluded contextExclusions) (err error) {
 	gw := gzip.NewWriter(w)
 	defer func() {
 		if closeErr := gw.Close(); err == nil && closeErr != nil {
@@ -178,6 +261,15 @@ func createContextArchive(w io.Writer, contextDir string, patterns []ignorePatte
 			return nil
 		}
 
+		// Secrets files are excluded before ignore patterns are evaluated, so
+		// a negation pattern cannot re-include them.
+		if excluded.matchesPath(filepath.ToSlash(relPath)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		if shouldIgnore(relPath, d.IsDir(), patterns) {
 			// Continue walking ignored directories so later negation patterns can
 			// re-include descendants, matching container-ignore semantics.
@@ -187,6 +279,10 @@ func createContextArchive(w io.Writer, contextDir string, patterns []ignorePatte
 		info, err := d.Info()
 		if err != nil {
 			return err
+		}
+
+		if info.Mode().IsRegular() && excluded.matchesFile(info) {
+			return nil
 		}
 
 		isSymlink := info.Mode()&os.ModeSymlink != 0
@@ -267,8 +363,12 @@ func readContainerIgnore(contextDir string) []ignorePattern {
 
 func withMandatoryContextExcludes(patterns []ignorePattern) []ignorePattern {
 	// These are appended last so user negation patterns cannot re-include
-	// sensitive Azud-local files in remote build contexts.
-	return append(patterns, ignorePattern{pattern: ".azud/secrets"})
+	// sensitive Azud-local files in remote build contexts. The **/ form also
+	// covers projects nested below the context directory (monorepos).
+	return append(patterns,
+		ignorePattern{pattern: ".azud/secrets"},
+		ignorePattern{pattern: "**/.azud/secrets"},
+	)
 }
 
 // parseIgnorePatterns parses a .dockerignore file into patterns.
