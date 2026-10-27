@@ -22,6 +22,7 @@ import (
 type Loader struct {
 	basePath    string
 	destination string
+	skipSecrets bool
 }
 
 // NewLoader creates a new configuration loader
@@ -30,6 +31,14 @@ func NewLoader(basePath, destination string) *Loader {
 		basePath:    basePath,
 		destination: destination,
 	}
+}
+
+// WithoutSecrets makes Load skip the secrets provider: secrets_command is not
+// executed and the secrets file is not read. Use it for commands that never
+// read secrets.
+func (l *Loader) WithoutSecrets() *Loader {
+	l.skipSecrets = true
+	return l
 }
 
 // Load reads and parses the configuration file(s)
@@ -78,8 +87,10 @@ func (l *Loader) Load() (*Config, error) {
 	}
 
 	// Load secrets
-	if err := l.loadSecrets(cfg); err != nil {
-		return nil, fmt.Errorf("failed to load secrets: %w", err)
+	if !l.skipSecrets {
+		if err := l.loadSecrets(cfg); err != nil {
+			return nil, fmt.Errorf("failed to load secrets: %w", err)
+		}
 	}
 
 	return cfg, nil

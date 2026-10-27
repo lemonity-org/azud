@@ -107,3 +107,26 @@ func TestLoadSecretsFromCommandRejectsOversizedOutput(t *testing.T) {
 		t.Fatalf("expected an output size error, got %v", err)
 	}
 }
+
+func TestLoaderWithoutSecretsSkipsCommand(t *testing.T) {
+	canary := filepath.Join(t.TempDir(), "CANARY")
+	path := writeEnvTestConfig(t, envTestBaseConfig+"secrets_provider: command\nsecrets_command: touch "+canary+"\n")
+
+	cfg, err := NewLoader(path, "").WithoutSecrets().Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Service != "test" {
+		t.Fatalf("service = %q", cfg.Service)
+	}
+	if _, err := os.Stat(canary); !os.IsNotExist(err) {
+		t.Fatalf("WithoutSecrets executed secrets_command (stat err: %v)", err)
+	}
+
+	if _, err := NewLoader(path, "").Load(); err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("Load() did not execute secrets_command: %v", err)
+	}
+}

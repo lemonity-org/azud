@@ -33,13 +33,13 @@ configuration.`,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Skip config loading for commands that don't need it
-			if cmd.Name() == "init" || cmd.Name() == "version" || cmd.Name() == "help" {
+			if commandSkipsConfig(cmd) {
 				return nil
 			}
 
 			// Load configuration
 			var err error
-			cfg, err = loadConfig()
+			cfg, err = loadConfig(cmd)
 			if err != nil {
 				return err
 			}
@@ -70,7 +70,35 @@ func ExecuteContext(ctx context.Context) error {
 	return rootCmd.ExecuteContext(ctx)
 }
 
-func loadConfig() (*config.Config, error) {
+// skipSecretsAnnotation marks a command, and its subcommands, that loads the
+// configuration but never reads secrets, so secrets_command is not executed.
+const skipSecretsAnnotation = "azud.skip-secrets"
+
+// commandSkipsConfig reports whether cmd runs without loading the
+// configuration. Shell completion is included so that pressing TAB never
+// executes secrets_command from the current directory's configuration.
+func commandSkipsConfig(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "init", "version", "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return true
+		}
+	}
+	return false
+}
+
+// commandSkipsSecrets reports whether cmd or one of its parents carries
+// skipSecretsAnnotation.
+func commandSkipsSecrets(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Annotations[skipSecretsAnnotation] == "true" {
+			return true
+		}
+	}
+	return false
+}
+
+func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	path := configPath
 	if path == "" {
 		path = findConfigFile()
@@ -81,6 +109,9 @@ func loadConfig() (*config.Config, error) {
 	}
 
 	loader := config.NewLoader(path, destination)
+	if commandSkipsSecrets(cmd) {
+		loader.WithoutSecrets()
+	}
 	loaded, err := loader.Load()
 	if err != nil {
 		return nil, err

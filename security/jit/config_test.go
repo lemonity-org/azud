@@ -169,6 +169,76 @@ secrets_command: |
 }
 
 // ---------------------------------------------------------------------------
+// Control: read-only and shell-completion commands never execute
+// secrets_command from the configuration in the current directory.
+// ---------------------------------------------------------------------------
+
+func writeCanarySecretsConfig(t *testing.T, dir string) string {
+	t.Helper()
+	canary := filepath.Join(dir, "CANARY")
+	writeConfig(t, dir, `service: shop
+image: example/shop:v1
+servers:
+  worker:
+    hosts: [127.0.0.1]
+secrets_provider: command
+secrets_command: "touch `+canary+`"
+`)
+	return canary
+}
+
+func TestControl_ConfigCommandDoesNotExecuteSecretsCommand(t *testing.T) {
+	dir := newWorkdir(t)
+	canary := writeCanarySecretsConfig(t, dir)
+
+	res := runAzud(t, dir, nil, "config")
+	if res.Exit != 0 {
+		t.Fatalf("azud config failed: %s", res)
+	}
+	if !strings.Contains(res.Combined, "Service: shop") {
+		t.Fatalf("unexpected output: %s", res)
+	}
+	if _, err := os.Stat(canary); !os.IsNotExist(err) {
+		t.Fatalf("azud config executed secrets_command (stat err: %v): %s", err, res)
+	}
+
+	// The same configuration does execute secrets_command for a command that
+	// needs secrets, so the check above is meaningful.
+	res = runAzud(t, dir, nil, "env", "list")
+	if res.Exit != 0 {
+		t.Fatalf("azud env list failed: %s", res)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("azud env list did not execute secrets_command: %s", res)
+	}
+}
+
+func TestControl_ShellCompletionDoesNotExecuteSecretsCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "__complete", args: []string{"__complete", ""}},
+		{name: "__completeNoDesc", args: []string{"__completeNoDesc", "de"}},
+		{name: "completion bash", args: []string{"completion", "bash"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := newWorkdir(t)
+			canary := writeCanarySecretsConfig(t, dir)
+
+			res := runAzud(t, dir, nil, tt.args...)
+			if res.Exit != 0 {
+				t.Fatalf("azud %v failed: %s", tt.args, res)
+			}
+			if _, err := os.Stat(canary); !os.IsNotExist(err) {
+				t.Fatalf("azud %v executed secrets_command (stat err: %v): %s", tt.args, err, res)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Control: document-level limits and validators that must reject hostile input.
 // ---------------------------------------------------------------------------
 

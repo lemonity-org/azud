@@ -62,7 +62,10 @@ Practical security recommendations for Azud deployments.
 - Treat `config/deploy.yml`, destination files, hooks, and the environment
   Azud runs in as trusted input, like a Makefile. Loading the configuration
   can run `secrets_command` on your machine, so do not run Azud commands in a
-  repository you do not trust.
+  repository you do not trust. The configuration is validated before
+  secrets load. `azud config`, `init`, `version`, `help`, and shell
+  completion never run `secrets_command`; every other command does when
+  `secrets_provider: command` is set.
 - Environment references in the config are expanded only inside values: an
   environment value cannot add keys, list items, or comments, and multi-line
   values are rejected. See "Environment Variable References" in

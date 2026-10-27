@@ -217,9 +217,10 @@ func TestFinding_WorldReadableSecretsFileOnlyWarns(t *testing.T) {
 	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
 	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "DB_PASS=hunter2\n", 0o644)
 
-	res := runAzud(t, dir, nil, "-c", configPath, "config")
+	// `env list` loads secrets; `config` deliberately does not.
+	res := runAzud(t, dir, nil, "-c", configPath, "env", "list")
 	if res.Exit != 0 {
-		t.Fatalf("config should currently succeed despite insecure mode: %s", res)
+		t.Fatalf("env list should currently succeed despite insecure mode: %s", res)
 	}
 	if !strings.Contains(res.Combined, "insecure permissions") {
 		t.Fatalf("expected an insecure-permissions warning: %s", res)
