@@ -609,14 +609,40 @@ func TestFinding_ProxyContainerLacksHardeningFlags(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Hardening: enabling access logging without a redact list produces a plain
-// JSON encoder. Caddy's access log includes request headers, so
-// Authorization/Cookie values are recorded unless the operator opts in to
-// redaction.
+// Control: Caddy redacts Authorization, Cookie, Proxy-Authorization and
+// Set-Cookie in access logs unless a server sets logs.should_log_credentials
+// (the Caddyfile log_credentials option). Azud always removes it, so
+// credential redaction cannot be switched off through the live or persisted
+// config.
 // ---------------------------------------------------------------------------
 
-func TestFinding_AccessLogRedactionIsOptIn(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", proxyBootHandler())
+// credentialLoggingConfig is a persisted/live Caddy config whose srv0 turns
+// Caddy's built-in credential redaction off.
+const credentialLoggingConfig = `{"admin":{"listen":"0.0.0.0:2019"},"apps":{"http":{"servers":{"srv0":` +
+	`{"listen":[":80"],"logs":{"should_log_credentials":true},"routes":[]}}}}}`
+
+func TestControl_AccessLogKeepsCaddyCredentialRedaction(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
+		switch {
+		case strings.Contains(command, "echo LOCKED"):
+			return fakeResult{Stdout: "LOCKED\n"}
+		case strings.Contains(command, "container inspect"):
+			return fakeResult{Stderr: `Error: no container with name or ID "azud-proxy" found: no such container`, Exit: 125}
+		case strings.Contains(command, "curl") && strings.Contains(command, "/load"):
+			_, _ = io.ReadAll(stdin)
+			return fakeResult{}
+		case strings.Contains(command, "curl") && strings.Contains(command, "/config/"):
+			return fakeResult{Stdout: credentialLoggingConfig}
+		case strings.Contains(command, "test -f"):
+			// The protected bootstrap copy that restoreConfig loads.
+			return fakeResult{Stdout: credentialLoggingConfig}
+		case strings.Contains(command, "cat > ") || strings.Contains(command, "umask 077"):
+			_, _ = io.ReadAll(stdin)
+			return fakeResult{}
+		default:
+			return fakeResult{}
+		}
+	})
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, `service: shop
 image: example/shop:v1
@@ -639,17 +665,20 @@ ssh:
 	if res.Exit != 0 {
 		t.Fatalf("proxy boot failed: %s", res)
 	}
-	var body []byte
+	var loads [][]byte
 	for _, record := range fake.snapshot() {
-		if strings.Contains(record.Command, "-X POST") && len(record.Stdin) > 0 {
-			body = record.Stdin
+		if strings.Contains(record.Command, "/load") && len(record.Stdin) > 0 {
+			loads = append(loads, record.Stdin)
 		}
 	}
-	if len(body) == 0 {
-		t.Fatalf("no Caddy config body captured:\n%s", commandDump(fake.snapshot()))
+	if len(loads) == 0 {
+		t.Fatalf("no Caddy /load body captured:\n%s", commandDump(fake.snapshot()))
 	}
-	if strings.Contains(string(body), `"filter"`) {
-		t.Fatalf("access logging now includes a redaction filter; finding may be fixed:\n%s", body)
+	final := string(loads[len(loads)-1])
+	if strings.Contains(final, "should_log_credentials") {
+		t.Fatalf("Azud kept should_log_credentials in the reconciled Caddy config:\n%s", final)
 	}
-	t.Logf("HARDENING: logging.enabled=true produced a plain JSON encoder with no redaction filter; Caddy access logs include request headers unless Authorization/Cookie are configured for deletion")
+	if !strings.Contains(final, `"default_logger_name":"access"`) {
+		t.Fatalf("reconciled Caddy config lost the access logger:\n%s", final)
+	}
 }

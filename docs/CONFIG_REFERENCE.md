@@ -145,6 +145,27 @@ Other useful fields:
 - `buffering`, `forward_headers`
 - `logging` (redaction and toggles)
 
+`logging.enabled: true` writes Caddy access logs as JSON to the proxy
+container's stdout. Caddy replaces the values of `Authorization`, `Cookie`,
+`Proxy-Authorization` and `Set-Cookie` with `REDACTED` by default, and Azud
+removes the server's `logs.should_log_credentials` setting (the Caddyfile
+`log_credentials` option) on every boot and deploy, so that redaction cannot
+be switched off through the live Caddy config. Other
+headers that carry credentials, such as `X-Api-Key`, are logged in clear
+unless you list them:
+
+```yaml
+proxy:
+  logging:
+    enabled: true
+    redact_request_headers: [X-Api-Key]
+    redact_response_headers: [X-Session-Token]
+```
+
+Listing a header removes it from the access log entirely. Query strings are
+logged as part of the request URI and cannot be redacted, so keep tokens out of
+URLs.
+
 `readiness_cmd` runs inside the application container and takes precedence
 over `readiness_path`. A zero exit status admits the container to traffic. Use
 it with tools such as `grpc_health_probe` or an application-specific command.
