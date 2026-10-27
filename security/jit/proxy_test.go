@@ -553,25 +553,106 @@ func TestControl_RegistryLoginTerminatesPodmanOptions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: remote output is printed without escaping terminal control bytes.
+// Control: untrusted remote output is neutralized before it reaches the
+// terminal. Log streams and Azud records are sanitized on every destination;
+// non-interactive exec output stays byte-exact when it is piped (the harness
+// captures through pipes, so the TTY branch is covered by internal/cli tests).
 // ---------------------------------------------------------------------------
 
-func TestFinding_TerminalEscapeInjectionFromRemoteOutput(t *testing.T) {
+func TestControl_RemoteOutputNeutralizesTerminalEscapes(t *testing.T) {
 	payload := "\x1b]52;c;ZXZpbC1jbGlwYm9hcmQ=\x07\x1b[2J\x1b[31mFORGED\x1b[0m\n"
 	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
-		return fakeResult{Stdout: payload}
+		switch {
+		case strings.Contains(command, "echo LOCKED"):
+			return fakeResult{Stdout: "LOCKED\n"}
+		case strings.Contains(command, " logs "):
+			return fakeResult{Stdout: payload, Stderr: payload}
+		case strings.Contains(command, " stop "):
+			return fakeResult{Stderr: payload, Exit: 1}
+		default:
+			return fakeResult{Stdout: payload}
+		}
 	})
 	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+	config := baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop") + `cron:
+  backup:
+    schedule: "0 2 * * *"
+    command: bin/backup
+accessories:
+  redis:
+    image: redis:7
+    host: 127.0.0.1
+`
+	configPath := writeConfig(t, dir, config)
 
-	res := runAzud(t, dir, nil, "-c", configPath, "server", "exec", "--host", "127.0.0.1", "true")
-	if res.Exit != 0 {
-		t.Fatalf("server exec failed: %s", res)
+	assertNeutralized := func(t *testing.T, name, out string) {
+		t.Helper()
+		if strings.Contains(out, "\x1b") || strings.Contains(out, "\x07") {
+			t.Fatalf("%s retained terminal control bytes: %q", name, out)
+		}
+		if !strings.Contains(out, `\x1b]52;c;`) || !strings.Contains(out, "FORGED") {
+			t.Fatalf("%s did not visibly escape the payload: %q", name, out)
+		}
 	}
-	if !strings.Contains(res.Stdout, "\x1b]52;c;") {
-		t.Fatalf("expected raw OSC sequence in output, got: %q", res.Stdout)
+
+	t.Run("server exec records", func(t *testing.T) {
+		res := runAzud(t, dir, nil, "-c", configPath, "server", "exec", "--host", "127.0.0.1", "true")
+		if res.Exit != 0 {
+			t.Fatalf("server exec failed: %s", res)
+		}
+		assertNeutralized(t, "server exec stdout", res.Stdout)
+	})
+
+	for _, args := range [][]string{
+		{"app", "logs"},
+		{"app", "logs", "--follow"},
+		{"proxy", "logs"},
+		{"proxy", "logs", "--follow"},
+		{"cron", "logs", "backup"},
+		{"accessory", "logs", "redis"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			res := runAzud(t, dir, nil, append([]string{"-c", configPath}, args...)...)
+			if res.Exit != 0 {
+				t.Fatalf("%v failed: %s", args, res)
+			}
+			assertNeutralized(t, "stdout", res.Stdout)
+			assertNeutralized(t, "stderr", res.Stderr)
+		})
 	}
-	t.Logf("VULNERABLE (low): remote container output is written to the terminal without stripping ANSI/OSC control sequences")
+
+	t.Run("app logs raw", func(t *testing.T) {
+		res := runAzud(t, dir, nil, "-c", configPath, "app", "logs", "--raw")
+		if res.Exit != 0 {
+			t.Fatalf("app logs --raw failed: %s", res)
+		}
+		if res.Stdout != payload {
+			t.Fatalf("--raw did not preserve remote bytes: %q", res.Stdout)
+		}
+	})
+
+	for _, args := range [][]string{
+		{"app", "exec", "--", "pg_dump"},
+		{"accessory", "exec", "redis", "--", "redis-cli", "--rdb", "-"},
+	} {
+		t.Run("piped "+strings.Join(args[:2], " ")+" stays byte-exact", func(t *testing.T) {
+			res := runAzud(t, dir, nil, append([]string{"-c", configPath}, args...)...)
+			if res.Exit != 0 {
+				t.Fatalf("%v failed: %s", args, res)
+			}
+			if res.Stdout != payload {
+				t.Fatalf("piped exec output changed: %q", res.Stdout)
+			}
+		})
+	}
+
+	t.Run("error records embedding remote stderr", func(t *testing.T) {
+		res := runAzud(t, dir, nil, "-c", configPath, "app", "stop")
+		if res.Exit == 0 {
+			t.Fatalf("expected app stop to fail: %s", res)
+		}
+		assertNeutralized(t, "app stop stderr", res.Stderr)
+	})
 }
 
 // ---------------------------------------------------------------------------

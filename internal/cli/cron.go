@@ -102,11 +102,13 @@ var (
 	cronFollow bool
 	cronTail   string
 	cronHost   string
+	cronRaw    bool
 )
 
 func init() {
 	cronLogsCmd.Flags().BoolVarP(&cronFollow, "follow", "f", false, "Follow log output")
 	cronLogsCmd.Flags().StringVar(&cronTail, "tail", "100", "Number of lines")
+	cronLogsCmd.Flags().BoolVar(&cronRaw, "raw", false, rawOutputFlagUsage)
 
 	cronBootCmd.Flags().StringVar(&cronHost, "host", "", "Specific host")
 	cronStopCmd.Flags().StringVar(&cronHost, "host", "", "Specific host")
@@ -352,7 +354,10 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	if cronFollow {
-		if err := containerManager.LogsStream(host, logsConfig, os.Stdout, os.Stderr); err != nil {
+		stdout, stderr, flush := remoteStreams(os.Stdout, os.Stderr, remoteLogStream, cronRaw)
+		err := containerManager.LogsStream(host, logsConfig, stdout, stderr)
+		flush()
+		if err != nil {
 			return fmt.Errorf("failed to follow logs: %w", err)
 		}
 		return nil
@@ -363,10 +368,7 @@ func runCronLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get logs: %w", err)
 	}
 
-	fmt.Print(result.Stdout)
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+	printRemoteResult(os.Stdout, os.Stderr, result, remoteLogStream, cronRaw)
 	if result.ExitCode != 0 {
 		return fmt.Errorf("cron logs failed with exit code %d", result.ExitCode)
 	}

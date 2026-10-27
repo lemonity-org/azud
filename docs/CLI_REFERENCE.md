@@ -18,6 +18,11 @@ and non-TTY destinations receive deterministic ASCII framing without ANSI
 escapes; UTF-8 values remain intact. `NO_COLOR` and `CLICOLOR=0` also disable
 color.
 
+Remote output from containers and hosts is untrusted. Azud neutralizes
+terminal control sequences in it (see
+[Remote output](OUTPUT.md#remote-output)); log and non-interactive exec
+commands accept `--raw` to print remote bytes unchanged.
+
 Use stable machine surfaces instead of scraping display output:
 
 ```bash
@@ -231,6 +236,8 @@ azud app logs [flags]
 *   `--tail string`: Number of lines to show (default: "100").
 *   `--host string`: View logs from a specific host.
 *   `--role string`: View logs from a specific role.
+*   `--raw`: Print remote output byte-for-byte without neutralizing terminal
+    control sequences.
 
 #### `azud app exec`
 
@@ -245,6 +252,9 @@ azud app exec [flags] -- <command>
 *   `-i, --interactive`: Keep STDIN open.
 *   `-t, --tty`: Allocate a pseudo-TTY.
 *   `--host string`: Execute on a specific host.
+*   `--raw`: Print output byte-for-byte even when stdout or stderr is a
+    terminal. Piped and redirected output is always byte-exact, and `-i`/`-t`
+    sessions are never filtered.
 
 **Examples:**
 ```bash
@@ -464,7 +474,7 @@ Restart the proxy.
 
 #### `azud proxy logs`
 View proxy logs.
-**Flags:** `--host`, `-f/--follow`, `--tail`
+**Flags:** `--host`, `-f/--follow`, `--tail`, `--raw`
 
 #### `azud proxy status`
 Show proxy status and route count.
@@ -505,10 +515,12 @@ Stop an accessory.
 #### `azud accessory logs`
 View accessory logs.
 **Usage:** `azud accessory logs <name> [flags]`
+**Flags:** `--host`, `-f/--follow`, `--tail`, `--raw`
 
 #### `azud accessory exec`
 Execute a command in an accessory container.
 **Usage:** `azud accessory exec <name> -- <command>`
+**Flags:** `--host`, `--raw`
 
 ---
 
@@ -534,6 +546,7 @@ Stop cron jobs.
 #### `azud cron logs`
 View logs from a cron job.
 **Usage:** `azud cron logs <name>`
+**Flags:** `--host`, `-f/--follow`, `--tail`, `--raw`
 
 ---
 
