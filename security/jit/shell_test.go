@@ -343,30 +343,34 @@ func TestControl_BuildCommandBuilderKeepsPayloadsAsArguments(t *testing.T) {
 	}
 }
 
-// Finding: BuildConfig.Options (and ManifestBuildConfig.Options) are appended
-// to the shell command without quoting. No current config field feeds Options,
-// so this is latent, but the exported builder is unsafe for future callers.
-func TestFinding_BuildConfigOptionsAreShellEvaluated(t *testing.T) {
+// Control: BuildConfig.Options (and ManifestBuildConfig.Options) are quoted one
+// argv value per element, like every other build field. No config field feeds
+// Options today; this keeps the builder safe for future callers.
+func TestControl_BuildConfigOptionsAreQuoted(t *testing.T) {
 	dir := t.TempDir()
 	canary := filepath.Join(dir, "CANARY")
+	option := "--annotation=$(touch " + canary + ")"
 	cfg := &podman.BuildConfig{
 		Context: ".",
-		Options: []string{"--annotation=$(touch " + canary + ")"},
+		Options: []string{option},
 	}
-	args := podmanArgv(t, dir, cfg.BuildCommand())
-	if _, err := os.Stat(canary); err != nil {
-		t.Fatalf("expected BuildConfig.Options to execute substitution, but canary is absent; builder may have been fixed")
+	if args := podmanArgv(t, dir, cfg.BuildCommand()); !argvContains(args, option) {
+		t.Errorf("build argv missing literal option %q: %q", option, bytesToArgs(args))
 	}
-	found := false
-	for _, arg := range args {
-		if strings.HasPrefix(string(arg), "--annotation=") && !strings.Contains(string(arg), "$(touch") {
-			found = true
+
+	manifest := &podman.ManifestBuildConfig{
+		BuildConfig: *cfg,
+		Platforms:   []string{"linux/amd64", "linux/arm64"},
+	}
+	commands := manifest.ManifestBuildCommands()
+	for _, command := range commands[1 : 1+len(manifest.Platforms)] {
+		if args := podmanArgv(t, dir, command); !argvContains(args, option) {
+			t.Errorf("manifest build argv missing literal option %q: %q", option, bytesToArgs(args))
 		}
 	}
-	if !found {
-		t.Fatalf("expected the option to be split into evaluated argv fragments: %q", bytesToArgs(args))
+	if _, err := os.Stat(canary); err == nil {
+		t.Fatal("command substitution executed from podman build options")
 	}
-	t.Logf("VULNERABLE (latent): podman.BuildConfig.Options are not shell-quoted; %q executed command substitution", cfg.Options[0])
 }
 
 // ---------------------------------------------------------------------------

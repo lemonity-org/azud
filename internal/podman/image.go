@@ -98,7 +98,7 @@ type BuildConfig struct {
 	Squash     bool
 	Secrets    []string
 	SSH        []string
-	Options    []string
+	Options    []string // Extra podman build argv values, one per element; each is shell-quoted
 }
 
 func (c *BuildConfig) BuildCommand() string {
@@ -161,7 +161,9 @@ func (c *BuildConfig) BuildCommand() string {
 		args = append(args, "--ssh", shell.Quote(s))
 	}
 
-	args = append(args, c.Options...)
+	// Options are argv values such as "--annotation=k=v", not shell fragments.
+	// Quote each one so a malformed value cannot escape into the build shell.
+	args = append(args, shell.QuoteAll(c.Options)...)
 
 	context := c.Context
 	if context == "" {
@@ -256,7 +258,7 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 			args = append(args, "--ssh", shell.Quote(s))
 		}
 
-		args = append(args, c.Options...)
+		args = append(args, shell.QuoteAll(c.Options)...)
 
 		context := c.Context
 		if context == "" {
