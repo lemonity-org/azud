@@ -253,7 +253,7 @@ func runCronStop(cmd *cobra.Command, args []string) error {
 				containerName := getCronContainerName(n)
 
 				if err := containerManager.Stop(h, containerName, 30); err != nil {
-					if !strings.Contains(err.Error(), "No such container") {
+					if !podman.IsNoSuchContainer(err) {
 						log.HostError(h, "Failed to stop cron %s: %v", n, err)
 						errors <- fmt.Errorf("%s@%s: %w", n, h, err)
 					}

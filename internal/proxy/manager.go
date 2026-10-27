@@ -981,12 +981,60 @@ func (m *Manager) Stop(host string) error {
 		return err
 	}
 
+	// Inspect rather than Exists: Exists treats any failure, including a sudo
+	// or permission error, as an absent container.
+	raw, err := m.podman.Inspect(host, CaddyContainerName)
+	if err != nil {
+		if podman.IsNoSuchContainer(err) {
+			m.log.HostSuccess(host, "Proxy not present")
+			return nil
+		}
+		return fmt.Errorf("failed to inspect proxy: %w", err)
+	}
+	unit, err := systemdUnitFromInspect(raw)
+	if err != nil {
+		return fmt.Errorf("failed to inspect proxy: %w", err)
+	}
+	if unit != "" {
+		// Quadlet units use Restart=always, so a plain podman stop would be
+		// undone by systemd while Azud reported the proxy as stopped.
+		return fmt.Errorf("proxy is managed by systemd unit %s; stop it with '%s' instead", unit, m.systemctlStopCommand(unit))
+	}
+
 	if err := m.podman.Stop(host, CaddyContainerName, 30); err != nil {
 		return fmt.Errorf("failed to stop proxy: %w", err)
 	}
 
 	m.log.HostSuccess(host, "Proxy stopped")
 	return nil
+}
+
+// systemdUnitFromInspect returns the systemd unit that manages a container,
+// or "" when the container was started directly by Podman.
+func systemdUnitFromInspect(raw string) (string, error) {
+	var payload []struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", err
+	}
+	if len(payload) == 0 {
+		return "", fmt.Errorf("empty inspect result")
+	}
+	return payload[0].Config.Labels["PODMAN_SYSTEMD_UNIT"], nil
+}
+
+func (m *Manager) systemctlStopCommand(unit string) string {
+	switch {
+	case m.user == "root":
+		return "systemctl stop " + unit
+	case m.rootful:
+		return "sudo systemctl stop " + unit
+	default:
+		return "systemctl --user stop " + unit
+	}
 }
 
 // Reboot restarts the Caddy proxy. If config is provided, it is applied

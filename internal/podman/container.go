@@ -262,6 +262,19 @@ func (m *ContainerManager) Inspect(host, container string) (string, error) {
 	return result.Stdout, nil
 }
 
+// IsNoSuchContainer reports whether err is a container runtime's "container
+// does not exist" error. Podman prints it in lowercase ("no container with
+// name or ID ... found: no such container") and Docker capitalizes it, so the
+// match is case-insensitive.
+func IsNoSuchContainer(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such container") ||
+		strings.Contains(message, "no container with name or id")
+}
+
 func (m *ContainerManager) Exists(host, container string) (bool, error) {
 	result, err := m.client.Execute(host, "container", "inspect", container, "--format", "{{.Id}}")
 	if err != nil {
