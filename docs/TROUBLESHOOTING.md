@@ -40,11 +40,15 @@ Fixes:
 
 Symptoms:
 - Security policy errors (non-root SSH, rootless Podman, known hosts)
+- `secrets file .azud/secrets is readable by group or others`
 
 Fixes:
 - Update `ssh.user` to a non-root user if required
 - Enable rootless Podman in config
 - Set `ssh.insecure_ignore_host_key` to false if `security.require_known_hosts` is enabled
+- Run `chmod 600 .azud/secrets` (or the configured `secrets_path`). Any
+  `azud env set` or `azud env delete` also rewrites the file with mode `0600`.
+  Other commands only warn about a loose mode.
 
 ## HTTPS not provisioning
 
@@ -104,7 +108,9 @@ Fixes:
 ## Deploy works locally but fails in CI
 
 Fixes:
-- Recreate `.azud/secrets` in CI from secret store
+- Recreate `.azud/secrets` in CI from secret store with mode `0600` (for
+  example run `umask 077` before writing it); `azud preflight` fails on a
+  group- or other-readable file
 - Ensure the CI SSH key is trusted on all hosts
 - Add `ssh-keyscan` to populate `known_hosts`
 

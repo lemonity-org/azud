@@ -66,6 +66,10 @@ azud init --bundle rails
 
 Verify readiness of hosts and configuration before deploying.
 
+Local checks run first: security policies, required secret references, and,
+with the file secrets provider, the secrets file mode. Preflight fails when the
+secrets file is readable by group or others; run `chmod 600` on it.
+
 **Usage:**
 ```bash
 azud preflight [flags]
