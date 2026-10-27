@@ -140,6 +140,9 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 				}
 				pinQuadletHostPort(appUnit, hostPort, cfg.Proxy.AppPort)
 			}
+			if err := appUnit.Validate(); err != nil {
+				return fmt.Errorf("invalid %s app quadlet unit: %w", target.Role, err)
+			}
 			unitName := fmt.Sprintf("%s.container", serviceName)
 			if err := appDeployer.Deploy(target.Host, unitName, quadlet.GenerateContainerFile(appUnit)); err != nil {
 				log.HostError(target.Host, "Failed to deploy %s app unit: %v", target.Role, err)
@@ -157,6 +160,9 @@ func runSystemdEnable(cmd *cobra.Command, args []string) error {
 
 	if !systemdSkipProxy && (systemdRole == "" || systemdRole == "web") && len(cfg.Proxy.AllHosts()) > 0 {
 		proxyUnit := buildProxyQuadletUnit()
+		if err := proxyUnit.Validate(); err != nil {
+			return fmt.Errorf("invalid proxy quadlet unit: %w", err)
+		}
 		unitName := fmt.Sprintf("%s.container", proxy.CaddyContainerName)
 		for _, host := range cfg.GetRoleHosts("web") {
 			if systemdHost != "" && host != systemdHost {

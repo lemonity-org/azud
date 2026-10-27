@@ -50,10 +50,11 @@ func TestControl_QuadletContainerFieldsCannotInjectDirectives(t *testing.T) {
 	}
 }
 
-// Finding: Restart, WantedBy, and the network/volume generators bypass
-// sanitizeINIValue. Current callers use constants, but the exported API is
-// unsafe for any future config-driven caller.
-func TestFinding_QuadletUnsanitizedFieldsInjectDirectives(t *testing.T) {
+// Control: Restart, WantedBy, and the network/volume names go through the same
+// INI sanitizer as every other field, and the validators reject them. The
+// checks use line prefixes: the sanitized value still contains the payload text
+// on its own line.
+func TestControl_QuadletServiceInstallAndNamesCannotInjectDirectives(t *testing.T) {
 	injected := "always\n[Service]\nExecStartPre=/bin/sh -c 'touch /tmp/quadlet-latent-pwn'"
 	unit := &quadlet.ContainerUnit{
 		Image:    "alpine",
@@ -61,26 +62,67 @@ func TestFinding_QuadletUnsanitizedFieldsInjectDirectives(t *testing.T) {
 		WantedBy: injected,
 	}
 	out := quadlet.GenerateContainerFile(unit)
-	if !strings.Contains(out, "ExecStartPre=") {
-		t.Fatalf("expected unsanitized Restart/WantedBy injection, got:\n%s", out)
+	for _, section := range []string{"[Unit]", "[Container]", "[Service]", "[Install]"} {
+		if exactLineCount(out, section) != 1 {
+			t.Fatalf("section injection detected for %s:\n%s", section, out)
+		}
 	}
-	t.Logf("VULNERABLE (latent): ContainerUnit.Restart and WantedBy are written without sanitizeINIValue:\n%s", out)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "ExecStartPre=") {
+			t.Fatalf("directive injection detected: %q", line)
+		}
+	}
+	if err := unit.Validate(); err == nil {
+		t.Fatal("ContainerUnit.Validate accepted an injected Restart/WantedBy value")
+	}
 
 	netFile := quadlet.GenerateNetworkFile("azud\n[Network]\nDNS=false", true)
-	if strings.Count(netFile, "DNS=") != 2 {
-		t.Fatalf("expected GenerateNetworkFile name injection, got:\n%s", netFile)
+	if exactLineCount(netFile, "[Network]") != 1 || linePrefixCount(netFile, "DNS=") != 1 {
+		t.Fatalf("GenerateNetworkFile name injection detected:\n%s", netFile)
 	}
+	if err := quadlet.ValidateNetworkName("azud\n[Network]"); err == nil {
+		t.Fatal("ValidateNetworkName accepted an injected name")
+	}
+
 	volFile := quadlet.GenerateVolumeFile("data\n[Volume]\nDriver=evil")
-	if strings.Count(volFile, "[Volume]") != 2 {
-		t.Fatalf("expected GenerateVolumeFile name injection, got:\n%s", volFile)
+	if exactLineCount(volFile, "[Volume]") != 1 || linePrefixCount(volFile, "Driver=") != 0 {
+		t.Fatalf("GenerateVolumeFile name injection detected:\n%s", volFile)
 	}
-	t.Logf("VULNERABLE (latent): GenerateNetworkFile/GenerateVolumeFile names are not sanitized")
+	if err := quadlet.ValidateVolumeName("data\n"); err == nil {
+		t.Fatal("ValidateVolumeName accepted an injected name")
+	}
+
+	// A trailing backslash is a systemd line continuation. It must not let
+	// Exec swallow the hardening flag on the following line.
+	continued := quadlet.GenerateContainerFile(&quadlet.ContainerUnit{
+		Image:      "alpine",
+		Exec:       "sleep 1 \\",
+		PodmanArgs: []string{"--read-only"},
+	})
+	if linePrefixCount(continued, "PodmanArgs=--read-only") != 1 {
+		t.Fatalf("PodmanArgs directive was not preserved:\n%s", continued)
+	}
+	for _, line := range strings.Split(continued, "\n") {
+		if strings.HasSuffix(line, "\\") {
+			t.Fatalf("line continuation detected: %q", line)
+		}
+	}
 }
 
 func exactLineCount(s, want string) int {
 	count := 0
 	for _, line := range strings.Split(s, "\n") {
 		if strings.TrimSpace(line) == want {
+			count++
+		}
+	}
+	return count
+}
+
+func linePrefixCount(s, prefix string) int {
+	count := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
 			count++
 		}
 	}

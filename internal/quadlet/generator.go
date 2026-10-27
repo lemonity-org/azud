@@ -2,6 +2,7 @@ package quadlet
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -29,7 +30,9 @@ type ContainerUnit struct {
 }
 
 func quoteSystemdWord(s string, escapePercent bool) string {
-	s = sanitizeINIValue(s)
+	// A quoted word ends in '"', so a trailing backslash is escaped data, not a
+	// line continuation, and is kept.
+	s = stripINIControls(s)
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	if escapePercent {
@@ -38,18 +41,73 @@ func quoteSystemdWord(s string, escapePercent bool) string {
 	return `"` + s + `"`
 }
 
-// sanitizeINIValue removes newlines and control characters from a string
-// to prevent injection of additional systemd directives via crafted values.
+// sanitizeINIValue makes s safe as an unquoted INI value. It removes newlines
+// and control characters to prevent injection of additional systemd
+// directives, and trailing backslashes because systemd and Quadlet treat a
+// line that ends in '\' as continuing onto the next line, which would swallow
+// the following directive.
 func sanitizeINIValue(s string) string {
+	return strings.TrimRight(stripINIControls(s), " \t\\")
+}
+
+// stripINIControls removes newlines, C0 and C1 control characters, DEL, and
+// Unicode line/paragraph separators. Tabs are kept.
+func stripINIControls(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r == '\n' || r == '\r' || (r < 0x20 && r != '\t') || r == 0x7F {
+		if r == '\n' || r == '\r' || (r < 0x20 && r != '\t') || (r >= 0x7F && r <= 0x9F) || r == '\u2028' || r == '\u2029' {
 			continue
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+var (
+	validRestartPolicies = map[string]bool{
+		"no":          true,
+		"on-success":  true,
+		"on-failure":  true,
+		"on-abnormal": true,
+		"on-watchdog": true,
+		"on-abort":    true,
+		"always":      true,
+	}
+	systemdUnitNameRegex  = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]{1,250}\.(target|service)$`)
+	podmanObjectNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
+)
+
+// Validate reports Restart and WantedBy values that systemd would reject or
+// misinterpret. Empty values are valid; the generator applies defaults.
+func (u *ContainerUnit) Validate() error {
+	if u.Restart != "" && !validRestartPolicies[u.Restart] {
+		return fmt.Errorf("invalid restart policy %q: must be one of always, no, on-abnormal, on-abort, on-failure, on-success, on-watchdog", u.Restart)
+	}
+	if u.WantedBy != "" {
+		for _, unit := range strings.Split(u.WantedBy, " ") {
+			if !systemdUnitNameRegex.MatchString(unit) {
+				return fmt.Errorf("invalid WantedBy unit %q: must be space-separated .target or .service unit names", u.WantedBy)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateNetworkName reports whether name is a valid Podman network name.
+func ValidateNetworkName(name string) error {
+	if !podmanObjectNameRegex.MatchString(name) {
+		return fmt.Errorf("invalid network name %q", name)
+	}
+	return nil
+}
+
+// ValidateVolumeName reports whether name is a valid Podman volume name.
+func ValidateVolumeName(name string) error {
+	if !podmanObjectNameRegex.MatchString(name) {
+		return fmt.Errorf("invalid volume name %q", name)
+	}
+	return nil
 }
 
 // GenerateContainerFile generates a .container quadlet INI file from the unit configuration
@@ -124,7 +182,7 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	// [Service] section
 	sb.WriteString("[Service]\n")
 	if unit.Restart != "" {
-		_, _ = fmt.Fprintf(&sb, "Restart=%s\n", unit.Restart)
+		_, _ = fmt.Fprintf(&sb, "Restart=%s\n", sanitizeINIValue(unit.Restart))
 	} else {
 		sb.WriteString("Restart=always\n")
 	}
@@ -136,7 +194,7 @@ func GenerateContainerFile(unit *ContainerUnit) string {
 	// [Install] section
 	sb.WriteString("[Install]\n")
 	if unit.WantedBy != "" {
-		_, _ = fmt.Fprintf(&sb, "WantedBy=%s\n", unit.WantedBy)
+		_, _ = fmt.Fprintf(&sb, "WantedBy=%s\n", sanitizeINIValue(unit.WantedBy))
 	} else {
 		sb.WriteString("WantedBy=default.target\n")
 	}
@@ -150,7 +208,7 @@ func GenerateNetworkFile(name string, dnsEnabled bool) string {
 
 	sb.WriteString("[Network]\n")
 	if name != "" {
-		_, _ = fmt.Fprintf(&sb, "NetworkName=%s\n", name)
+		_, _ = fmt.Fprintf(&sb, "NetworkName=%s\n", sanitizeINIValue(name))
 	}
 	if dnsEnabled {
 		sb.WriteString("DNS=true\n")
@@ -165,7 +223,7 @@ func GenerateVolumeFile(name string) string {
 
 	sb.WriteString("[Volume]\n")
 	if name != "" {
-		_, _ = fmt.Fprintf(&sb, "VolumeName=%s\n", name)
+		_, _ = fmt.Fprintf(&sb, "VolumeName=%s\n", sanitizeINIValue(name))
 	}
 
 	return sb.String()

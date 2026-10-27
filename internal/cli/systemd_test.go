@@ -200,3 +200,23 @@ func TestNeedsAzudNetworkUnit(t *testing.T) {
 		}
 	})
 }
+
+func TestBuiltQuadletUnitsPassValidation(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+	cfg = &config.Config{
+		Service: "test-app",
+		Podman:  config.PodmanConfig{Rootless: true},
+		Proxy:   config.ProxyConfig{AppPort: 3000},
+	}
+
+	if err := buildAppQuadletUnit("ghcr.io/acme/test:latest", "web").Validate(); err != nil {
+		t.Fatalf("app quadlet unit failed validation: %v", err)
+	}
+	if err := buildProxyQuadletUnit().Validate(); err != nil {
+		t.Fatalf("proxy quadlet unit failed validation: %v", err)
+	}
+	if err := quadlet.ValidateNetworkName("azud"); err != nil {
+		t.Fatalf("azud network name failed validation: %v", err)
+	}
+}
