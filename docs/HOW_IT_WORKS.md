@@ -35,6 +35,31 @@ Each Azud-owned route and reverse-proxy handler has a stable Caddy `@id`.
 containers, canary state, and the live route; `--repair` explicitly restores
 that desired state without touching routes owned by other IDs.
 
+Caddy's admin API never listens on TCP. In every network mode it is a unix
+socket, `/run/azud-admin/admin.sock` (mode `0600`), inside a `0700` tmpfs that
+exists only in the `azud-proxy` container's mount namespace. Workloads on the
+shared `azud` network and local users on the host therefore cannot reach it.
+Azud sends each admin request as
+`podman exec azud-proxy curl --unix-socket /run/azud-admin/admin.sock ...`
+over SSH (`sudo -n podman` for a rootful proxy managed by a non-root user),
+with request bodies on stdin. Every complete configuration Azud loads,
+restores, persists, or resumes from Caddy's autosave has its `admin` object
+replaced with that socket listener; other admin settings such as `remote` or
+`config.load` are removed with a warning.
+
+Azud labels the proxy container with `azud.proxy.spec`. `azud proxy boot`,
+`azud proxy reboot`, `azud deploy` and canary deploys recreate a proxy created
+by an older release once: stop, normalize the autosave, rename the old
+container to `azud-proxy-legacy`, start the new container, wait for the admin
+socket, remove the old container, then restore the configuration. If the new
+container does not answer, Azud removes it, puts back the old container and
+its autosave, restarts it and fails with the reason. Routes survive through the
+autosave; in-flight connections drop during the restart. Commands that do not
+boot the proxy, such as `azud proxy status`, report an outdated proxy and ask
+for `azud proxy reboot`; `azud preflight` reports it as a warning. A proxy
+managed by a Quadlet unit is never recreated imperatively; rerun
+`azud systemd enable` instead. Until then, `azud preflight` fails for it.
+
 You can disable managed proxy for non-HTTP workloads, or use your own load balancer in front.
 
 ## Images and Versions

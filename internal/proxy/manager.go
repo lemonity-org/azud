@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -25,9 +26,34 @@ const (
 	// reviewing Caddy release notes and the official-image manifest.
 	CaddyImage         = "docker.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
 	CaddyContainerName = "azud-proxy"
-	CaddyAdminPort     = 2019
 	CaddyHTTPPort      = 80
 	CaddyHTTPSPort     = 443
+
+	// The Caddy admin API listens only on a unix socket in a tmpfs that is
+	// private to the proxy container's mount namespace. It is never bound to a
+	// TCP address, so workloads on the shared network and local host users
+	// cannot reach it. Azud reaches it with `podman exec` and the image's curl.
+	CaddyAdminSocketDir = "/run/azud-admin"
+	CaddyAdminSocket    = CaddyAdminSocketDir + "/admin.sock"
+	CaddyAdminListen    = "unix/" + CaddyAdminSocket + "|0600"
+	CaddyAdminTmpfs     = CaddyAdminSocketDir + ":rw,nosuid,nodev,noexec,mode=0700,size=64k"
+
+	// ProxySpecLabel records the proxy container definition Azud created.
+	// Containers without the current version are recreated once by Boot and
+	// Reboot so admin and hardening changes reach existing hosts.
+	ProxySpecLabel   = "azud.proxy.spec"
+	ProxySpecVersion = "2"
+
+	// legacyProxyContainerName holds an outdated proxy container while Boot
+	// starts its replacement, so a failed migration can restore it.
+	legacyProxyContainerName = CaddyContainerName + "-legacy"
+
+	// systemdUnitLabel is set by Podman on containers started by a Quadlet unit.
+	systemdUnitLabel = "PODMAN_SYSTEMD_UNIT"
+
+	// caddyAdminReadyTimeout bounds how long Azud waits for the admin socket
+	// after starting Caddy. Each probe is a remote `podman exec`.
+	caddyAdminReadyTimeout = 20 * time.Second
 
 	// CaddyConfigFileName is the name of the Caddy config file.
 	CaddyConfigFileName = "caddy-config.json"
@@ -48,13 +74,11 @@ const (
 	// outage requests should fail rather than pile up.
 	upstreamTryDuration = "5s"
 	upstreamTryInterval = "250ms"
-
-	// Bridged containers must listen on the container interface so Podman's
-	// loopback-only host port can reach the API. Host-networked containers share
-	// the host namespace and therefore stay bound to host loopback.
-	caddyAdminBridgeListen = "0.0.0.0:2019" // safe: container-only; Podman publishes this port to host loopback
-	caddyAdminHostListen   = "127.0.0.1:2019"
 )
+
+// caddyRunCommand starts Caddy from the stock Caddyfile unless an autosave
+// exists, in which case --resume restores the last live JSON configuration.
+var caddyRunCommand = []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--resume"}
 
 // CaddyConfigDir returns the Caddy config directory for the given user.
 func CaddyConfigDir(user string) string {
@@ -110,7 +134,7 @@ func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user strin
 
 	return &Manager{
 		sshClient:   sshClient,
-		caddyClient: NewCaddyClient(sshClient),
+		caddyClient: NewCaddyClient(sshClient, podmanCmd, log),
 		podman:      podman.NewContainerManager(podmanClient),
 		log:         log,
 		user:        user,
@@ -123,13 +147,6 @@ func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user strin
 // the full Caddy config during service registration fallback.
 func (m *Manager) SetProxyConfig(config *ProxyConfig) {
 	m.proxyConfig = config
-}
-
-func (m *Manager) adminListen() string {
-	if m.hostPorts {
-		return caddyAdminHostListen
-	}
-	return caddyAdminBridgeListen
 }
 
 // EnsureConfig ensures the proxy has TLS/ACME and logging settings applied.
@@ -150,15 +167,32 @@ func (m *Manager) EnsureConfig(host string) error {
 // waitForAdminAPI polls the Caddy admin API until it responds or the
 // timeout is reached. This replaces fixed sleeps after container starts.
 func (m *Manager) waitForAdminAPI(host string, timeout time.Duration) error {
+	return waitForAdmin(timeout, 500*time.Millisecond, func() error {
+		_, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil)
+		return err
+	})
+}
+
+// waitForAdmin calls probe until it succeeds or the timeout is reached, and
+// reports the last probe error on timeout. It stops early once the proxy
+// container is known not to run: polling cannot bring it back.
+func waitForAdmin(timeout, interval time.Duration, probe func() error) error {
 	deadline := time.Now().Add(timeout)
-	interval := 500 * time.Millisecond
+	var lastErr error
 	for time.Now().Before(deadline) {
-		if _, err := m.caddyClient.apiRequest(host, "GET", "/config/", nil); err == nil {
+		lastErr = probe()
+		if lastErr == nil {
 			return nil
+		}
+		if errors.Is(lastErr, errProxyNotRunning) {
+			return lastErr
 		}
 		time.Sleep(interval)
 	}
-	return fmt.Errorf("caddy admin API not ready after %s", timeout)
+	if lastErr == nil {
+		return fmt.Errorf("caddy admin API not ready after %s", timeout)
+	}
+	return fmt.Errorf("caddy admin API not ready after %s: %w", timeout, lastErr)
 }
 
 // withCaddyLock acquires the remote Caddy lock on the given host, runs fn,
@@ -225,23 +259,114 @@ func (m *Manager) ensureRootfulAccess(host string) error {
 	return nil
 }
 
-func (m *Manager) containerUsesResume(host, container string) (bool, error) {
-	raw, err := m.podman.Inspect(host, container)
+// proxyContainer holds the inspected fields Azud uses to decide whether an
+// existing proxy container still matches the definition it would create.
+type proxyContainer struct {
+	Cmd         []string
+	Env         []string
+	Labels      map[string]string
+	HostNetwork bool
+}
+
+func (m *Manager) inspectProxyContainer(host string) (*proxyContainer, error) {
+	raw, err := m.podman.Inspect(host, CaddyContainerName)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
+	return parseProxyContainer([]byte(raw))
+}
+
+func parseProxyContainer(raw []byte) (*proxyContainer, error) {
 	var payload []struct {
 		Config struct {
-			Cmd []string `json:"Cmd"`
+			Cmd    []string          `json:"Cmd"`
+			Env    []string          `json:"Env"`
+			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
+		HostConfig struct {
+			NetworkMode string `json:"NetworkMode"`
+		} `json:"HostConfig"`
+		NetworkSettings struct {
+			Networks map[string]json.RawMessage `json:"Networks"`
+		} `json:"NetworkSettings"`
 	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return false, err
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
 	}
 	if len(payload) == 0 {
-		return false, fmt.Errorf("empty inspect result")
+		return nil, fmt.Errorf("empty inspect result")
 	}
-	return commandUsesResume(payload[0].Config.Cmd), nil
+	inspected := payload[0]
+	_, onHostNetwork := inspected.NetworkSettings.Networks["host"]
+	return &proxyContainer{
+		Cmd:         inspected.Config.Cmd,
+		Env:         inspected.Config.Env,
+		Labels:      inspected.Config.Labels,
+		HostNetwork: inspected.HostConfig.NetworkMode == "host" || onHostNetwork,
+	}, nil
+}
+
+// outdatedReasons lists every way the container differs from the definition
+// Azud creates. A container created by an older release lacks the spec label
+// and still serves the admin API on TCP, so it must be recreated before the
+// socket transport can reach it.
+func (c *proxyContainer) outdatedReasons(hostNetwork bool) []string {
+	var reasons []string
+	if hostNetwork && !c.HostNetwork {
+		reasons = append(reasons, "mixed rootful/rootless mode requires host networking")
+	}
+	if !commandUsesResume(c.Cmd) {
+		reasons = append(reasons, "Caddy config resume is disabled")
+	}
+	if spec := c.Labels[ProxySpecLabel]; spec != ProxySpecVersion {
+		if spec == "" {
+			spec = "none"
+		}
+		reasons = append(reasons, fmt.Sprintf("container spec %s, want %s", spec, ProxySpecVersion))
+	}
+	if listen := c.envValue("CADDY_ADMIN"); listen != CaddyAdminListen {
+		if listen == "" {
+			listen = "Caddy's default"
+		}
+		reasons = append(reasons, fmt.Sprintf("admin API listens on %s instead of the private socket", listen))
+	}
+	return reasons
+}
+
+func (c *proxyContainer) envValue(key string) string {
+	for _, entry := range c.Env {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == key {
+			return value
+		}
+	}
+	return ""
+}
+
+// systemdUnit returns the Quadlet unit that owns the container, if any.
+func (c *proxyContainer) systemdUnit() string {
+	return c.Labels[systemdUnitLabel]
+}
+
+// ErrOutdatedProxy marks a proxy container that must be recreated before
+// Azud can manage it.
+var ErrOutdatedProxy = errors.New("outdated proxy container")
+
+// ErrOutdatedManagedProxy marks an outdated proxy container owned by a
+// Quadlet unit. Boot never recreates it, so deploys fail until 'azud systemd
+// enable' regenerates the unit. It also matches ErrOutdatedProxy.
+var ErrOutdatedManagedProxy = fmt.Errorf("%w managed by systemd", ErrOutdatedProxy)
+
+// outdatedProxyError explains how to migrate a proxy that Azud may not
+// recreate in the current command. A Quadlet-managed container is owned by
+// systemd: recreating it imperatively would race Restart=always and the
+// unit's --replace, so its unit must be regenerated instead.
+func outdatedProxyError(host string, container *proxyContainer, reasons []string) error {
+	if unit := container.systemdUnit(); unit != "" {
+		return fmt.Errorf("%w: proxy on %s is managed by systemd unit %s and uses an outdated container definition (%s); run 'azud systemd enable' to regenerate and restart it",
+			ErrOutdatedManagedProxy, host, unit, strings.Join(reasons, ", "))
+	}
+	return fmt.Errorf("%w: proxy on %s uses an outdated container definition (%s); run 'azud proxy reboot' to recreate it",
+		ErrOutdatedProxy, host, strings.Join(reasons, ", "))
 }
 
 func commandUsesResume(arguments []string) bool {
@@ -256,6 +381,16 @@ func commandUsesResume(arguments []string) bool {
 }
 
 func (m *Manager) normalizedCaddyAutosave(host string) ([]byte, bool, error) {
+	raw, err := m.readCaddyAutosave(host)
+	if err != nil {
+		return nil, false, err
+	}
+	return m.normalizeCaddyAutosave(host, raw)
+}
+
+// readCaddyAutosave returns Caddy's autosave as stored in the caddy_config
+// volume, or an empty string when there is none.
+func (m *Manager) readCaddyAutosave(host string) (string, error) {
 	result, err := m.podman.Run(host, &podman.ContainerConfig{
 		Image:           CaddyImage,
 		Entrypoint:      "/bin/sh",
@@ -267,34 +402,29 @@ func (m *Manager) normalizedCaddyAutosave(host string) ([]byte, bool, error) {
 		Remove:          true,
 	})
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to inspect Caddy autosave volume: %w", err)
+		return "", fmt.Errorf("failed to inspect Caddy autosave volume: %w", err)
 	}
-	if strings.TrimSpace(result) == "" {
+	return result, nil
+}
+
+func (m *Manager) normalizeCaddyAutosave(host, raw string) ([]byte, bool, error) {
+	if strings.TrimSpace(raw) == "" {
 		return nil, false, nil
 	}
-	normalized, err := normalizeCaddyAutosave([]byte(result), m.adminListen())
+	// --resume lets the autosave's admin object override CADDY_ADMIN, so the
+	// autosave must carry the private socket listener before Caddy starts.
+	normalized, dropped, err := normalizeAdminConfig([]byte(raw))
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("invalid Caddy autosave JSON: %w", err)
 	}
+	m.warnDroppedAdminSettings(host, "Caddy autosave", dropped)
 	return normalized, true, nil
 }
 
-func normalizeCaddyAutosave(data []byte, adminListen string) ([]byte, error) {
-	autosave, err := decodeJSONObject(data)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Caddy autosave JSON: %w", err)
+func (m *Manager) warnDroppedAdminSettings(host, source string, dropped []string) {
+	if len(dropped) > 0 {
+		m.log.Warn("Removed unexpected Caddy admin settings (%s) from %s on %s", strings.Join(dropped, ", "), source, host)
 	}
-	admin, ok := autosave["admin"].(map[string]interface{})
-	if !ok {
-		admin = make(map[string]interface{})
-		autosave["admin"] = admin
-	}
-	admin["listen"] = adminListen
-	normalized, err := json.Marshal(autosave)
-	if err != nil {
-		return nil, fmt.Errorf("failed to normalize Caddy autosave: %w", err)
-	}
-	return normalized, nil
 }
 
 func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
@@ -318,42 +448,35 @@ func (m *Manager) installCaddyAutosave(host string, autosave []byte) error {
 	return nil
 }
 
+// restoreCaddyAutosave puts back an autosave read by readCaddyAutosave, or
+// deletes the autosave when there was none.
+func (m *Manager) restoreCaddyAutosave(host string, autosave caddyAutosave) error {
+	if autosave.present {
+		return m.installCaddyAutosave(host, autosave.data)
+	}
+	_, err := m.podman.Run(host, &podman.ContainerConfig{
+		Image:           CaddyImage,
+		Entrypoint:      "/bin/sh",
+		User:            "0",
+		Command:         []string{"-c", "rm -f /config/caddy/autosave.json"},
+		Volumes:         []string{"caddy_config:/config"},
+		ReadOnly:        true,
+		CapDrop:         []string{"all"},
+		NoNewPrivileges: true,
+		Remove:          true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to remove Caddy autosave: %w", err)
+	}
+	return nil
+}
+
 func caddyAutosaveInstallCommand() string {
 	return "set -eu; umask 077; mkdir -p /config/caddy; " +
 		"tmp=/config/caddy/autosave.json.azud-tmp; " +
 		"trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; " +
 		"cat > \"$tmp\"; chmod 600 \"$tmp\"; " +
 		"mv -f \"$tmp\" /config/caddy/autosave.json; trap - EXIT"
-}
-
-func (m *Manager) containerUsesHostNetwork(host, container string) (bool, error) {
-	raw, err := m.podman.Inspect(host, container)
-	if err != nil {
-		return false, err
-	}
-
-	var payload []struct {
-		HostConfig struct {
-			NetworkMode string `json:"NetworkMode"`
-		} `json:"HostConfig"`
-		NetworkSettings struct {
-			Networks map[string]json.RawMessage `json:"Networks"`
-		} `json:"NetworkSettings"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return false, err
-	}
-	if len(payload) == 0 {
-		return false, fmt.Errorf("empty inspect result")
-	}
-
-	if payload[0].HostConfig.NetworkMode == "host" {
-		return true, nil
-	}
-	if _, ok := payload[0].NetworkSettings.Networks["host"]; ok {
-		return true, nil
-	}
-	return false, nil
 }
 
 // persistConfig fetches the current Caddy config from the admin API and
@@ -368,6 +491,13 @@ func (m *Manager) persistConfig(host string) error {
 	if !json.Valid(data) {
 		return fmt.Errorf("invalid JSON from Caddy admin API")
 	}
+	// The persisted copy seeds restores and Quadlet autosaves, so it must
+	// never carry an admin listener other than the private socket.
+	data, dropped, err := normalizeAdminConfig(data)
+	if err != nil {
+		return fmt.Errorf("invalid Caddy config from admin API: %w", err)
+	}
+	m.warnDroppedAdminSettings(host, "the live Caddy config", dropped)
 
 	// Write atomically via a temp file to avoid partial writes on failure.
 	// Note: paths are pre-quoted with ${HOME} expansion support for non-root users.
@@ -424,6 +554,24 @@ func (m *Manager) restoreConfig(host string) error {
 	return nil
 }
 
+// persistedConfigAutosave reads Azud's protected copy of the Caddy config and
+// normalizes it for use as an autosave. It reports false when no copy exists.
+func (m *Manager) persistedConfigAutosave(host string) ([]byte, bool, error) {
+	result, err := m.sshClient.Execute(host, restoreConfigCommand(m.user))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to read config file: %w", err)
+	}
+	if result.ExitCode != 0 || strings.TrimSpace(result.Stdout) == "" {
+		return nil, false, nil
+	}
+	normalized, dropped, err := normalizeAdminConfig([]byte(result.Stdout))
+	if err != nil {
+		return nil, false, fmt.Errorf("persisted config is invalid JSON: %w", err)
+	}
+	m.warnDroppedAdminSettings(host, "the persisted Caddy config", dropped)
+	return normalized, true, nil
+}
+
 func restoreConfigCommand(user string) string {
 	configDir := state.DirQuoted(user)
 	configFile := state.ConfigFileQuoted(user, CaddyConfigFileName)
@@ -446,9 +594,6 @@ type ProxyConfig struct {
 
 	// Redirect HTTP to HTTPS
 	SSLRedirect bool
-
-	// Admin API listen address (default: localhost:2019)
-	AdminListen string
 
 	// HTTP port (default 80)
 	HTTPPort int
@@ -501,42 +646,22 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		return fmt.Errorf("failed to check proxy container: %w", err)
 	}
 
-	// Mixed mode requires host networking so Caddy can reach app host ports
-	// on 127.0.0.1. Recreate existing proxy containers that use bridge mode.
-	if m.hostPorts && exists {
-		hostNet, inspectErr := m.containerUsesHostNetwork(host, CaddyContainerName)
-		if inspectErr != nil {
-			return fmt.Errorf("failed to inspect proxy network mode on %s: %w", host, inspectErr)
-		}
-		if !hostNet {
-			m.log.Host(host, "Recreating proxy container for mixed rootful/rootless mode...")
-			if running {
-				_ = m.podman.Stop(host, CaddyContainerName, 30)
-			}
-			if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
-				return fmt.Errorf("failed to recreate proxy container: %w", err)
-			}
-			running = false
-			exists = false
-		}
+	exists, running, err = m.recoverInterruptedMigration(host, exists, running)
+	if err != nil {
+		return err
 	}
 
-	// Older proxy containers restart from the stock Caddyfile and serve its
-	// catch-all file route until Azud reconnects. Recreate them once so Caddy
-	// resumes its autosaved live JSON before accepting traffic after a restart.
+	// Containers created by older releases expose the admin API on TCP, lack
+	// hardening, may not resume their autosave, or use bridge networking in
+	// mixed mode. Recreate them once before any admin call: the socket
+	// transport cannot reach a legacy TCP listener.
+	var migration *proxyMigration
 	if exists {
-		usesResume, inspectErr := m.containerUsesResume(host, CaddyContainerName)
-		if inspectErr != nil {
-			return fmt.Errorf("failed to inspect proxy restart command on %s: %w", host, inspectErr)
+		migration, err = m.recreateOutdatedProxy(host, running)
+		if err != nil {
+			return err
 		}
-		if !usesResume {
-			m.log.Host(host, "Recreating proxy container with Caddy config resume enabled...")
-			if running {
-				_ = m.podman.Stop(host, CaddyContainerName, 30)
-			}
-			if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
-				return fmt.Errorf("failed to recreate proxy container: %w", err)
-			}
+		if migration != nil {
 			running = false
 			exists = false
 		}
@@ -569,7 +694,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		if err := m.podman.Start(host, CaddyContainerName); err != nil {
 			return fmt.Errorf("failed to start proxy: %w", err)
 		}
-		if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
+		if err := m.waitForAdminAPI(host, caddyAdminReadyTimeout); err != nil {
 			return err
 		}
 		if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
@@ -588,16 +713,193 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		httpsPort = config.HTTPSPort
 	}
 
-	autosave, hasAutosave, err := m.normalizedCaddyAutosave(host)
-	if err != nil {
-		return err
-	}
-	if hasAutosave {
-		if err := m.installCaddyAutosave(host, autosave); err != nil {
+	var autosave caddyAutosave
+	if migration != nil {
+		autosave = migration.autosave
+	} else {
+		data, present, err := m.normalizedCaddyAutosave(host)
+		if err != nil {
 			return err
+		}
+		autosave = caddyAutosave{data: data, present: present}
+	}
+	hasAutosave := autosave.present
+	if hasAutosave {
+		if err := m.installCaddyAutosave(host, autosave.data); err != nil {
+			return m.abortProxyMigration(host, migration, err)
 		}
 	}
 
+	_, err = m.podman.Run(host, NewProxyContainerConfig(httpPort, httpsPort, m.hostPorts))
+	if err != nil {
+		return m.abortProxyMigration(host, migration, fmt.Errorf("failed to start proxy container: %w", err))
+	}
+
+	// Wait for Caddy admin API to be ready
+	if err := m.waitForAdminAPI(host, caddyAdminReadyTimeout); err != nil {
+		return m.abortProxyMigration(host, migration, err)
+	}
+	if migration != nil {
+		m.removeLegacyProxy(host)
+	}
+
+	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
+		return err
+	}
+
+	m.log.HostSuccess(host, "Proxy started")
+	return nil
+}
+
+// caddyAutosave is an autosave read from the caddy_config volume.
+type caddyAutosave struct {
+	data    []byte
+	present bool
+}
+
+// proxyMigration is an outdated proxy container that recreateOutdatedProxy
+// renamed to legacyProxyContainerName. Boot restores it with
+// abortProxyMigration when the replacement does not answer, and removes it
+// once the replacement does.
+type proxyMigration struct {
+	// autosave is the normalized autosave the replacement resumes.
+	autosave caddyAutosave
+	// original is the autosave the previous container left behind. A
+	// rollback puts it back: that container may resume it and cannot bind
+	// the private socket named by the normalized copy.
+	original caddyAutosave
+	// running records whether the previous container was serving traffic.
+	running bool
+}
+
+// recreateOutdatedProxy moves aside an existing proxy container that does
+// not match the current definition. It follows the order stop, snapshot and
+// normalize the autosave, rename: Caddy has finished writing its autosave
+// before the snapshot, and a failed snapshot restarts the previous container
+// in place. The caller creates the replacement with the returned autosave.
+func (m *Manager) recreateOutdatedProxy(host string, running bool) (*proxyMigration, error) {
+	container, err := m.inspectProxyContainer(host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect proxy container on %s: %w", host, err)
+	}
+	reasons := container.outdatedReasons(m.hostPorts)
+	if len(reasons) == 0 {
+		return nil, nil
+	}
+	if container.systemdUnit() != "" {
+		return nil, outdatedProxyError(host, container, reasons)
+	}
+
+	m.log.Host(host, "Recreating proxy container (%s)...", strings.Join(reasons, ", "))
+	if running {
+		_ = m.podman.Stop(host, CaddyContainerName, 30)
+	}
+	raw, err := m.readCaddyAutosave(host)
+	if err != nil {
+		return nil, m.restartPreviousProxy(host, running, err)
+	}
+	data, present, err := m.normalizeCaddyAutosave(host, raw)
+	if err != nil {
+		return nil, m.restartPreviousProxy(host, running, err)
+	}
+	if err := m.podman.Rename(host, CaddyContainerName, legacyProxyContainerName); err != nil {
+		return nil, m.restartPreviousProxy(host, running, err)
+	}
+	return &proxyMigration{
+		autosave: caddyAutosave{data: data, present: present},
+		original: caddyAutosave{data: []byte(raw), present: strings.TrimSpace(raw) != ""},
+		running:  running,
+	}, nil
+}
+
+// restartPreviousProxy starts the outdated container recreateOutdatedProxy
+// stopped when the migration fails before its replacement is created.
+func (m *Manager) restartPreviousProxy(host string, running bool, cause error) error {
+	if !running {
+		return fmt.Errorf("proxy container on %s was not recreated: %w", host, cause)
+	}
+	if err := m.podman.Start(host, CaddyContainerName); err != nil {
+		return fmt.Errorf("proxy container on %s was stopped but not recreated: %v (restarting it also failed: %v)", host, cause, err)
+	}
+	return fmt.Errorf("proxy container on %s was not recreated; restarted the previous container: %w", host, cause)
+}
+
+// abortProxyMigration restores the previous proxy container when its
+// replacement does not start, so a failed migration leaves the old proxy
+// serving instead of none. The failed replacement is removed: left in place
+// it carries the current spec, and the next Boot would only restart it. It
+// returns cause unchanged when Boot is not migrating.
+func (m *Manager) abortProxyMigration(host string, migration *proxyMigration, cause error) error {
+	if migration == nil {
+		return cause
+	}
+	m.log.Host(host, "Replacement proxy container failed; restoring the previous container...")
+	// The replacement's output explains the failure and is lost with it.
+	if result, err := m.podman.Logs(host, &podman.LogsConfig{Container: CaddyContainerName, Tail: "20"}); err == nil && result.ExitCode == 0 {
+		m.log.OutputError(result.Stdout + result.Stderr)
+	}
+	if err := m.podman.Remove(host, CaddyContainerName, true); err != nil && !podman.IsNoSuchContainer(err) {
+		return fmt.Errorf("%v (rollback failed: removing the replacement proxy container: %v; the previous container is kept as %s)", cause, err, legacyProxyContainerName)
+	}
+	restoreErr := m.restoreCaddyAutosave(host, migration.original)
+	if err := m.podman.Rename(host, legacyProxyContainerName, CaddyContainerName); err != nil {
+		return fmt.Errorf("%v (rollback failed: renaming the previous container: %v; it is kept as %s)", cause, err, legacyProxyContainerName)
+	}
+	if restoreErr != nil {
+		// The previous container would resume the replacement's autosave.
+		return fmt.Errorf("%v (rollback incomplete: the previous proxy container was restored but not started: %v)", cause, restoreErr)
+	}
+	if migration.running {
+		if err := m.podman.Start(host, CaddyContainerName); err != nil {
+			return fmt.Errorf("%v (rollback incomplete: the previous proxy container was restored but did not start: %v)", cause, err)
+		}
+	}
+	return fmt.Errorf("proxy on %s was rolled back to its previous, outdated container because the replacement failed: %w", host, cause)
+}
+
+// removeLegacyProxy deletes the previous proxy container once its
+// replacement answers. A failure leaves only a stopped container that the
+// next Boot removes, so it is a warning.
+func (m *Manager) removeLegacyProxy(host string) {
+	if err := m.podman.Remove(host, legacyProxyContainerName, true); err != nil {
+		m.log.Warn("Failed to remove previous proxy container %s on %s: %v", legacyProxyContainerName, host, err)
+	}
+}
+
+// recoverInterruptedMigration settles a container that an interrupted Boot
+// left under legacyProxyContainerName. Without a running replacement it is
+// renamed back, so this Boot migrates it again with a working rollback;
+// otherwise it is no longer needed. It returns the updated existence and
+// running state of the proxy container.
+func (m *Manager) recoverInterruptedMigration(host string, exists, running bool) (bool, bool, error) {
+	legacy, err := m.podman.Exists(host, legacyProxyContainerName)
+	if err != nil {
+		return exists, running, fmt.Errorf("failed to check proxy container: %w", err)
+	}
+	if !legacy {
+		return exists, running, nil
+	}
+	if running {
+		m.removeLegacyProxy(host)
+		return exists, running, nil
+	}
+	m.log.Host(host, "Restoring proxy container left by an interrupted migration...")
+	if exists {
+		if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
+			return exists, running, fmt.Errorf("failed to remove proxy container left by an interrupted migration: %w", err)
+		}
+	}
+	if err := m.podman.Rename(host, legacyProxyContainerName, CaddyContainerName); err != nil {
+		return false, false, fmt.Errorf("failed to restore proxy container %s: %w", legacyProxyContainerName, err)
+	}
+	return true, false, nil
+}
+
+// NewProxyContainerConfig returns the Caddy container definition shared by
+// imperative boots and the generated Quadlet unit. hostNetwork selects the
+// mixed rootless-app/rootful-proxy topology, where Caddy shares the host
+// network to reach application host ports.
+func NewProxyContainerConfig(httpPort, httpsPort int, hostNetwork bool) *podman.ContainerConfig {
 	containerConfig := &podman.ContainerConfig{
 		Name:    CaddyContainerName,
 		Image:   CaddyImage,
@@ -610,39 +912,69 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		Labels: map[string]string{
 			"azud.managed": "true",
 			"azud.type":    "proxy",
+			ProxySpecLabel: ProxySpecVersion,
 		},
-		Command: []string{"caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--resume"},
+		Command: append([]string(nil), caddyRunCommand...),
 		Env: map[string]string{
-			"CADDY_ADMIN": m.adminListen(),
+			"CADDY_ADMIN": CaddyAdminListen,
 		},
+		// The admin socket directory is a tmpfs inside the container's own
+		// mount namespace: no host path, bind mount or other container can
+		// reach it, and it is recreated empty on every start.
+		Tmpfs: []string{CaddyAdminTmpfs},
 	}
-	if m.hostPorts {
+	if hostNetwork {
 		containerConfig.Network = "host"
 	} else {
 		containerConfig.Network = "azud"
 		containerConfig.Ports = []string{
 			fmt.Sprintf("%d:%d", httpPort, 80),
 			fmt.Sprintf("%d:%d", httpsPort, 443),
-			fmt.Sprintf("127.0.0.1:%d:%d", CaddyAdminPort, CaddyAdminPort),
+		}
+	}
+	return containerConfig
+}
+
+// PrepareQuadletStart readies Caddy's state before systemd starts the
+// generated proxy unit. The unit resumes Caddy's autosave and does not mount
+// Azud's state directory, so the autosave is normalized to the private admin
+// socket, or seeded from Azud's protected copy when none exists. With
+// replaceContainer, an existing proxy container is stopped and removed first
+// so its final autosave is captured and an outdated definition cannot keep
+// running beside the unit.
+func (m *Manager) PrepareQuadletStart(host string, replaceContainer bool) error {
+	if err := m.ensureRootfulAccess(host); err != nil {
+		return err
+	}
+	if replaceContainer {
+		exists, err := m.podman.Exists(host, CaddyContainerName)
+		if err != nil {
+			return fmt.Errorf("failed to check proxy container: %w", err)
+		}
+		if exists {
+			_ = m.podman.Stop(host, CaddyContainerName, 30)
+			if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
+				return fmt.Errorf("failed to remove proxy container before starting its unit: %w", err)
+			}
 		}
 	}
 
-	_, err = m.podman.Run(host, containerConfig)
+	autosave, present, err := m.normalizedCaddyAutosave(host)
 	if err != nil {
-		return fmt.Errorf("failed to start proxy container: %w", err)
-	}
-
-	// Wait for Caddy admin API to be ready
-	if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
 		return err
 	}
-
-	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
-		return err
+	if !present {
+		autosave, present, err = m.persistedConfigAutosave(host)
+		if err != nil {
+			return err
+		}
 	}
-
-	m.log.HostSuccess(host, "Proxy started")
-	return nil
+	if !present {
+		// Caddy starts from the stock Caddyfile with the admin socket from
+		// CADDY_ADMIN; the next boot or deploy applies Azud's configuration.
+		return nil
+	}
+	return m.installCaddyAutosave(host, autosave)
 }
 
 func (m *Manager) finalizeProxyStartup(host string, config *ProxyConfig, hasAutosave bool) error {
@@ -837,7 +1169,7 @@ func copyOptionalJSONField(destination, source map[string]interface{}, key strin
 func (m *Manager) buildBaseConfig() *CaddyConfig {
 	return &CaddyConfig{
 		Admin: &AdminConfig{
-			Listen: m.adminListen(),
+			Listen: CaddyAdminListen,
 		},
 		Apps: &AppsConfig{
 			HTTP: &HTTPApp{
@@ -1071,16 +1403,18 @@ func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 	if !exists {
 		return fmt.Errorf("proxy container does not exist")
 	}
-	usesResume, err := m.containerUsesResume(host, CaddyContainerName)
+	container, err := m.inspectProxyContainer(host)
 	if err != nil {
-		return fmt.Errorf("failed to inspect proxy restart command on %s: %w", host, err)
+		return fmt.Errorf("failed to inspect proxy container on %s: %w", host, err)
 	}
-	if !usesResume {
-		m.log.Host(host, "Migrating proxy container to Caddy config resume before reboot...")
-		_ = m.podman.Stop(host, CaddyContainerName, 30)
-		if err := m.podman.Remove(host, CaddyContainerName, true); err != nil {
-			return fmt.Errorf("failed to migrate proxy container: %w", err)
+	if reasons := container.outdatedReasons(m.hostPorts); len(reasons) > 0 {
+		if container.systemdUnit() != "" {
+			return outdatedProxyError(host, container, reasons)
 		}
+		// Boot recreates the container in the stop, autosave, rename, run
+		// order, restores the previous container if the replacement fails,
+		// and then restores Azud's configuration.
+		m.log.Host(host, "Migrating proxy container before reboot...")
 		return m.Boot(host, config)
 	}
 
@@ -1107,7 +1441,7 @@ func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 	if err := m.podman.Start(host, CaddyContainerName); err != nil {
 		return fmt.Errorf("failed to start proxy after reboot: %w", err)
 	}
-	if err := m.waitForAdminAPI(host, 10*time.Second); err != nil {
+	if err := m.waitForAdminAPI(host, caddyAdminReadyTimeout); err != nil {
 		return err
 	}
 	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
@@ -1165,9 +1499,21 @@ func (m *Manager) Status(host string) (*ProxyStatus, error) {
 			status.Stats = stats
 		}
 
-		// Try to get config info
+		// A container created by an older release cannot be reached through
+		// the private admin socket until it is recreated.
+		container, err := m.inspectProxyContainer(host)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect proxy container on %s: %w", host, err)
+		}
+		if reasons := container.outdatedReasons(m.hostPorts); len(reasons) > 0 {
+			return nil, outdatedProxyError(host, container, reasons)
+		}
+
 		config, err := m.caddyClient.GetConfig(host)
-		if err == nil && config.Apps != nil && config.Apps.HTTP != nil {
+		if err != nil {
+			return nil, fmt.Errorf("failed to read proxy config on %s: %w", host, err)
+		}
+		if config.Apps != nil && config.Apps.HTTP != nil {
 			for _, server := range config.Apps.HTTP.Servers {
 				status.RouteCount += len(server.Routes)
 			}

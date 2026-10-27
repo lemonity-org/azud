@@ -24,43 +24,52 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Finding: the Caddy admin API is published to loopback but listens on
-// 0.0.0.0 inside the container, and app/accessory/cron containers share the
-// "azud" network with it. Any workload can therefore read or replace the
-// proxy configuration.
+// Control: the Caddy admin API listens only on a unix socket in a tmpfs that
+// is private to the proxy container, and Azud reaches it with podman exec.
+// App/accessory/cron containers still share the "azud" network with the proxy,
+// but nothing listens on TCP 2019 for them (or for local host users) to reach.
 // ---------------------------------------------------------------------------
 
-func TestFinding_CaddyAdminReachableFromSharedNetwork(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", proxyBootHandler())
-	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+func TestControl_CaddyAdminIsPrivateUnixSocket(t *testing.T) {
+	for _, topology := range proxyTopologies() {
+		t.Run(topology.name, func(t *testing.T) {
+			fake := startFakeSSH(t, "127.0.0.1:0", proxyBootHandler())
+			dir := newWorkdir(t)
+			configPath := writeConfig(t, dir, topology.config(fake.port(), clientKeyPath(t)))
 
-	res := runAzud(t, dir, nil, "-c", configPath, "proxy", "boot")
-	if res.Exit != 0 {
-		t.Fatalf("proxy boot failed: %s", res)
-	}
+			res := runAzud(t, dir, nil, "-c", configPath, "proxy", "boot")
+			if res.Exit != 0 {
+				t.Fatalf("proxy boot failed: %s", res)
+			}
 
-	boot := fake.waitCommand(t, "--name azud-proxy", 5*time.Second)
-	for _, want := range []string{
-		"CADDY_ADMIN=0.0.0.0:2019",
-		"--network azud",
-		"127.0.0.1:2019:2019",
-	} {
-		if !strings.Contains(boot.Command, want) {
-			t.Fatalf("proxy boot command missing %q:\n%s", want, boot.Command)
-		}
-	}
+			boot := fake.waitCommand(t, "--name azud-proxy", 5*time.Second)
+			for _, want := range []string{
+				topology.podman + " run ",
+				"-e 'CADDY_ADMIN=unix//run/azud-admin/admin.sock|0600'",
+				"--tmpfs '/run/azud-admin:rw,nosuid,nodev,noexec,mode=0700,size=64k'",
+				"-l 'azud.proxy.spec=2'",
+				"--network " + topology.network,
+			} {
+				if !strings.Contains(boot.Command, want) {
+					t.Fatalf("proxy boot command missing %q:\n%s", want, boot.Command)
+				}
+			}
+			for _, forbidden := range []string{"2019", "0.0.0.0"} {
+				if strings.Contains(boot.Command, forbidden) {
+					t.Fatalf("proxy boot command still exposes the admin API (%q):\n%s", forbidden, boot.Command)
+				}
+			}
 
-	cfg, err := config.NewLoader(configPath, "").Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
+			cfg, err := config.NewLoader(configPath, "").Load()
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if app := deploy.NewAppContainerConfig(cfg, cfg.Image, "shop", "web", nil); app.Network != "azud" {
+				t.Fatalf("app network = %q, want azud", app.Network)
+			}
+			assertAdminCallsUsePrivateSocket(t, fake.snapshot(), topology.podman)
+		})
 	}
-	app := deploy.NewAppContainerConfig(cfg, cfg.Image, "shop", "web", nil)
-	if app.Network != "azud" {
-		t.Fatalf("app network = %q, want azud", app.Network)
-	}
-	t.Logf("proxy boot command:\n%s", boot.Command)
-	t.Logf("VULNERABLE: proxy listens on %s inside the %q network; app containers share it and can call http://azud-proxy:2019/config/", "0.0.0.0:2019", app.Network)
 }
 
 // testCertificate returns a self-signed cert/key pair as PEM.
@@ -92,7 +101,10 @@ func testCertificate(t *testing.T) (string, string) {
 	return string(certPEM), string(keyPEM)
 }
 
-func TestFinding_CaddyConfigExposesTLSPrivateKeyToAdminAPI(t *testing.T) {
+// The custom TLS key is part of the Caddy config by design. The control is
+// that the config, key included, only travels on stdin to the private admin
+// socket, never in a command line and never to a TCP admin listener.
+func TestControl_CustomTLSConfigLoadsOnlyThroughPrivateAdminSocket(t *testing.T) {
 	certPEM, keyPEM := testCertificate(t)
 	fake := startFakeSSH(t, "127.0.0.1:0", proxyBootHandler())
 	dir := newWorkdir(t)
@@ -127,17 +139,26 @@ ssh:
 
 	var load commandRecord
 	for _, record := range fake.snapshot() {
-		if strings.Contains(record.Command, "-X POST") && strings.Contains(string(record.Stdin), "BEGIN") {
-			load = record
+		if strings.Contains(record.Command, "BEGIN") {
+			t.Fatalf("PEM material appeared in a remote command line:\n%s", record.Command)
 		}
+		if !strings.Contains(string(record.Stdin), "BEGIN PRIVATE KEY") {
+			continue
+		}
+		if !isCaddyAdminWrite(record.Command) || !strings.HasSuffix(record.Command, " http://localhost/load") {
+			t.Fatalf("TLS key was sent somewhere other than the private admin socket:\n%s", record.Command)
+		}
+		load = record
 	}
 	if load.Command == "" {
-		t.Fatalf("no Caddy /load body containing PEM material was captured:\n%s", commandDump(fake.snapshot()))
+		t.Fatalf("no Caddy /load body containing the TLS key was captured:\n%s", commandDump(fake.snapshot()))
 	}
-	if !strings.Contains(string(load.Stdin), "BEGIN PRIVATE KEY") {
-		t.Fatalf("TLS key was not part of the Caddy config body:\n%s", load.Stdin)
+	if !strings.HasPrefix(load.Command, "podman exec -i azud-proxy curl ") ||
+		!strings.Contains(load.Command, "--unix-socket /run/azud-admin/admin.sock") {
+		t.Fatalf("custom TLS config was not loaded over the private socket:\n%s", load.Command)
 	}
-	t.Logf("VULNERABLE: custom TLS key is embedded in the Caddy config; a workload that can reach the admin API can GET /config/ and read it")
+	assertAdminListenerIsPrivateSocket(t, load.Stdin)
+	assertAdminCallsUsePrivateSocket(t, fake.snapshot(), "podman")
 }
 
 // ---------------------------------------------------------------------------

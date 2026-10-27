@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"reflect"
 	"slices"
@@ -10,26 +11,146 @@ import (
 	"time"
 )
 
-func TestAdminListenMatchesNetworkMode(t *testing.T) {
-	tests := []struct {
-		name      string
-		hostPorts bool
-		want      string
-	}{
-		{name: "bridge", hostPorts: false, want: caddyAdminBridgeListen},
-		{name: "host network", hostPorts: true, want: caddyAdminHostListen},
+func TestBaseConfigUsesPrivateAdminSocketInEveryNetworkMode(t *testing.T) {
+	if CaddyAdminListen != "unix//run/azud-admin/admin.sock|0600" {
+		t.Fatalf("admin listen = %q", CaddyAdminListen)
 	}
+	for _, hostPorts := range []bool{false, true} {
+		manager := &Manager{hostPorts: hostPorts}
+		if got := manager.buildBaseConfig().Admin.Listen; got != CaddyAdminListen {
+			t.Fatalf("hostPorts=%t: base config admin listen = %q, want %q", hostPorts, got, CaddyAdminListen)
+		}
+	}
+}
 
+func TestProxyContainerConfigServesAdminOnlyOnPrivateSocket(t *testing.T) {
+	tests := []struct {
+		name        string
+		hostNetwork bool
+		network     string
+		ports       []string
+	}{
+		{name: "bridge", network: "azud", ports: []string{"8080:80", "8443:443"}},
+		{name: "host network", hostNetwork: true, network: "host"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := &Manager{hostPorts: tt.hostPorts}
-			if got := manager.adminListen(); got != tt.want {
-				t.Fatalf("admin listen = %q, want %q", got, tt.want)
+			cfg := NewProxyContainerConfig(8080, 8443, tt.hostNetwork)
+			if cfg.Network != tt.network || !slices.Equal(cfg.Ports, tt.ports) {
+				t.Fatalf("network=%q ports=%v, want %q %v", cfg.Network, cfg.Ports, tt.network, tt.ports)
 			}
-			if got := manager.buildBaseConfig().Admin.Listen; got != tt.want {
-				t.Fatalf("base config admin listen = %q, want %q", got, tt.want)
+			if cfg.Env["CADDY_ADMIN"] != CaddyAdminListen {
+				t.Fatalf("CADDY_ADMIN = %q", cfg.Env["CADDY_ADMIN"])
+			}
+			if !slices.Contains(cfg.Tmpfs, CaddyAdminTmpfs) || !strings.Contains(CaddyAdminTmpfs, "mode=0700") {
+				t.Fatalf("admin socket tmpfs missing or not private: %v", cfg.Tmpfs)
+			}
+			if cfg.Labels[ProxySpecLabel] != ProxySpecVersion {
+				t.Fatalf("spec label = %q", cfg.Labels[ProxySpecLabel])
+			}
+			if !commandUsesResume(cfg.Command) {
+				t.Fatalf("proxy does not resume its autosave: %v", cfg.Command)
+			}
+			command := cfg.BuildRunCommand()
+			for _, forbidden := range []string{"2019", "0.0.0.0", "127.0.0.1"} {
+				if strings.Contains(command, forbidden) {
+					t.Fatalf("proxy run command contains %q: %s", forbidden, command)
+				}
 			}
 		})
+	}
+}
+
+func TestProxyContainerOutdatedReasons(t *testing.T) {
+	current := func() *proxyContainer {
+		return &proxyContainer{
+			Cmd:    caddyRunCommand,
+			Env:    []string{"PATH=/usr/bin", "CADDY_ADMIN=" + CaddyAdminListen},
+			Labels: map[string]string{ProxySpecLabel: ProxySpecVersion},
+		}
+	}
+	tests := []struct {
+		name        string
+		mutate      func(*proxyContainer)
+		hostNetwork bool
+		want        []string
+	}{
+		{name: "current definition", mutate: func(*proxyContainer) {}},
+		{
+			name: "legacy TCP admin container",
+			mutate: func(c *proxyContainer) {
+				c.Env = []string{"CADDY_ADMIN=0.0.0.0:2019"}
+				c.Labels = map[string]string{"azud.type": "proxy"}
+			},
+			want: []string{"container spec none, want 2", "admin API listens on 0.0.0.0:2019 instead of the private socket"},
+		},
+		{
+			name:   "admin env removed",
+			mutate: func(c *proxyContainer) { c.Env = nil },
+			want:   []string{"admin API listens on Caddy's default instead of the private socket"},
+		},
+		{
+			name:   "older spec label",
+			mutate: func(c *proxyContainer) { c.Labels[ProxySpecLabel] = "1" },
+			want:   []string{"container spec 1, want 2"},
+		},
+		{
+			name:   "no resume",
+			mutate: func(c *proxyContainer) { c.Cmd = []string{"caddy", "run"} },
+			want:   []string{"Caddy config resume is disabled"},
+		},
+		{
+			name:        "bridge container in mixed mode",
+			mutate:      func(*proxyContainer) {},
+			hostNetwork: true,
+			want:        []string{"mixed rootful/rootless mode requires host networking"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := current()
+			tt.mutate(container)
+			if got := container.outdatedReasons(tt.hostNetwork); !slices.Equal(got, tt.want) {
+				t.Fatalf("reasons = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseProxyContainerReadsPodmanInspect(t *testing.T) {
+	raw := []byte(`[{
+		"Config":{
+			"Cmd":["caddy","run","--resume"],
+			"Env":["CADDY_ADMIN=unix//run/azud-admin/admin.sock|0600","HOME=/root"],
+			"Labels":{"azud.proxy.spec":"2","PODMAN_SYSTEMD_UNIT":"azud-proxy.service"}
+		},
+		"HostConfig":{"NetworkMode":"bridge"},
+		"NetworkSettings":{"Networks":{"host":{}}}
+	}]`)
+	container, err := parseProxyContainer(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !container.HostNetwork || container.systemdUnit() != "azud-proxy.service" || container.envValue("CADDY_ADMIN") != CaddyAdminListen {
+		t.Fatalf("parsed container = %#v", container)
+	}
+	if reasons := container.outdatedReasons(true); len(reasons) != 0 {
+		t.Fatalf("current container reported outdated: %v", reasons)
+	}
+	if _, err := parseProxyContainer([]byte(`[]`)); err == nil {
+		t.Fatal("empty inspect result was accepted")
+	}
+}
+
+func TestOutdatedProxyErrorNamesTheMigrationCommand(t *testing.T) {
+	reasons := []string{"container spec none, want 2"}
+	imperative := outdatedProxyError("web-1", &proxyContainer{}, reasons)
+	if !errors.Is(imperative, ErrOutdatedProxy) || errors.Is(imperative, ErrOutdatedManagedProxy) || !strings.Contains(imperative.Error(), "azud proxy reboot") {
+		t.Fatalf("imperative proxy error = %v", imperative)
+	}
+	managed := outdatedProxyError("web-1", &proxyContainer{Labels: map[string]string{systemdUnitLabel: "azud-proxy.service"}}, reasons)
+	if !errors.Is(managed, ErrOutdatedProxy) || !errors.Is(managed, ErrOutdatedManagedProxy) || !strings.Contains(managed.Error(), "azud systemd enable") || !strings.Contains(managed.Error(), "azud-proxy.service") {
+		t.Fatalf("systemd proxy error = %v", managed)
 	}
 }
 
@@ -568,22 +689,26 @@ func TestCaddyAutosaveInstallUsesAtomicRenameAndCleanupTrap(t *testing.T) {
 	}
 }
 
-func TestNormalizeCaddyAutosaveRepairsOnlyAdminListener(t *testing.T) {
-	normalized, err := normalizeCaddyAutosave([]byte(`{
-		"admin":{"listen":"127.0.0.1:2020","enforce_origin":true},
+func TestNormalizeAdminConfigReplacesAdminAndPreservesEverythingElse(t *testing.T) {
+	normalized, dropped, err := normalizeAdminConfig([]byte(`{
+		"admin":{"listen":"0.0.0.0:2019","enforce_origin":true,"remote":{"listen":":2021"},
+			"identity":{"identifiers":["x"]},"config":{"load":{"module":"http","url":"http://attacker/"}}},
 		"unknown_counter":9007199254740993,
 		"apps":{"custom":{"unmodeled":true}}
-	}`), "0.0.0.0:2019")
+	}`))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want := []string{"config", "enforce_origin", "identity", "remote"}; !slices.Equal(dropped, want) {
+		t.Fatalf("dropped admin keys = %v, want %v", dropped, want)
 	}
 	object, err := decodeJSONObject(normalized)
 	if err != nil {
 		t.Fatal(err)
 	}
 	admin := object["admin"].(map[string]interface{})
-	if admin["listen"] != "0.0.0.0:2019" || admin["enforce_origin"] != true {
-		t.Fatalf("admin state was not selectively normalized: %#v", admin)
+	if !reflect.DeepEqual(admin, map[string]interface{}{"listen": CaddyAdminListen}) {
+		t.Fatalf("admin object was not replaced: %#v", admin)
 	}
 	if object["unknown_counter"] != json.Number("9007199254740993") {
 		t.Fatalf("unmodeled integer changed: %#v", object)

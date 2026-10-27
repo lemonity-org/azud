@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/proxy"
+	"github.com/lemonity-org/azud/internal/shell"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
 
@@ -84,6 +86,7 @@ func TestSetupIntegration(t *testing.T) {
 		proxyPodmanCommand = "sudo -n podman"
 	}
 	assertContainerRunningWithPodman(t, client, host, "azud-proxy", proxyPodmanCommand)
+	assertCaddyAdminIsPrivate(t, client, host, proxyPodmanCommand, rootless && proxyRootful)
 	assertContainerRunning(t, client, host, "azud-it")
 	assertContainerRunning(t, client, host, "azud-it-worker")
 	assertContainerRunning(t, client, host, "azud-it-cache")
@@ -174,13 +177,14 @@ func TestSetupIntegration(t *testing.T) {
 	// data-plane traffic. The next deploy must fail, remove its temporary
 	// container, and leave the prior application reachable.
 	assertRemoteSuccess(t, client, host,
-		`curl -fsS -X PATCH -H 'Content-Type: application/json' --data '"127.0.0.1:2020"' http://127.0.0.1:2019/config/admin/listen`)
+		proxyPodmanCommand+` exec azud-proxy curl -fsS --unix-socket `+proxy.CaddyAdminSocket+` -X PATCH -H 'Content-Type: application/json' --data '"unix//run/azud-admin/moved.sock|0600"' http://localhost/config/admin/listen`)
 	runAzudExpectFailure(t, binaryPath, configPath, stateDir, tempDir, "deploy", "--version", "latest")
 	assertHTTPAvailable(t, client, host, httpPort)
 	assertRemoteContains(t, client, host,
 		"podman ps -a --filter name=azud-it-new- --format '{{.Names}}' | wc -l", "0")
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "proxy", "reboot")
 	assertHTTPAvailable(t, client, host, httpPort)
+	assertCaddyAdminIsPrivate(t, client, host, proxyPodmanCommand, rootless && proxyRootful)
 
 	// Registry and SSH failures must be visible as non-zero CLI exits.
 	badRegistryPath := filepath.Join(tempDir, "bad-registry.yml")
@@ -416,6 +420,26 @@ func assertRemoteContains(t *testing.T, client *ssh.Client, host, command, want 
 	}
 }
 
+// assertCaddyAdminIsPrivate proves the admin API is reachable only through
+// the proxy container: the private socket answers, host loopback does not,
+// and in bridge modes a peer on the shared network cannot connect to :2019
+// even though it reaches Caddy's HTTP listener.
+func assertCaddyAdminIsPrivate(t *testing.T, client *ssh.Client, host, proxyPodman string, hostNetwork bool) {
+	t.Helper()
+	assertRemoteSuccess(t, client, host,
+		proxyPodman+" exec azud-proxy curl -fsS --unix-socket "+proxy.CaddyAdminSocket+" http://localhost/config/ >/dev/null")
+	assertRemoteSuccess(t, client, host, "! curl -fsS -m 3 http://127.0.0.1:2019/config/")
+	assertRemoteContains(t, client, host,
+		proxyPodman+` container inspect azud-proxy --format '{{index .Config.Labels "azud.proxy.spec"}}'`,
+		proxy.ProxySpecVersion)
+	if hostNetwork {
+		return
+	}
+	peer := "podman run --rm --network azud --entrypoint curl " + shell.Quote(proxy.CaddyImage)
+	assertRemoteSuccess(t, client, host, peer+" -sS -m 3 -o /dev/null http://azud-proxy:80/")
+	assertRemoteSuccess(t, client, host, "! "+peer+" -fsS -m 3 http://azud-proxy:2019/config/")
+}
+
 func assertHTTPAvailable(t *testing.T, client *ssh.Client, host string, port int) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
@@ -433,9 +457,15 @@ func assertHTTPAvailable(t *testing.T, client *ssh.Client, host string, port int
 		time.Sleep(500 * time.Millisecond)
 	}
 	var diagnostics strings.Builder
+	// The admin API is reachable only through the proxy container; a rootful
+	// proxy managed by a non-root user needs sudo.
+	adminGet := func(path string) string {
+		curl := "exec azud-proxy curl -sS --unix-socket " + proxy.CaddyAdminSocket + " http://localhost" + path
+		return "podman " + curl + " 2>/dev/null || sudo -n podman " + curl
+	}
 	for _, command := range []string{
-		"curl -sS http://127.0.0.1:2019/config/apps/http/servers/srv0/routes",
-		"curl -sS http://127.0.0.1:2019/reverse_proxy/upstreams",
+		adminGet("/config/apps/http/servers/srv0/routes"),
+		adminGet("/reverse_proxy/upstreams"),
 		"podman ps --format '{{.Names}} {{.Status}} {{.Networks}}'",
 	} {
 		result, err := client.Execute(host, command)

@@ -17,7 +17,7 @@ results cannot substitute for checks on the exact release commit.
 
 | Finding | Status | Remediation and evidence |
 |---|---|---|
-| AZ-001 | Fixed; live-gated | Caddy listens on container-reachable admin addresses while host publication remains loopback-only; boot and restore fail closed. Covered by proxy unit tests and first-deploy/mixed-mode integration. |
+| AZ-001 | Fixed; superseded | The 1.0.0 fix made Caddy's admin address container-reachable with loopback-only host publication; boot and restore fail closed. The security review (JIT-01) showed that this exposed the admin API to every workload on the `azud` network. The admin API now listens only on a unix socket in a tmpfs private to the proxy container and is reached through `podman exec`; nothing is published on port 2019. Covered by proxy unit tests, the JIT suite, the Caddy contract script, and first-deploy/mixed-mode integration. |
 | AZ-002 | Fixed | `init` emits a valid non-TLS default, an idempotent secrets ignore rule, and matching environment-secret CI. Covered by init integration and release scaffold smoke tests. |
 | AZ-003 | Fixed; release-gated | Stable releases advance `v1` only after verification; generated CI uses the environment provider and durable state cache. Release and generated-workflow smoke gates cover the contract. |
 | AZ-004 | Fixed; live-gated | Role identity now controls names, commands, labels, environment, resource limits, routing, canary, scale, rollback, and Quadlet units. Covered by role unit tests and web/worker integration. |
