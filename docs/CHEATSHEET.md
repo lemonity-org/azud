@@ -52,7 +52,8 @@ azud canary rollback
 
 ```bash
 azud env list
-azud env set DATABASE_URL postgres://...
+azud env set DATABASE_URL                        # prompts without echo
+printf '%s' "$DATABASE_URL" | azud env set DATABASE_URL
 azud env push
 azud env pull --host 203.0.113.10
 ```

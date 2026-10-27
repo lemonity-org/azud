@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
@@ -94,13 +96,19 @@ Example:
 }
 
 var envSetCmd = &cobra.Command{
-	Use:   "set <key> <value>",
+	Use:   "set <key> [value]",
 	Short: "Set a secret value",
-	Args:  cobra.ExactArgs(2),
+	Args:  cobra.RangeArgs(1, 2),
 	Long: `Set a secret value in the local secrets file.
 
+When the value is omitted it is read from standard input: a prompt without
+echo on a terminal, or a single line from a pipe. Passing the value as an
+argument still works but is deprecated, because it is recorded in shell
+history and visible in process listings.
+
 Example:
-  azud env set DATABASE_PASSWORD mypassword
+  azud env set DATABASE_PASSWORD                          # prompts
+  printf '%s' "$DATABASE_PASSWORD" | azud env set DATABASE_PASSWORD
   azud env push  # Push changes to servers`,
 	RunE: runEnvSet,
 }
@@ -418,12 +426,15 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
 
 	key := args[0]
-	value := args[1]
 	if err := secretsfile.ValidateKey(key); err != nil {
 		return err
 	}
-	if err := secretsfile.ValidateValue(key, value); err != nil {
-		return err
+	if len(args) == 2 {
+		if err := secretsfile.ValidateValue(key, args[1]); err != nil {
+			return err
+		}
+		output.NewLogger(cmd.ErrOrStderr(), cmd.ErrOrStderr(), verbose).Warn(
+			"Passing secret values as arguments is deprecated: they are recorded in shell history and visible in process listings. Run 'azud env set %s' and enter the value at the prompt, or pipe it on stdin", key)
 	}
 
 	secretsPath := getSecretsFilePath()
@@ -435,10 +446,23 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load secrets: %w", err)
 	}
 
-	// Check if key exists
+	// Check if key exists before prompting for a value that would be discarded.
 	if _, exists := secrets[key]; exists && !envForce {
 		log.Info("Variable %s already exists. Use -f to overwrite.", key)
 		return nil
+	}
+
+	var value string
+	if len(args) == 2 {
+		value = args[1]
+	} else {
+		value, err = readSecretValue(cmd, key)
+		if err != nil {
+			return err
+		}
+		if err := secretsfile.ValidateValue(key, value); err != nil {
+			return err
+		}
 	}
 
 	// Set the value
@@ -486,6 +510,50 @@ func runEnvDelete(cmd *cobra.Command, args []string) error {
 	log.Info("Run 'azud env push' to sync to servers")
 
 	return nil
+}
+
+// maxSecretInputBytes bounds what readSecretValue reads from standard input:
+// the longest value a secrets file accepts plus a trailing CRLF.
+const maxSecretInputBytes = secretsfile.MaxValueBytes + 2
+
+// Terminal access for readSecretValue; replaced in tests.
+var (
+	stdinIsTerminal = func(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
+	readPassword    = term.ReadPassword
+)
+
+// readSecretValue reads a secret value without putting it on the command
+// line: a prompt without echo on a terminal, otherwise one line from stdin.
+func readSecretValue(cmd *cobra.Command, key string) (string, error) {
+	in := cmd.InOrStdin()
+	if f, ok := in.(*os.File); ok && stdinIsTerminal(f) {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Value for %s: ", key)
+		value, err := readPassword(int(f.Fd()))
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+		if err != nil {
+			return "", fmt.Errorf("failed to read secret value: %w", err)
+		}
+		if len(value) == 0 {
+			return "", fmt.Errorf("no value provided for %s", key)
+		}
+		return string(value), nil
+	}
+
+	data, err := io.ReadAll(io.LimitReader(in, maxSecretInputBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to read secret value: %w", err)
+	}
+	if len(data) > maxSecretInputBytes {
+		return "", fmt.Errorf("secret value for %s exceeds %d KiB, the longest value a secrets file line can hold", key, secretsfile.MaxValueBytes/1024)
+	}
+	// Strip the single line ending that echo, printf and heredocs add; any
+	// other line break is rejected by the value validation.
+	value := strings.TrimSuffix(string(data), "\n")
+	value = strings.TrimSuffix(value, "\r")
+	if value == "" {
+		return "", fmt.Errorf("no value provided for %s: enter it at the prompt or pipe it on stdin", key)
+	}
+	return value, nil
 }
 
 // writeSecretsFile renders secrets and replaces the local secrets file through

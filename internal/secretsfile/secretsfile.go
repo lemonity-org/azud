@@ -22,6 +22,10 @@ const (
 	FileMode os.FileMode = 0o600
 	// DirMode is the mode of directories Azud creates for secrets.
 	DirMode os.FileMode = 0o700
+	// MaxValueBytes bounds a secret value so that each KEY=VALUE line stays
+	// below the 64 KiB line limit of Azud's secrets file readers and of
+	// podman run --env-file, which reads the remote copy.
+	MaxValueBytes = 60 * 1024
 	// TempPattern names the temporary file WriteFile creates next to the
 	// secrets file. An interrupted write can leave one behind.
 	TempPattern = ".secrets-*.tmp"
@@ -54,10 +58,14 @@ func ValidateKey(key string) error {
 }
 
 // ValidateValue rejects values that would break the one-entry-per-line file
-// format and create or hide other entries.
+// format and create or hide other entries, or that are too long for a line to
+// be read back.
 func ValidateValue(key, value string) error {
 	if strings.ContainsAny(value, "\n\r\x00") {
 		return fmt.Errorf("secret value for %s must not contain newlines, carriage returns or NUL bytes; encode multi-line values, for example as base64", key)
+	}
+	if len(value) > MaxValueBytes {
+		return fmt.Errorf("secret value for %s exceeds %d KiB, the longest value a secrets file line can hold", key, MaxValueBytes/1024)
 	}
 	return nil
 }
