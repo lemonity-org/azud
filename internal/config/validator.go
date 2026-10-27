@@ -67,16 +67,22 @@ var tmpfsPathRegex = regexp.MustCompile(`^/[a-zA-Z0-9._/-]+$`)
 var tmpfsSizeRegex = regexp.MustCompile(`^[1-9][0-9]*[bBkKmMgGtTpP]?$`)
 var tmpfsModeRegex = regexp.MustCompile(`^[0-7]{3,4}$`)
 
-// healthPathRegex validates HTTP healthcheck paths. Paths are embedded into
-// curl/wget commands (inside shell double quotes), so the character set is
-// restricted to safe URL path/query characters and deliberately excludes shell
+// healthPathRegex validates HTTP healthcheck paths. The probe builders
+// shell-quote the URL; this regex adds URL hygiene and defense in depth by
+// restricting paths to safe URL path/query characters, which excludes shell
 // metacharacters such as '$', backtick, ';', '(', ')', '|', spaces, and quotes.
 var healthPathRegex = regexp.MustCompile(`^/[a-zA-Z0-9._~/?=&%:@+,-]*$`)
 
-// isValidHealthPath reports whether an HTTP healthcheck path is safe to embed in
-// a shell command. It must start with '/' and contain only URL path characters.
+// isValidHealthPath reports whether an HTTP healthcheck path is acceptable. It
+// must start with '/' and contain only URL path characters.
 func isValidHealthPath(path string) bool {
 	return healthPathRegex.MatchString(path)
+}
+
+// IsValidHealthPath reports whether path is an acceptable HTTP healthcheck
+// path. Probe builders call it so they never depend on prior validation.
+func IsValidHealthPath(path string) bool {
+	return isValidHealthPath(path)
 }
 
 // Validate checks the configuration for errors

@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/lemonity-org/azud/internal/config"
@@ -16,17 +15,13 @@ const (
 // BuildHTTPCheckCommand builds a shell command that performs an HTTP GET against
 // localhost using the first available HTTP client (curl, wget, or busybox wget).
 // Note: this requires a shell inside the container and is best for images that
-// include /bin/sh. Readiness checks use exec candidates instead.
+// include /bin/sh. Readiness checks use exec candidates instead. It returns ""
+// when the path is not a valid health path.
 func BuildHTTPCheckCommand(port int, path string) string {
-	if port <= 0 || path == "" {
+	quotedURL, ok := quotedHealthCheckURL(port, path)
+	if !ok {
 		return ""
 	}
-
-	// Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues.
-	// Some containers (e.g. Alpine/busybox) resolve localhost to ::1 first,
-	// but the app may only listen on IPv4.
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	quotedURL := strconv.Quote(url)
 
 	return fmt.Sprintf(
 		"if command -v curl >/dev/null 2>&1; then curl -fsS %s >/dev/null; "+
@@ -78,14 +73,18 @@ func HasReadinessProbe(cfg *config.Config) bool {
 	return ReadinessCommand(cfg) != "" || cfg.Proxy.Healthcheck.GetReadinessPath() != ""
 }
 
-// BuildHTTPCheckExecCandidates builds podman exec commands that do not require a shell.
+// BuildHTTPCheckExecCandidates builds podman exec commands that do not require a
+// shell inside the target container. The host's shell interprets them, so every
+// value is shell-quoted. It returns nil when the path is not a valid health
+// path.
 func BuildHTTPCheckExecCandidates(container string, port int, path string) []string {
-	if container == "" || port <= 0 || path == "" {
+	if container == "" {
 		return nil
 	}
-
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	quotedURL := strconv.Quote(url)
+	quotedURL, ok := quotedHealthCheckURL(port, path)
+	if !ok {
+		return nil
+	}
 
 	qc := shell.Quote(container)
 	return []string{
@@ -97,9 +96,14 @@ func BuildHTTPCheckExecCandidates(container string, port int, path string) []str
 
 // BuildHTTPCheckHelperCommand builds a helper container command to check readiness
 // without requiring tools inside the target container. It shares the target
-// container network namespace to avoid DNS and IP lookups.
+// container network namespace to avoid DNS and IP lookups. It returns "" when
+// the path is not a valid health path.
 func BuildHTTPCheckHelperCommand(container string, port int, path, image, pullPolicy string) string {
-	if strings.TrimSpace(container) == "" || port <= 0 || path == "" {
+	if strings.TrimSpace(container) == "" {
+		return ""
+	}
+	quotedURL, ok := quotedHealthCheckURL(port, path)
+	if !ok {
 		return ""
 	}
 
@@ -113,9 +117,6 @@ func BuildHTTPCheckHelperCommand(container string, port int, path, image, pullPo
 		pullPolicy = defaultHealthcheckPull
 	}
 
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	quotedURL := strconv.Quote(url)
-
 	name := fmt.Sprintf("azud-hc-%s", container)
 	name = strings.ReplaceAll(name, "_", "-")
 	name = strings.ReplaceAll(name, ".", "-")
@@ -128,4 +129,19 @@ func BuildHTTPCheckHelperCommand(container string, port int, path, image, pullPo
 		shell.Quote(image),
 		quotedURL,
 	)
+}
+
+// quotedHealthCheckURL returns the shell-quoted loopback URL for an HTTP
+// probe. It validates the path itself rather than trusting the caller, and
+// single-quotes the URL so a path can never expand shell syntax on the host or
+// inside the container.
+func quotedHealthCheckURL(port int, path string) (string, bool) {
+	if port <= 0 || !config.IsValidHealthPath(path) {
+		return "", false
+	}
+
+	// Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues.
+	// Some containers (e.g. Alpine/busybox) resolve localhost to ::1 first,
+	// but the app may only listen on IPv4.
+	return shell.Quote(fmt.Sprintf("http://127.0.0.1:%d%s", port, path)), true
 }

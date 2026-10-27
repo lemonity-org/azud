@@ -370,45 +370,57 @@ func TestFinding_BuildConfigOptionsAreShellEvaluated(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: health-check helpers embed a URL using Go quoting, which is not
-// shell quoting. The config validator currently blocks '$' and backticks in
-// health paths, so this is unreachable through config/deploy.yml, but the
-// exported helper itself is unsafe for any future caller.
+// Control: health-check helpers validate the probe path themselves and
+// shell-quote the URL, so they stay safe for callers that skip config
+// validation. The exec-candidate and helper commands run in the host's shell;
+// the container command runs under podman's CMD-SHELL.
 // ---------------------------------------------------------------------------
 
-func TestFinding_HealthcheckBuildersExecuteDollarSubstitution(t *testing.T) {
+func TestControl_HealthcheckBuildersQuoteURL(t *testing.T) {
 	dir := t.TempDir()
 	canary := filepath.Join(dir, "CANARY")
+	payload := "/$(touch " + canary + ")"
 
-	// A stub curl so BuildHTTPCheckCommand's `command -v curl` branch is used.
+	if cmd := deploy.BuildHTTPCheckCommand(3000, payload); cmd != "" {
+		t.Fatalf("BuildHTTPCheckCommand accepted an unsafe path: %q", cmd)
+	}
+	if cmds := deploy.BuildHTTPCheckExecCandidates("svc", 3000, payload); cmds != nil {
+		t.Fatalf("BuildHTTPCheckExecCandidates accepted an unsafe path: %q", cmds)
+	}
+	if cmd := deploy.BuildHTTPCheckHelperCommand("svc", 3000, payload, "", ""); cmd != "" {
+		t.Fatalf("BuildHTTPCheckHelperCommand accepted an unsafe path: %q", cmd)
+	}
+
+	// A valid path that contains shell syntax ('&', '?') must reach the HTTP
+	// client as one literal argument from every builder. The stubs report argv
+	// on stderr because the container command discards the client's stdout.
+	path := "/up?x=1&y=%2F"
+	url := "http://127.0.0.1:3000" + path
 	stubDir := t.TempDir()
-	stub := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(stubDir, "curl"), []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
+	stub := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >&2; done\nexit 0\n"
+	for _, name := range []string{"curl", "podman"} {
+		if err := os.WriteFile(filepath.Join(stubDir, name), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	path := "/$(touch " + canary + ")"
-	cmd := deploy.BuildHTTPCheckCommand(3000, path)
-	run := exec.Command("sh", "-c", cmd)
-	run.Dir = dir
-	run.Env = append(os.Environ(), "PATH="+stubDir+":"+os.Getenv("PATH"))
-	if out, err := run.CombinedOutput(); err != nil {
-		t.Fatalf("health command failed: %v\n%s", err, out)
-	}
-	if _, err := os.Stat(canary); err != nil {
-		t.Fatalf("expected the unsafe helper to execute command substitution, but canary is absent; helper may have been fixed")
-	}
-	t.Logf("VULNERABLE (latent): deploy.BuildHTTPCheckCommand used Go quoting, not shell quoting; %q executed command substitution", cmd)
-
-	// The same construction is used by the exec-candidate and helper builders.
-	canary2 := filepath.Join(dir, "CANARY2")
-	for _, cmd := range deploy.BuildHTTPCheckExecCandidates("svc", 3000, "/$(touch "+canary2+")") {
+	commands := append([]string{
+		deploy.BuildHTTPCheckCommand(3000, path),
+		"sh -c " + shell.Quote(deploy.BuildHTTPCheckCommand(3000, path)),
+		deploy.BuildHTTPCheckHelperCommand("svc", 3000, path, "", ""),
+	}, deploy.BuildHTTPCheckExecCandidates("svc", 3000, path)...)
+	for _, cmd := range commands {
 		run := exec.Command("sh", "-c", cmd)
 		run.Dir = dir
 		run.Env = append(os.Environ(), "PATH="+stubDir+":"+os.Getenv("PATH"))
-		_, _ = run.CombinedOutput()
+		out, err := run.CombinedOutput()
+		if err != nil {
+			t.Fatalf("health command %q failed: %v", cmd, err)
+		}
+		if !argvContains(bytes.Split(out, []byte{0}), url) {
+			t.Errorf("health command %q did not pass %q as one argument: %q", cmd, url, out)
+		}
 	}
-	if _, err := os.Stat(canary2); err != nil {
-		t.Fatalf("expected BuildHTTPCheckExecCandidates to execute substitution, but canary is absent; helper may have been fixed")
+	if _, err := os.Stat(canary); err == nil {
+		t.Fatal("command substitution executed while building a health-check command")
 	}
-	t.Logf("VULNERABLE (latent): deploy.BuildHTTPCheckExecCandidates also uses strconv.Quote for the URL")
 }
