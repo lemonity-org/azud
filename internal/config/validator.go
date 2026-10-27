@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ValidationError represents a configuration validation error
@@ -407,6 +408,21 @@ func Validate(cfg *Config) error {
 				Message: "acme_email is required when SSL is enabled (unless custom ssl_certificate and ssl_private_key are provided)",
 			})
 		}
+	}
+
+	// The registry server and username become podman login arguments; reject
+	// values that podman could parse as options.
+	if cfg.Registry.Server != "" && !isValidRegistryServer(cfg.Registry.Server) {
+		errs = append(errs, ValidationError{
+			Field:   "registry.server",
+			Message: fmt.Sprintf("invalid registry server: %q (expected host[:port][/namespace], e.g. ghcr.io)", cfg.Registry.Server),
+		})
+	}
+	if cfg.Registry.Username != "" && !isValidRegistryUsername(cfg.Registry.Username) {
+		errs = append(errs, ValidationError{
+			Field:   "registry.username",
+			Message: "registry username must not start with '-' or contain whitespace or control characters",
+		})
 	}
 
 	// Infrastructure credentials are consumed locally by Azud and must never
@@ -993,6 +1009,91 @@ func isValidHost(host string) bool {
 		}
 	}
 
+	return true
+}
+
+// registryPathSegmentRegex validates one namespace segment of a registry
+// server such as the "team" in registry.example.com/team.
+var registryPathSegmentRegex = regexp.MustCompile(`^[a-zA-Z0-9]+(?:(?:[._]|__|-+)[a-zA-Z0-9]+)*$`)
+
+// isValidRegistryServer checks a registry server of the form
+// [http(s)://]host[:port][/namespace...]. The host is a hostname, an IPv4
+// address, or a bracketed IPv6 address. A value starting with '-' is never
+// valid, so it cannot be parsed as a podman option.
+func isValidRegistryServer(server string) bool {
+	rest := server
+	for _, scheme := range []string{"https://", "http://"} {
+		if strings.HasPrefix(rest, scheme) {
+			rest = strings.TrimPrefix(rest, scheme)
+			break
+		}
+	}
+	rest = strings.TrimSuffix(rest, "/")
+	if rest == "" {
+		return false
+	}
+
+	hostPort, namespace, hasNamespace := strings.Cut(rest, "/")
+	if hasNamespace {
+		for _, segment := range strings.Split(namespace, "/") {
+			if !registryPathSegmentRegex.MatchString(segment) {
+				return false
+			}
+		}
+	}
+
+	host, port := hostPort, ""
+	if strings.HasPrefix(hostPort, "[") {
+		end := strings.Index(hostPort, "]")
+		if end < 0 {
+			return false
+		}
+		if ip := net.ParseIP(hostPort[1:end]); ip == nil || ip.To4() != nil {
+			return false
+		}
+		host = ""
+		switch after := hostPort[end+1:]; {
+		case after == "":
+		case strings.HasPrefix(after, ":"):
+			port = after[1:]
+			if port == "" {
+				return false
+			}
+		default:
+			return false
+		}
+	} else if h, p, found := strings.Cut(hostPort, ":"); found {
+		host, port = h, p
+		if port == "" {
+			return false
+		}
+	}
+
+	if host != "" && !isValidHost(host) {
+		return false
+	}
+	if port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || strings.TrimLeft(port, "0123456789") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidRegistryUsername rejects usernames that podman could parse as an
+// option or that contain whitespace or control characters. Other characters
+// are allowed because registries use names such as "AWS", "_json_key",
+// "robot$ci" (written robot$$ci in deploy.yml), or e-mail addresses.
+func isValidRegistryUsername(username string) bool {
+	if strings.HasPrefix(username, "-") {
+		return false
+	}
+	for _, r := range username {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
 	return true
 }
 

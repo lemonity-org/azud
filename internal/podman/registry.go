@@ -47,13 +47,12 @@ func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 		server = "docker.io"
 	}
 
-	stateDir := state.DirQuoted(m.user)
-	lockFile := state.LockFileQuoted(m.user, "podman-auth")
+	if err := validateRegistryArg(server); err != nil {
+		return err
+	}
 
 	// Use ExecuteWithStdin to avoid exposing password in process list
-	// Note: stateDir and lockFile are already quoted with ${HOME} expansion support
-	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w 60 %s podman login --username %s --password-stdin %s",
-		stateDir, lockFile, shell.Quote(config.Username), shell.Quote(server))
+	cmd := loginCommand(m.user, config.Username, server)
 
 	result, err := m.client.ssh.ExecuteWithStdin(host, cmd, strings.NewReader(config.Password+"\n"))
 	if err != nil {
@@ -64,6 +63,26 @@ func (m *RegistryManager) Login(host string, config *RegistryConfig) error {
 		return fmt.Errorf("login failed: %s", result.Stderr)
 	}
 
+	return nil
+}
+
+// loginCommand builds the locked podman login command. stateDir and lockFile
+// are already quoted with ${HOME} expansion support, and "--" ends option
+// parsing so the server is always treated as the registry argument.
+func loginCommand(user, username, server string) string {
+	stateDir := state.DirQuoted(user)
+	lockFile := state.LockFileQuoted(user, "podman-auth")
+	return fmt.Sprintf("mkdir -p %s && flock -x -w 60 %s podman login --username %s --password-stdin -- %s",
+		stateDir, lockFile, shell.Quote(username), shell.Quote(server))
+}
+
+// validateRegistryArg rejects a registry server that podman could parse as an
+// option. Config validation already enforces this; the check keeps callers
+// that bypass it safe.
+func validateRegistryArg(server string) error {
+	if strings.HasPrefix(server, "-") {
+		return fmt.Errorf("invalid registry server %q", server)
+	}
 	return nil
 }
 
@@ -85,8 +104,11 @@ func (m *RegistryManager) Logout(host, server string) error {
 	if server == "" {
 		server = "docker.io"
 	}
+	if err := validateRegistryArg(server); err != nil {
+		return err
+	}
 
-	result, err := m.client.Execute(host, "logout", server)
+	result, err := m.client.Execute(host, "logout", "--", server)
 	if err != nil {
 		return err
 	}
@@ -102,9 +124,15 @@ func (m *RegistryManager) LogoutAll(hosts []string, server string) map[string]er
 	if server == "" {
 		server = "docker.io"
 	}
-
-	results := m.client.ExecuteAll(hosts, "logout", server)
 	errors := make(map[string]error)
+	if err := validateRegistryArg(server); err != nil {
+		for _, host := range hosts {
+			errors[host] = err
+		}
+		return errors
+	}
+
+	results := m.client.ExecuteAll(hosts, "logout", "--", server)
 
 	for _, result := range results {
 		if !result.Success() {

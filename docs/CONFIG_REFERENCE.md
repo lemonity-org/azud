@@ -211,6 +211,12 @@ registry:
     - AZUD_REGISTRY_PASSWORD
 ```
 
+`registry.server` must be `host[:port][/namespace]`, optionally prefixed with
+`https://` or `http://` (for example `ghcr.io`, `localhost:5000`,
+`[::1]:5000`, or `registry.example.com/team`). `registry.username` must not
+start with `-` or contain whitespace or control characters. Azud passes both to
+`podman login` after a `--` terminator, so they can never act as options.
+
 ## Environment Variables
 
 ```yaml
