@@ -10,9 +10,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/secretsfile"
 	"github.com/lemonity-org/azud/internal/shell"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
@@ -158,12 +160,21 @@ type contextExclusions struct {
 	// files identify the same secrets files by inode so hard links and
 	// aliased paths are excluded too.
 	files []os.FileInfo
+	// tempDirs are the context-relative directories of the secrets files,
+	// where the secrets writer may leave .secrets-*.tmp copies behind.
+	tempDirs []string
 }
 
-// matchesPath reports whether relSlash is an excluded path or lies below one.
+// matchesPath reports whether relSlash is an excluded path, lies below one, or
+// is a leftover temporary file of the secrets writer.
 func (e contextExclusions) matchesPath(relSlash string) bool {
 	for _, excluded := range e.paths {
 		if relSlash == excluded || strings.HasPrefix(relSlash, excluded+"/") {
+			return true
+		}
+	}
+	if slices.Contains(e.tempDirs, path.Dir(relSlash)) {
+		if matched, _ := path.Match(secretsfile.TempPattern, path.Base(relSlash)); matched {
 			return true
 		}
 	}
@@ -221,6 +232,9 @@ func secretContextExclusions(absContext string) contextExclusions {
 				if !seenPaths[rel] {
 					seenPaths[rel] = true
 					excluded.paths = append(excluded.paths, rel)
+				}
+				if dir := path.Dir(rel); !slices.Contains(excluded.tempDirs, dir) {
+					excluded.tempDirs = append(excluded.tempDirs, dir)
 				}
 			}
 		}
@@ -364,10 +378,14 @@ func readContainerIgnore(contextDir string) []ignorePattern {
 func withMandatoryContextExcludes(patterns []ignorePattern) []ignorePattern {
 	// These are appended last so user negation patterns cannot re-include
 	// sensitive Azud-local files in remote build contexts. The **/ form also
-	// covers projects nested below the context directory (monorepos).
+	// covers projects nested below the context directory (monorepos), and the
+	// .secrets-*.tmp patterns cover copies left behind by an interrupted
+	// secrets write.
 	return append(patterns,
 		ignorePattern{pattern: ".azud/secrets"},
 		ignorePattern{pattern: "**/.azud/secrets"},
+		ignorePattern{pattern: ".azud/.secrets-*.tmp"},
+		ignorePattern{pattern: "**/.azud/.secrets-*.tmp"},
 	)
 }
 

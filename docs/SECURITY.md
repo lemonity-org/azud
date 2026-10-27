@@ -65,6 +65,27 @@ Practical security recommendations for Azud deployments.
   Certificate and key references must be paired, present, non-empty, parseable,
   and matching; proxy startup fails rather than falling back when they are not.
 
+### Local secrets file
+
+- `azud init`, `env set`, `env delete`, `env pull`, and `env edit` (when it
+  creates the file) write `.azud/secrets` (or `secrets_path`) through one
+  writer. It writes a private temporary file in the same directory, fsyncs it,
+  and renames it into place with mode `0600`. A file that was readable by group
+  or others is repaired, with a warning.
+- `.azud` is created with mode `0700`, and an existing `.azud` is tightened to
+  `0700` on write. Missing parents of a custom `secrets_path` are created with
+  `0700`; existing directories are left unchanged.
+- Azud refuses to write through a symbolic link at the secrets path. If you
+  keep secrets outside the project, set `secrets_path` to the real file.
+- `env set` accepts keys matching `[A-Za-z_][A-Za-z0-9_]*` and single-line
+  values only (no CR, LF, or NUL). `azud env push` and `azud setup` reject
+  such values from every secrets provider before contacting a host, because
+  the remote runtime env file is line-based too. Encode multi-line application
+  secrets, for example as base64. Secrets referenced by `proxy.ssl_certificate`
+  or `proxy.ssl_private_key` are never written to that file, so a PEM
+  certificate or key may span lines.
+- `azud init` keeps an existing `.azud/secrets` and existing hook scripts.
+
 ## Configuration Trust
 
 - Treat `config/deploy.yml`, destination files, hooks, and the environment

@@ -48,8 +48,8 @@ azud init [flags]
 
 **Created Files:**
 *   `config/deploy.yml`: Main deployment configuration.
-*   `.azud/secrets`: Local secrets file (should be git-ignored).
-*   `.azud/hooks/`: Directory for deployment hooks (`pre-connect`, `pre-build`, `pre-deploy`, `post-deploy`).
+*   `.azud/secrets`: Local secrets file (mode `0600` in a `0700` `.azud` directory; should be git-ignored). An existing file is kept.
+*   `.azud/hooks/`: Directory for deployment hooks (`pre-connect`, `pre-build`, `pre-deploy`, `post-deploy`). Existing hooks are kept.
 
 **Examples:**
 ```bash
@@ -281,7 +281,9 @@ azud app details [flags]
 Push secrets from local `.azud/secrets` to servers. Secrets go only to hosts
 that run application, accessory, or cron containers; `builder.remote.host` and
 `ssh.proxy.host` do not receive them unless they also run one of those
-workloads. `--host` must name one of those workload hosts.
+workloads. `--host` must name one of those workload hosts. A secret value that
+contains a CR, LF, or NUL is rejected, naming only the key, before any host is
+contacted.
 **Flags:** `--host`
 
 #### `azud env pull`

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/secretsfile"
 )
 
 var initCmd = &cobra.Command{
@@ -52,12 +53,34 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("configuration already exists at %s", existingConfig)
 	}
 
+	// Inspect the secrets path before writing anything, so a planted link
+	// fails init cleanly and an existing secrets file is never truncated.
+	secretsPath := filepath.Join(".azud", "secrets")
+	keepSecrets := false
+	secretsInfo, err := os.Lstat(secretsPath)
+	switch {
+	case os.IsNotExist(err):
+	case err != nil:
+		return fmt.Errorf("failed to inspect %s: %w", secretsPath, err)
+	case secretsInfo.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("refusing to use %s: it is a symbolic link", secretsPath)
+	case !secretsInfo.Mode().IsRegular():
+		return fmt.Errorf("refusing to use %s: not a regular file", secretsPath)
+	default:
+		keepSecrets = true
+	}
+
 	log.Header("Initialize / configuration")
+
+	// .azud holds the secrets file, so only its owner may list or replace
+	// entries. Hooks inside it stay executable.
+	if err := secretsfile.EnsureDir(".azud"); err != nil {
+		return err
+	}
 
 	// Create directories
 	dirs := []string{
 		"config",
-		".azud",
 		".azud/hooks",
 	}
 
@@ -79,11 +102,21 @@ func runInit(cmd *cobra.Command, args []string) error {
 	log.Success("Created %s", configPath)
 
 	// Create secrets file
-	secretsPath := filepath.Join(".azud", "secrets")
-	if err := os.WriteFile(secretsPath, []byte(getSecretsTemplate()), 0600); err != nil {
-		return fmt.Errorf("failed to create %s: %w", secretsPath, err)
+	if keepSecrets {
+		tightened, err := secretsfile.Tighten(secretsPath)
+		if err != nil {
+			return fmt.Errorf("failed to secure %s: %w", secretsPath, err)
+		}
+		if tightened {
+			log.Warn("Tightened permissions on %s to 0600", secretsPath)
+		}
+		log.Info("Kept existing %s", secretsPath)
+	} else {
+		if _, err := secretsfile.WriteFile(secretsPath, []byte(getSecretsTemplate())); err != nil {
+			return fmt.Errorf("failed to create %s: %w", secretsPath, err)
+		}
+		log.Success("Created %s", secretsPath)
 	}
-	log.Success("Created %s", secretsPath)
 
 	// Create sample hook scripts
 	hooks := map[string]string{
@@ -99,13 +132,21 @@ func runInit(cmd *cobra.Command, args []string) error {
 		"post-rollback":     getPostRollbackHook(),
 	}
 
+	keptHooks := 0
 	for name, content := range hooks {
 		hookPath := filepath.Join(".azud", "hooks", name)
-		if err := os.WriteFile(hookPath, []byte(content), 0755); err != nil {
+		created, err := createFileExclusive(hookPath, []byte(content), 0755)
+		if err != nil {
 			return fmt.Errorf("failed to create hook %s: %w", hookPath, err)
+		}
+		if !created {
+			keptHooks++
 		}
 	}
 	log.Success("Created hooks in .azud/hooks/")
+	if keptHooks > 0 {
+		log.Info("Kept %d existing hook(s) in .azud/hooks/", keptHooks)
+	}
 
 	// Create GitHub Actions workflow if requested
 	if initGitHubActions {
@@ -535,6 +576,23 @@ func getPostRollbackHook() string {
 
 echo "Running post-rollback hook..."
 `
+}
+
+// createFileExclusive writes a new file and reports false, without writing,
+// when anything (including a symbolic link) already exists at path.
+func createFileExclusive(path string, content []byte, perm os.FileMode) (bool, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if os.IsExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		return false, err
+	}
+	return true, f.Close()
 }
 
 func appendToGitignore(log *output.Logger) error {

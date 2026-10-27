@@ -12,11 +12,12 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Finding: `azud env set` uses os.WriteFile, which preserves the mode of an
-// existing file and follows symlinks.
+// Control (JIT-04): every local secrets write goes through one hardened
+// writer. It repairs loose modes, refuses symlinks, and rejects values or keys
+// that would add entries to the line-based file.
 // ---------------------------------------------------------------------------
 
-func TestFinding_EnvSetPreservesInsecureSecretsMode(t *testing.T) {
+func TestControl_EnvSetTightensInsecureSecretsMode(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
 	secretsPath := filepath.Join(dir, ".azud", "secrets")
@@ -30,13 +31,22 @@ func TestFinding_EnvSetPreservesInsecureSecretsMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o644 {
-		t.Fatalf("expected mode to remain 0644, got %04o", info.Mode().Perm())
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("env set left the secrets file at %04o, want 0600", info.Mode().Perm())
 	}
-	t.Logf("VULNERABLE: env set left the secrets file world-readable (%04o); it never tightens an existing file", info.Mode().Perm())
+	if !strings.Contains(res.Combined, "Tightened permissions") {
+		t.Fatalf("expected a permission repair warning: %s", res)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(secretsPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf(".azud mode = %04o, want 0700", dirInfo.Mode().Perm())
+	}
 }
 
-func TestFinding_EnvSetFollowsSymlinkAndClobbersTarget(t *testing.T) {
+func TestControl_EnvSetRefusesSymlinkedSecretsFile(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
 	secretsPath := filepath.Join(dir, ".azud", "secrets")
@@ -50,34 +60,137 @@ func TestFinding_EnvSetFollowsSymlinkAndClobbersTarget(t *testing.T) {
 	}
 
 	res := runAzud(t, dir, nil, "-c", configPath, "env", "set", "PWNED", "yes")
-	if res.Exit != 0 {
-		t.Fatalf("env set through symlink failed: %s", res)
+	if res.Exit == 0 {
+		t.Fatalf("env set through a symlink must fail: %s", res)
+	}
+	if !strings.Contains(res.Combined, "symbolic link") {
+		t.Fatalf("expected a symbolic link refusal: %s", res)
 	}
 	body, err := os.ReadFile(victim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "PWNED=yes") || strings.Contains(string(body), "ORIGINAL CONTENT") {
-		t.Fatalf("symlink target was not clobbered; body:\n%s", body)
+	if string(body) != "ORIGINAL CONTENT\n" {
+		t.Fatalf("symlink target was modified:\n%s", body)
 	}
-	t.Logf("VULNERABLE: .azud/secrets symlink was followed and %s was overwritten", victim)
 }
 
-func TestFinding_EnvSetAllowsNewlineInjection(t *testing.T) {
+func TestControl_EnvDeleteRefusesSymlinkedSecretsFile(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
-	res := runAzud(t, dir, nil, "-c", configPath, "env", "set", "SAFE", "value\nINJECTED=1")
-	if res.Exit != 0 {
-		t.Fatalf("env set failed: %s", res)
+	secretsPath := filepath.Join(dir, ".azud", "secrets")
+	victim := filepath.Join(dir, "victim.txt")
+	writeFile(t, victim, "KEEP=1\nDROP=2\n", 0o600)
+	if err := os.Symlink(victim, secretsPath); err != nil {
+		t.Fatal(err)
 	}
-	body, err := os.ReadFile(filepath.Join(dir, ".azud", "secrets"))
+
+	res := runAzud(t, dir, nil, "-c", configPath, "env", "delete", "DROP")
+	if res.Exit == 0 || !strings.Contains(res.Combined, "symbolic link") {
+		t.Fatalf("env delete through a symlink must fail with a refusal: %s", res)
+	}
+	body, err := os.ReadFile(victim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "INJECTED=1") {
-		t.Fatalf("expected newline injection in secrets file, got:\n%s", body)
+	if string(body) != "KEEP=1\nDROP=2\n" {
+		t.Fatalf("symlink target was modified:\n%s", body)
 	}
-	t.Logf("VULNERABLE (low): a newline in an env set value creates an additional secret entry")
+}
+
+func TestControl_EnvSetRejectsNewlineInValue(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
+	for _, value := range []string{"value\nINJECTED=1", "value\rINJECTED=1"} {
+		res := runAzud(t, dir, nil, "-c", configPath, "env", "set", "SAFE", value)
+		if res.Exit == 0 {
+			t.Fatalf("env set accepted a value with a line break: %s", res)
+		}
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".azud", "secrets"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "INJECTED") {
+		t.Fatalf("line break injection reached the secrets file:\n%s", body)
+	}
+}
+
+func TestControl_EnvSetRejectsInvalidKey(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
+	for _, key := range []string{"A=B", "#X", "A B"} {
+		res := runAzud(t, dir, nil, "-c", configPath, "env", "set", key, "value")
+		if res.Exit == 0 || !strings.Contains(res.Combined, "invalid secret name") {
+			t.Fatalf("env set accepted key %q: %s", key, res)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".azud", "secrets")); !os.IsNotExist(err) {
+		t.Fatalf("secrets file was written for an invalid key: %v", err)
+	}
+}
+
+func TestControl_EnvPushRejectsNewlineInEnvProviderValue(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+	dir := newWorkdir(t)
+	cfg := strings.Replace(envPrefixConfig(t, fake.port(), ""), "secrets_env_prefix: AZUD_", "secrets_env_prefix: APPSEC_", 1)
+	configPath := writeConfig(t, dir, cfg)
+
+	res := runAzud(t, dir, []string{
+		"APPSEC_DB_PASS=real-password",
+		"APPSEC_Z_NOTE=harmless\nDB_PASS=attacker-password",
+	}, "-c", configPath, "env", "push")
+	if res.Exit == 0 {
+		t.Fatalf("env push accepted a newline-bearing value: %s", res)
+	}
+	if writes := fake.commandsMatching("cat > \"$tmp\""); len(writes) != 0 {
+		t.Fatalf("secrets were written despite the invalid value:\n%s", commandDump(writes))
+	}
+	if !strings.Contains(res.Combined, "Z_NOTE") || strings.Contains(res.Combined, "attacker-password") || strings.Contains(res.Combined, "harmless") {
+		t.Fatalf("error must name the key and never the value: %s", res)
+	}
+}
+
+func TestControl_InitCreatesPrivateAzudDir(t *testing.T) {
+	dir := t.TempDir()
+	res := runAzud(t, dir, nil, "init")
+	if res.Exit != 0 {
+		t.Fatalf("init failed: %s", res)
+	}
+	for path, want := range map[string]os.FileMode{".azud": 0o700, ".azud/secrets": 0o600} {
+		info, err := os.Stat(filepath.Join(dir, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != want {
+			t.Fatalf("%s mode = %04o, want %04o", path, info.Mode().Perm(), want)
+		}
+	}
+}
+
+func TestControl_InitKeepsExistingSecretsAndHooks(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "REAL=1\n", 0o600)
+	writeFile(t, filepath.Join(dir, ".azud", "hooks", "pre-deploy"), "#!/bin/sh\necho custom\n", 0o755)
+
+	res := runAzud(t, dir, nil, "init")
+	if res.Exit != 0 {
+		t.Fatalf("init failed: %s", res)
+	}
+	secrets, err := os.ReadFile(filepath.Join(dir, ".azud", "secrets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(secrets) != "REAL=1\n" {
+		t.Fatalf("init overwrote the existing secrets file:\n%s", secrets)
+	}
+	hook, err := os.ReadFile(filepath.Join(dir, ".azud", "hooks", "pre-deploy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hook), "echo custom") {
+		t.Fatalf("init overwrote an existing hook:\n%s", hook)
+	}
 }
 
 // ---------------------------------------------------------------------------
