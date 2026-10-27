@@ -191,6 +191,73 @@ func TestInitRefusesSymlinkedSecretsFile(t *testing.T) {
 	}
 }
 
+func TestInitGitignoreRequiresAnExactActiveRule(t *testing.T) {
+	const both = "# Azud secrets\n.azud/secrets\n.azud/.secrets-*.tmp\n"
+	const tempOnly = "# Azud secrets\n.azud/.secrets-*.tmp\n"
+	tests := []struct {
+		name         string
+		gitignore    string
+		wantAppended string
+	}{
+		{name: "comment mention", gitignore: "# .azud/secrets are documented elsewhere\nnode_modules/\n", wantAppended: both},
+		{name: "directory only rule", gitignore: ".azud/secrets/\n", wantAppended: both},
+		{name: "near miss", gitignore: ".azud/secrets.bak\n", wantAppended: both},
+		{name: "monorepo path", gitignore: "services/api/.azud/secrets\n", wantAppended: both},
+		{name: "negation", gitignore: ".azud/secrets\n!.azud/secrets\n", wantAppended: both},
+		{name: "exact rule", gitignore: ".azud/secrets\n", wantAppended: tempOnly},
+		{name: "anchored rule", gitignore: "/.azud/secrets\n", wantAppended: tempOnly},
+		{name: "temp file negation", gitignore: ".azud/secrets\n.azud/.secrets-*.tmp\n!*.tmp\n", wantAppended: tempOnly},
+		{name: "exact rules", gitignore: ".azud/secrets\n.azud/.secrets-*.tmp\n", wantAppended: ""},
+		{name: "directory rule", gitignore: ".azud/\n", wantAppended: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chdirToTempDir(t)
+			if err := os.WriteFile(".gitignore", []byte(tt.gitignore), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			resetCLIState()
+
+			rootCmd.SetArgs([]string{"init"})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("init failed: %v", err)
+			}
+
+			body := readFileString(t, ".gitignore")
+			if !strings.HasPrefix(body, tt.gitignore) {
+				t.Fatalf("init rewrote the existing .gitignore:\n%s", body)
+			}
+			if appended := strings.TrimPrefix(body, tt.gitignore); appended != tt.wantAppended {
+				t.Fatalf("appended %q, want %q", appended, tt.wantAppended)
+			}
+		})
+	}
+}
+
+func TestInitRefusesSymlinkedGitignore(t *testing.T) {
+	dir := chdirToTempDir(t)
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.WriteFile(target, []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, ".gitignore"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	resetCLIState()
+
+	rootCmd.SetArgs([]string{"init"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("init error = %v, want a symbolic link refusal", err)
+	}
+	if body := readFileString(t, target); body != "node_modules/\n" {
+		t.Fatalf("symlink target was modified:\n%s", body)
+	}
+	if _, err := os.Stat(filepath.Join("config", "deploy.yml")); !os.IsNotExist(err) {
+		t.Fatalf("init wrote a config before refusing: %v", err)
+	}
+}
+
 // chdirToTempDir runs the test from a fresh directory and returns its path.
 func chdirToTempDir(t *testing.T) string {
 	t.Helper()
