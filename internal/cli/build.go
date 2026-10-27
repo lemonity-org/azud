@@ -424,7 +424,8 @@ func loginToRegistryRemote(sshClient *ssh.Client, host string) error {
 		return fmt.Errorf("registry password not found")
 	}
 
-	cmd := fmt.Sprintf("podman login --username %s --password-stdin %s", shell.Quote(cfg.Registry.Username), shell.Quote(server))
+	// "--" ends option parsing so the server is always the registry argument.
+	cmd := fmt.Sprintf("podman login --username %s --password-stdin -- %s", shell.Quote(cfg.Registry.Username), shell.Quote(server))
 	result, err := sshClient.ExecuteWithStdin(host, cmd, strings.NewReader(password+"\n"))
 	if err != nil {
 		return err
@@ -548,7 +549,7 @@ func loginToRegistry() error {
 	}
 
 	// Login using podman CLI
-	cmd := exec.Command("podman", "login", "--username", cfg.Registry.Username, "--password-stdin", server)
+	cmd := exec.Command("podman", "login", "--username", cfg.Registry.Username, "--password-stdin", "--", server)
 	cmd.Stdin = strings.NewReader(password)
 	cmd.Stderr = os.Stderr
 

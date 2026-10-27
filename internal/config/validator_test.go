@@ -714,6 +714,103 @@ func TestIsValidHost(t *testing.T) {
 	}
 }
 
+func TestIsValidRegistryServer(t *testing.T) {
+	tests := []struct {
+		server string
+		valid  bool
+	}{
+		{"ghcr.io", true},
+		{"docker.io", true},
+		{"localhost:5000", true},
+		{"10.0.0.1:5000", true},
+		{"[::1]:5000", true},
+		{"[2001:db8::1]", true},
+		{"registry.example.com:5000/team", true},
+		{"ghcr.io/my-org/sub_team", true},
+		{"123456789012.dkr.ecr.us-east-1.amazonaws.com", true},
+		{"https://ghcr.io", true},
+		{"http://localhost:5000/", true},
+		{"https://index.docker.io/v1/", true},
+		{"", false},
+		{"https://", false},
+		{"--tls-verify=false", false},
+		{"--help", false},
+		{"-R", false},
+		{"--authfile=/tmp/x", false},
+		{" ghcr.io", false},
+		{"ghcr.io extra", false},
+		{"ghcr.io;id", false},
+		{"ghcr.io\n--tls-verify=false", false},
+		{"ghcr.io:0", false},
+		{"ghcr.io:99999", false},
+		{"ghcr.io:+5000", false},
+		{"ghcr.io:", false},
+		{"ghcr.io/-team", false},
+		{"ghcr.io//team", false},
+		{"::1", false},
+		{"[::1", false},
+		{"[1.2.3.4]:5000", false},
+		{"ftp://ghcr.io", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.server, func(t *testing.T) {
+			if got := isValidRegistryServer(tt.server); got != tt.valid {
+				t.Errorf("isValidRegistryServer(%q) = %v, want %v", tt.server, got, tt.valid)
+			}
+		})
+	}
+}
+
+func TestIsValidRegistryUsername(t *testing.T) {
+	tests := []struct {
+		username string
+		valid    bool
+	}{
+		{"deployer", true},
+		{"AWS", true},
+		{"_json_key", true},
+		{"robot$ci", true},
+		{"me@example.com", true},
+		{"-u", false},
+		{"--password=x", false},
+		{"user name", false},
+		{"user\tname", false},
+		{"user\nname", false},
+		{"user\x00", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.username, func(t *testing.T) {
+			if got := isValidRegistryUsername(tt.username); got != tt.valid {
+				t.Errorf("isValidRegistryUsername(%q) = %v, want %v", tt.username, got, tt.valid)
+			}
+		})
+	}
+}
+
+func TestValidate_RegistryServerAndUsername(t *testing.T) {
+	base := baseValidConfig
+
+	valid := base()
+	valid.Registry = RegistryConfig{Server: "ghcr.io", Username: "deployer"}
+	if err := Validate(valid); err != nil {
+		t.Fatalf("expected valid registry config, got %v", err)
+	}
+
+	badServer := base()
+	badServer.Registry = RegistryConfig{Server: "--tls-verify=false", Username: "deployer"}
+	if err := Validate(badServer); err == nil || !strings.Contains(err.Error(), "registry.server") {
+		t.Fatalf("expected registry.server error, got %v", err)
+	}
+
+	badUsername := base()
+	badUsername.Registry = RegistryConfig{Server: "ghcr.io", Username: "-deployer"}
+	if err := Validate(badUsername); err == nil || !strings.Contains(err.Error(), "registry.username") {
+		t.Fatalf("expected registry.username error, got %v", err)
+	}
+}
+
 func TestValidate_ExtraHostAddresses(t *testing.T) {
 	cfg := &Config{
 		Service: "test",

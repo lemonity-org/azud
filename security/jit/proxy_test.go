@@ -461,67 +461,82 @@ func TestControl_ProxyStopRefusesSystemdManagedProxy(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: registry login accepts an unconfigured --host and sends the
-// registry password there.
+// Control: registry login only targets configured hosts, and registry.server
+// can never become a podman option.
 // ---------------------------------------------------------------------------
 
-func TestFinding_RegistryLoginAcceptsUnconfiguredHost(t *testing.T) {
+func registryConfig(t *testing.T, port int, webHost, server string) string {
+	serverLine := ""
+	if server != "" {
+		serverLine = "  server: " + server + "\n"
+	}
+	return `service: shop
+image: example/shop:v1
+servers:
+  web:
+    hosts: [` + webHost + `]
+proxy:
+  host: shop.example.com
+registry:
+` + serverLine + `  username: deployer
+  password: [REG_PASS]
+ssh:
+  user: ` + currentUser() + `
+  port: ` + itoa(port) + `
+  keys: ["` + filepath.ToSlash(clientKeyPath(t)) + `"]
+  connect_timeout: 2s
+  command_timeout: 40s
+  insecure_ignore_host_key: true
+`
+}
+
+func TestControl_RegistryLoginRejectsUnconfiguredHost(t *testing.T) {
 	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
 	dir := newWorkdir(t)
 	// The configured host is 127.0.0.2; --host points at the fake 127.0.0.1.
-	configPath := writeConfig(t, dir, `service: shop
-image: example/shop:v1
-servers:
-  web:
-    hosts: [127.0.0.2]
-proxy:
-  host: shop.example.com
-registry:
-  username: deployer
-  password: [REG_PASS]
-ssh:
-  user: `+currentUser()+`
-  port: `+itoa(fake.port())+`
-  keys: ["`+filepath.ToSlash(clientKeyPath(t))+`"]
-  connect_timeout: 2s
-  command_timeout: 40s
-  insecure_ignore_host_key: true
-`)
+	configPath := writeConfig(t, dir, registryConfig(t, fake.port(), "127.0.0.2", ""))
 	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "REG_PASS=registry-token\n", 0o600)
 
-	res := runAzud(t, dir, nil, "-c", configPath, "registry", "login", "--host", "127.0.0.1")
-	if res.Exit != 0 {
-		t.Fatalf("registry login failed: %s", res)
+	for _, command := range []string{"login", "logout"} {
+		res := runAzud(t, dir, nil, "-c", configPath, "registry", command, "--host", "127.0.0.1")
+		if res.Exit == 0 {
+			t.Fatalf("registry %s to an unconfigured host succeeded: %s", command, res)
+		}
+		if !strings.Contains(res.Combined, "is not configured") {
+			t.Fatalf("registry %s: expected an unconfigured-host error, got: %s", command, res)
+		}
 	}
-	login := fake.waitCommand(t, "--password-stdin", 5*time.Second)
-	if !strings.Contains(string(login.Stdin), "registry-token") {
-		t.Fatalf("registry password was not sent to the unconfigured host:\n%s", login.Stdin)
+	if got := fake.snapshot(); len(got) != 0 {
+		t.Fatalf("expected no SSH commands for an unconfigured host, got:\n%s", commandDump(got))
 	}
-	t.Logf("VULNERABLE: registry login sent the registry password to --host 127.0.0.1, which is not in cfg.GetAllSSHHosts()")
 }
 
-func TestFinding_RegistryServerFlagInjection(t *testing.T) {
+func TestControl_RegistryServerIsValidated(t *testing.T) {
+	for _, server := range []string{`"--tls-verify=false"`, `"--help"`, `"-R"`, `"--authfile=/tmp/x"`, `" ghcr.io"`} {
+		t.Run(server, func(t *testing.T) {
+			fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+			dir := newWorkdir(t)
+			configPath := writeConfig(t, dir, registryConfig(t, fake.port(), "127.0.0.1", server))
+			writeFile(t, filepath.Join(dir, ".azud", "secrets"), "REG_PASS=registry-token\n", 0o600)
+
+			res := runAzud(t, dir, nil, "-c", configPath, "registry", "login")
+			if res.Exit == 0 {
+				t.Fatalf("registry login with server %s succeeded: %s", server, res)
+			}
+			if !strings.Contains(res.Combined, "registry.server") {
+				t.Fatalf("expected a registry.server validation error, got: %s", res)
+			}
+			if got := fake.snapshot(); len(got) != 0 {
+				t.Fatalf("expected no SSH commands with an invalid registry.server, got:\n%s", commandDump(got))
+			}
+		})
+	}
+}
+
+func TestControl_RegistryLoginTerminatesPodmanOptions(t *testing.T) {
 	fake := startFakeSSH(t, "127.0.0.1:0", permissive())
 	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, `service: shop
-image: example/shop:v1
-servers:
-  web:
-    hosts: [127.0.0.1]
-proxy:
-  host: shop.example.com
-registry:
-  server: "--tls-verify=false"
-  username: deployer
-  password: [REG_PASS]
-ssh:
-  user: `+currentUser()+`
-  port: `+itoa(fake.port())+`
-  keys: ["`+filepath.ToSlash(clientKeyPath(t))+`"]
-  connect_timeout: 2s
-  command_timeout: 40s
-  insecure_ignore_host_key: true
-`)
+	configPath := writeConfig(t, dir, registryConfig(t, fake.port(), "127.0.0.1", "ghcr.io"))
 	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "REG_PASS=registry-token\n", 0o600)
 
 	res := runAzud(t, dir, nil, "-c", configPath, "registry", "login")
@@ -529,10 +544,12 @@ ssh:
 		t.Fatalf("registry login failed: %s", res)
 	}
 	login := fake.waitCommand(t, "--password-stdin", 5*time.Second)
-	if !strings.Contains(login.Command, "--tls-verify=false") {
-		t.Fatalf("expected registry.server to become a podman option:\n%s", login.Command)
+	if !strings.HasSuffix(login.Command, "--password-stdin -- ghcr.io") {
+		t.Fatalf("podman login does not end options before the server:\n%s", login.Command)
 	}
-	t.Logf("VULNERABLE: unvalidated registry.server became a podman login option (--tls-verify=false): %s", login.Command)
+	if !strings.Contains(string(login.Stdin), "registry-token") {
+		t.Fatalf("registry password was not sent on stdin:\n%s", login.Stdin)
+	}
 }
 
 // ---------------------------------------------------------------------------

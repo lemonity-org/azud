@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 )
@@ -67,6 +68,13 @@ func runRegistryLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("registry username not configured")
 	}
 
+	// Determine hosts before resolving the password so an unconfigured host
+	// is rejected without touching credentials.
+	hosts, err := registryTargetHosts(cfg, registryHost)
+	if err != nil {
+		return err
+	}
+
 	// Get password from secrets
 	password := ""
 	if len(cfg.Registry.Password) > 0 {
@@ -82,17 +90,6 @@ func runRegistryLogin(cmd *cobra.Command, args []string) error {
 
 	if password == "" {
 		return fmt.Errorf("registry password not found (secret: %v)", cfg.Registry.Password)
-	}
-
-	// Determine hosts
-	var hosts []string
-	if registryHost != "" {
-		hosts = []string{registryHost}
-	} else {
-		hosts = cfg.GetAllHosts()
-		if len(hosts) == 0 {
-			return fmt.Errorf("no hosts configured")
-		}
 	}
 
 	log.Info("Logging into %s on %d host(s)...", server, len(hosts))
@@ -138,14 +135,9 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 	}
 
 	// Determine hosts
-	var hosts []string
-	if registryHost != "" {
-		hosts = []string{registryHost}
-	} else {
-		hosts = cfg.GetAllHosts()
-		if len(hosts) == 0 {
-			return fmt.Errorf("no hosts configured")
-		}
+	hosts, err := registryTargetHosts(cfg, registryHost)
+	if err != nil {
+		return err
 	}
 
 	log.Info("Logging out from %s on %d host(s)...", server, len(hosts))
@@ -173,4 +165,25 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 
 	log.Success("Logged out on %d host(s)", successCount)
 	return nil
+}
+
+// registryTargetHosts returns the hosts for registry login/logout. By default
+// these are the server hosts. An explicit host must be a configured server,
+// accessory, cron, or remote builder host; registry credentials are never sent
+// to the SSH bastion or to a host that is not in the configuration.
+func registryTargetHosts(cfg *config.Config, host string) ([]string, error) {
+	if host == "" {
+		hosts := cfg.GetAllHosts()
+		if len(hosts) == 0 {
+			return nil, fmt.Errorf("no hosts configured")
+		}
+		return hosts, nil
+	}
+	if containsString(cfg.GetWorkloadHosts(), host) || host == cfg.Builder.Remote.Host {
+		return []string{host}, nil
+	}
+	if host == cfg.SSH.Proxy.Host {
+		return nil, fmt.Errorf("host %s is the SSH bastion; registry credentials are only sent to server, accessory, cron, and builder hosts", host)
+	}
+	return nil, fmt.Errorf("host %s is not configured", host)
 }

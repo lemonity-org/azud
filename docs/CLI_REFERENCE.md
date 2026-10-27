@@ -313,11 +313,14 @@ Delete a secret.
 ### Registry Management
 
 #### `azud registry login`
-Login to the configured registry on all servers.
+Login to the configured registry on all servers. `--host` must name a
+configured server, accessory, cron, or `builder.remote.host` host; the SSH
+bastion and unconfigured hosts are rejected before the password is read.
 **Flags:** `--host`
 
 #### `azud registry logout`
-Logout from the configured registry on all servers.
+Logout from the configured registry on all servers. `--host` accepts the same
+hosts as `registry login`.
 **Flags:** `--host`
 
 ---
