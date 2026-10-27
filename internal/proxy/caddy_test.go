@@ -148,6 +148,11 @@ func TestAdminRequestErrorExplainsLegacyAndStoppedProxies(t *testing.T) {
 			want:   "run 'azud proxy reboot'",
 		},
 		{
+			name:   "moved listener leaves the socket unanswered",
+			result: &ssh.Result{ExitCode: 28, Stderr: "curl: (28) Operation timed out after 30000 milliseconds with 0 bytes received"},
+			want:   "run 'azud proxy reboot'",
+		},
+		{
 			name:   "stopped proxy",
 			result: &ssh.Result{ExitCode: 255, Stderr: "Error: can only create exec sessions on running containers: container state improper"},
 			want:   "proxy container azud-proxy is not running",
