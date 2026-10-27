@@ -47,6 +47,30 @@ var azudSecretsIgnoreRule = ignoreRule{
 	},
 }
 
+// buildContextIgnoreRules are scaffolded into the container ignore file by
+// azud init. Hooks run on the workstation, so images never need .azud.
+var buildContextIgnoreRules = []ignoreRule{
+	{
+		line:   ".azud/",
+		target: ".azud",
+		equivalents: []string{
+			".azud", "/.azud", ".azud/", "/.azud/", "**/.azud", "**/.azud/",
+			".azud/**", "/.azud/**",
+		},
+		respectNegation: true,
+	},
+	{
+		line:   ".git/",
+		target: ".git",
+		equivalents: []string{
+			".git", "/.git", ".git/", "/.git/", "**/.git", "**/.git/",
+			".git/**", "/.git/**",
+		},
+		respectNegation: true,
+	},
+	azudSecretsIgnoreRule,
+}
+
 // ignoreRuleSatisfied reports whether content already has an active rule
 // equivalent to rule. Only exact, uncommented lines count, and the last
 // relevant line wins, as in git and container ignore files. Comments,
@@ -69,6 +93,10 @@ func ignoreRuleSatisfied(content string, rule ignoreRule) bool {
 			satisfied = true
 		case negate && ignorePatternMayMatch(pattern, rule.target):
 			satisfied = rule.respectNegation
+		case negate && rule.respectNegation && strings.HasPrefix(strings.Trim(pattern, "/"), rule.target+"/"):
+			// Re-including something below target is also a deliberate
+			// choice; appending target afterwards would undo it.
+			satisfied = true
 		}
 	}
 	return satisfied

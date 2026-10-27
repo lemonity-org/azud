@@ -470,13 +470,13 @@ func TestControl_InitRefusesSymlinkedGitignore(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: init protects .azud/secrets in .gitignore but not in a container
-// ignore file, and local builds use the raw context. A default Dockerfile that
-// does COPY . . can bake the secrets file into the image.
+// Control (JIT-18): init scaffolds a container ignore file that keeps .azud
+// and the secrets file out of images, and local builds always pass podman an
+// ignore file whose last rules exclude the local secrets files.
 // ---------------------------------------------------------------------------
 
-func TestFinding_InitDoesNotProtectBuildContext(t *testing.T) {
-	dir := newWorkdir(t)
+func TestControl_InitProtectsBuildContext(t *testing.T) {
+	dir := t.TempDir()
 	res := runAzud(t, dir, nil, "init")
 	if res.Exit != 0 {
 		t.Fatalf("init failed: %s", res)
@@ -484,17 +484,159 @@ func TestFinding_InitDoesNotProtectBuildContext(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".azud", "secrets")); err != nil {
 		t.Fatalf("expected generated secrets file: %v", err)
 	}
-	for _, ignoreFile := range []string{".dockerignore", ".containerignore"} {
-		body, err := os.ReadFile(filepath.Join(dir, ignoreFile))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			t.Fatalf("read %s: %v", ignoreFile, err)
-		}
-		if strings.Contains(string(body), ".azud") {
-			t.Fatalf("%s now excludes .azud; finding may be fixed:\n%s", ignoreFile, body)
+	body, err := os.ReadFile(filepath.Join(dir, ".dockerignore"))
+	if err != nil {
+		t.Fatalf("init did not create .dockerignore: %v", err)
+	}
+	lines := strings.Split(string(body), "\n")
+	for _, want := range []string{".azud/", ".git/", ".azud/secrets"} {
+		if !containsLine(lines, want) {
+			t.Fatalf(".dockerignore does not contain %q:\n%s", want, body)
 		}
 	}
-	t.Logf("VULNERABLE (low/medium): init creates .azud/secrets but no .dockerignore/.containerignore; local `azud build` sends the raw context, so COPY . . can embed the secrets file")
+}
+
+func TestControl_InitDoesNotShadowExistingDockerignore(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".dockerignore"), "node_modules\n", 0o644)
+	res := runAzud(t, dir, nil, "init")
+	if res.Exit != 0 {
+		t.Fatalf("init failed: %s", res)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".containerignore")); !os.IsNotExist(err) {
+		t.Fatalf("init created .containerignore, which would shadow .dockerignore: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), "node_modules\n") || !containsLine(strings.Split(string(body), "\n"), ".azud/secrets") {
+		t.Fatalf("init did not append to the existing .dockerignore:\n%s", body)
+	}
+}
+
+func TestControl_InitNeverWritesThroughSymlinkedContainerignore(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	writeFile(t, victim, "ORIGINAL CONTENT\n", 0o644)
+	if err := os.Symlink(victim, filepath.Join(dir, ".containerignore")); err != nil {
+		t.Fatal(err)
+	}
+	res := runAzud(t, dir, nil, "init")
+	if res.Exit != 0 || !strings.Contains(res.Combined, "symbolic link") {
+		t.Fatalf("init must warn about and skip a symlinked .containerignore: %s", res)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".azud", "secrets")); err != nil {
+		t.Fatalf("init did not finish: %v", err)
+	}
+	body, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "ORIGINAL CONTENT\n" {
+		t.Fatalf("symlink target was modified:\n%s", body)
+	}
+}
+
+func TestControl_LocalBuildPassesMandatoryIgnoreFile(t *testing.T) {
+	for name, platforms := range map[string]string{
+		"single-arch": "",
+		"multiarch":   "  platforms: [linux/amd64, linux/arm64]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := newWorkdir(t)
+			writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\nCOPY . /app/\n", 0o644)
+			writeFile(t, filepath.Join(dir, ".azud", "secrets"), "DEFAULT_SECRET=never-in-image\n", 0o600)
+			writeFile(t, filepath.Join(dir, "config", "prod.secrets"), "CUSTOM_SECRET=never-in-image\n", 0o600)
+			// A hostile or careless ignore file tries to re-include both.
+			writeFile(t, filepath.Join(dir, ".dockerignore"), "node_modules\n!.azud/secrets\n!config/prod.secrets\n", 0o644)
+			configPath := writeConfig(t, dir, `service: shop
+image: example/shop:v1
+servers:
+  worker:
+    hosts: [127.0.0.1]
+secrets_path: config/prod.secrets
+builder:
+  context: `+dir+`
+`+platforms+`ssh:
+  user: `+currentUser()+`
+  port: 1
+  keys: ["`+filepath.ToSlash(clientKeyPath(t))+`"]
+  insecure_ignore_host_key: true
+`)
+
+			// A fake podman records every invocation and keeps a copy of the
+			// --ignorefile it receives; nothing is built.
+			binDir := t.TempDir()
+			record := filepath.Join(t.TempDir(), "podman")
+			writeFile(t, filepath.Join(binDir, "podman"), `#!/bin/sh
+printf '%s\n' "$*" >> "$AZUD_FAKE_PODMAN.calls"
+while [ $# -gt 0 ]; do
+  if [ "$1" = --ignorefile ]; then cp "$2" "$AZUD_FAKE_PODMAN.ignore"; fi
+  shift
+done
+`, 0o755)
+			res := runAzud(t, dir, []string{
+				"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"AZUD_FAKE_PODMAN=" + record,
+			}, "-c", configPath, "build", "--no-push")
+			if res.Exit != 0 {
+				t.Fatalf("local build failed: %s", res)
+			}
+
+			calls, err := os.ReadFile(record + ".calls")
+			if err != nil {
+				t.Fatalf("fake podman was not called: %v\n%s", err, res)
+			}
+			builds := 0
+			for _, call := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+				if strings.HasPrefix(call, "build ") {
+					builds++
+					if !strings.Contains(call, "--ignorefile ") {
+						t.Fatalf("local podman build without --ignorefile: %s", call)
+					}
+				}
+			}
+			if builds == 0 {
+				t.Fatalf("no podman build recorded:\n%s", calls)
+			}
+
+			ignore, err := os.ReadFile(record + ".ignore")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(ignore)), "\n")
+			lastSecret, lastNegation := -1, -1
+			for i, line := range lines {
+				switch line {
+				case ".azud/secrets", "config/prod.secrets":
+					lastSecret = i
+				case "!.azud/secrets", "!config/prod.secrets":
+					lastNegation = i
+				}
+			}
+			if !containsLine(lines, ".azud/secrets") || !containsLine(lines, "config/prod.secrets") || lastSecret < lastNegation {
+				t.Fatalf("mandatory secrets excludes must follow user negations:\n%s", ignore)
+			}
+			if !containsLine(lines, "node_modules") {
+				t.Fatalf("user ignore patterns were dropped:\n%s", ignore)
+			}
+			// Like remote builds, local builds exclude the secrets files of
+			// projects nested below the context and the writer's temp files.
+			for _, want := range []string{"**/.azud/secrets", "**/.azud/.secrets-*.tmp"} {
+				if !containsLine(lines, want) {
+					t.Fatalf("ignore file does not exclude %s:\n%s", want, ignore)
+				}
+			}
+		})
+	}
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }

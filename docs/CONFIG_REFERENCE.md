@@ -300,9 +300,18 @@ supported Linux distribution provides.
 Remote build contexts never include the local secrets file: the configured
 `secrets_path` (resolved from the working directory, including through
 symlinks and hard links) and any `.azud/secrets` at any depth are excluded even
-if `.containerignore`/`.dockerignore` tries to re-include them. Local
-`podman build` still sends the context as-is, so keep secrets out of it with an
-ignore file.
+if `.containerignore`/`.dockerignore` tries to re-include them, together with
+any `.secrets-*.tmp` file an interrupted secrets write left next to them.
+
+Local builds pass `podman build --ignorefile` with a temporary copy of the
+ignore file Podman would use for the build (`<Dockerfile>.dockerignore`,
+`<Dockerfile>.containerignore`, `.containerignore`, then `.dockerignore`).
+Azud appends `.azud/secrets` at any depth, the configured `secrets_path` when
+it is inside the build context, and the secrets writer's `.secrets-*.tmp` files
+next to them as the last rules, so a `!` rule cannot put them back. Podman
+matches these rules by path, so unlike remote builds, a hard link to the
+secrets file under another name is not excluded. The flag needs a Podman
+release that supports `--ignorefile` (4.0 or later).
 
 ## Deployment Settings
 

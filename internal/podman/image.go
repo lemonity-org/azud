@@ -84,6 +84,8 @@ func (m *ImageManager) Tag(host, source, target string) error {
 type BuildConfig struct {
 	Context    string
 	Dockerfile string
+	// IgnoreFile replaces the context ignore file (podman --ignorefile).
+	IgnoreFile string
 	Tag        string
 	Tags       []string
 	Args       map[string]string
@@ -104,6 +106,10 @@ func (c *BuildConfig) BuildCommand() string {
 
 	if c.Dockerfile != "" {
 		args = append(args, "-f", shell.Quote(c.Dockerfile))
+	}
+
+	if c.IgnoreFile != "" {
+		args = append(args, "--ignorefile", shell.Quote(c.IgnoreFile))
 	}
 
 	if c.Tag != "" {
@@ -209,6 +215,10 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 
 		if c.Dockerfile != "" {
 			args = append(args, "-f", shell.Quote(c.Dockerfile))
+		}
+
+		if c.IgnoreFile != "" {
+			args = append(args, "--ignorefile", shell.Quote(c.IgnoreFile))
 		}
 
 		for _, t := range c.Tags {

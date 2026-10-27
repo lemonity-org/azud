@@ -50,6 +50,8 @@ azud init [flags]
 *   `config/deploy.yml`: Main deployment configuration.
 *   `.azud/secrets`: Local secrets file (mode `0600` in a `0700` `.azud` directory; should be git-ignored). An existing file is kept.
 *   `.azud/hooks/`: Directory for deployment hooks (`pre-connect`, `pre-build`, `pre-deploy`, `post-deploy`). Existing hooks are kept.
+*   `.gitignore`: Gains exact `.azud/secrets` and `.azud/.secrets-*.tmp` rules (the latter covers temporary copies an interrupted secrets write can leave behind) unless equivalent rules are already active. A symlinked `.gitignore` is refused.
+*   `.dockerignore`: Excludes `.azud/`, `.git/`, and `.azud/secrets` from images. If a container ignore file already exists, the missing rules are appended to it instead; init never creates a `.containerignore` that would shadow an existing `.dockerignore`. A symlinked container ignore file is left unchanged with a warning, so add the rules to it yourself; local builds exclude `.azud/secrets` either way.
 
 **Examples:**
 ```bash

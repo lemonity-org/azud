@@ -21,6 +21,8 @@ This creates:
   - config/deploy.yml: Main deployment configuration
   - .azud/secrets: File to store secrets
   - .azud/hooks/: Directory for hook scripts
+  - .dockerignore: Keeps .azud/, .git/, and secrets out of images (missing
+    rules are appended to an existing container ignore file instead)
 
 Options:
   --bundle        Use a template bundle (e.g., rails, node)
@@ -71,6 +73,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	if _, err := readIgnoreFile(".gitignore"); err != nil {
 		return fmt.Errorf("failed to protect .azud/secrets in .gitignore: %w", err)
+	}
+	buildIgnore, err := buildIgnoreFileName()
+	buildIgnoreIsLink := false
+	if err == nil {
+		// Podman follows a symlinked ignore file, but appending through it
+		// could write outside the project, so init leaves it alone.
+		if info, lerr := os.Lstat(buildIgnore); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			buildIgnoreIsLink = true
+		} else {
+			_, err = readIgnoreFile(buildIgnore)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("failed to protect .azud in the build context: %w", err)
 	}
 
 	log.Header("Initialize / configuration")
@@ -163,6 +179,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Protect the generated secrets file even in a brand-new repository.
 	if err := appendToGitignore(log); err != nil {
 		return fmt.Errorf("failed to protect .azud/secrets in .gitignore: %w", err)
+	}
+	// Keep local state and secrets out of images built with COPY . .
+	if buildIgnoreIsLink {
+		log.Warn("Left %s unchanged because it is a symbolic link; add .azud/, .git/, and .azud/secrets to it yourself. Local builds exclude .azud/secrets regardless", buildIgnore)
+	} else if err := ensureBuildIgnore(log, buildIgnore); err != nil {
+		return fmt.Errorf("failed to protect .azud in %s: %w", buildIgnore, err)
 	}
 
 	log.Header("Next actions")
@@ -614,6 +636,57 @@ func appendToGitignore(log *output.Logger) error {
 		return err
 	}
 	log.Success("Added %s to .gitignore", strings.Join(missing, ", "))
+	return nil
+}
+
+// initBuildIgnoreFiles lists, in podman's order of precedence, the ignore
+// files a build of the generated config (-f Dockerfile) reads.
+var initBuildIgnoreFiles = []string{
+	"Dockerfile.dockerignore",
+	"Dockerfile.containerignore",
+	".containerignore",
+	".dockerignore",
+}
+
+// buildIgnoreFileName returns the container ignore file podman would use for
+// the generated config, or .dockerignore when none exists. .dockerignore is
+// read by Podman, Buildah, and Docker alike.
+func buildIgnoreFileName() (string, error) {
+	for _, name := range initBuildIgnoreFiles {
+		_, err := os.Lstat(name)
+		if err == nil {
+			return name, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	return ".dockerignore", nil
+}
+
+// ensureBuildIgnore appends the missing build context rules to name, creating
+// it when needed. It never creates a second ignore file: a new
+// .containerignore would shadow the user's .dockerignore.
+func ensureBuildIgnore(log *output.Logger, name string) error {
+	content, err := readIgnoreFile(name)
+	if err != nil {
+		return err
+	}
+
+	missing := missingIgnoreLines(content, buildContextIgnoreRules...)
+	if len(missing) == 0 {
+		return nil
+	}
+
+	block := ignoreAppendBlock(content, "# Added by azud init: keep local Azud state, git metadata, and secrets out of images", missing)
+	if err := secretsfile.AppendFile(name, []byte(block), 0644); err != nil {
+		return err
+	}
+	if len(content) == 0 {
+		log.Success("Created %s", name)
+	} else {
+		log.Success("Added %s to %s", strings.Join(missing, ", "), name)
+	}
 	return nil
 }
 
