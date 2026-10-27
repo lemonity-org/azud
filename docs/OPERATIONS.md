@@ -37,9 +37,13 @@ azud app exec -it -- /bin/sh
 
 ```bash
 azud env list
-azud env set DATABASE_URL postgres://...
+azud env set DATABASE_URL    # prompts for the value without echo
 azud env push
 ```
+
+In scripts, pipe the value on stdin (`printf '%s' "$DATABASE_URL" | azud env
+set DATABASE_URL`). Passing it as a second argument still works but is
+deprecated: it lands in shell history and process listings.
 
 Pull from a specific host:
 

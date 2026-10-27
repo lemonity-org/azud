@@ -82,12 +82,12 @@ Practical security recommendations for Azud deployments.
 - Azud refuses to write through a symbolic link at the secrets path. If you
   keep secrets outside the project, set `secrets_path` to the real file.
 - `env set` accepts keys matching `[A-Za-z_][A-Za-z0-9_]*` and single-line
-  values only (no CR, LF, or NUL). `azud env push` and `azud setup` reject
-  such values from every secrets provider before contacting a host, because
-  the remote runtime env file is line-based too. Encode multi-line application
-  secrets, for example as base64. Secrets referenced by `proxy.ssl_certificate`
-  or `proxy.ssl_private_key` are never written to that file, so a PEM
-  certificate or key may span lines.
+  values of at most 60 KiB only (no CR, LF, or NUL). `azud env push` and
+  `azud setup` reject such values from every secrets provider before
+  contacting a host, because the remote runtime env file is line-based too.
+  Encode multi-line application secrets, for example as base64. Secrets
+  referenced by `proxy.ssl_certificate` or `proxy.ssl_private_key` are never
+  written to that file, so a PEM certificate or key may span lines.
 - `azud init` keeps an existing `.azud/secrets` and existing hook scripts.
 - Loading a secrets file that group or others can read prints a warning with
   the `chmod 600` fix. `azud preflight` fails on such a file.

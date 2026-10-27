@@ -313,7 +313,21 @@ Get a secret value.
 
 #### `azud env set`
 Set a secret value.
-**Usage:** `azud env set <key> <value> [--force]`
+**Usage:** `azud env set <key> [value] [--force]`
+
+When `value` is omitted, it is read from stdin: a prompt without echo on a
+terminal, or one line from a pipe (a single trailing newline is stripped). The
+`<key> <value>` form still works but prints a deprecation warning on stderr,
+because argv values end up in shell history and process listings. Keys must
+match `[A-Za-z_][A-Za-z0-9_]*`; values must not contain CR, LF, or NUL and
+are limited to 60 KiB, so every line stays readable by Azud and by
+`podman run --env-file`. Without `--force`, an existing key is left
+unchanged and no value is read.
+
+```bash
+azud env set DATABASE_PASSWORD
+printf '%s' "$DATABASE_PASSWORD" | azud env set DATABASE_PASSWORD --force
+```
 
 #### `azud env delete`
 Delete a secret.

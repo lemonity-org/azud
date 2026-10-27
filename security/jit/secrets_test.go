@@ -3,8 +3,10 @@
 package jit
 
 import (
+	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -190,6 +192,84 @@ func TestControl_InitKeepsExistingSecretsAndHooks(t *testing.T) {
 	}
 	if !strings.Contains(string(hook), "echo custom") {
 		t.Fatalf("init overwrote an existing hook:\n%s", hook)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Control (L-05): `azud env set KEY` reads the value from stdin, so it never
+// appears in argv; the KEY VALUE form still works but warns on stderr.
+// ---------------------------------------------------------------------------
+
+func TestControl_EnvSetReadsSecretFromStdin(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
+	res := runAzudWithStdin(t, dir, "stdin-only-secret\n", "-c", configPath, "env", "set", "API_TOKEN")
+	if res.Exit != 0 {
+		t.Fatalf("env set from stdin failed: %s", res)
+	}
+	if strings.Contains(res.Combined, "stdin-only-secret") || strings.Contains(res.Combined, "deprecated") {
+		t.Fatalf("stdin form echoed the value or warned: %s", res)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".azud", "secrets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "API_TOKEN=stdin-only-secret\n") {
+		t.Fatalf("value from stdin was not stored:\n%s", body)
+	}
+}
+
+func TestControl_EnvSetStdinRejectsEmbeddedNewline(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
+	res := runAzudWithStdin(t, dir, "value\nINJECTED=1\n", "-c", configPath, "env", "set", "API_TOKEN")
+	if res.Exit == 0 {
+		t.Fatalf("env set accepted a multi-line stdin value: %s", res)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".azud", "secrets"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "INJECTED") {
+		t.Fatalf("stdin injection reached the secrets file:\n%s", body)
+	}
+}
+
+func TestControl_EnvSetArgvFormWarns(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
+	res := runAzud(t, dir, nil, "-c", configPath, "env", "set", "API_TOKEN", "argv-secret")
+	if res.Exit != 0 {
+		t.Fatalf("the deprecated argv form must keep working: %s", res)
+	}
+	if !strings.Contains(res.Stderr, "deprecated") {
+		t.Fatalf("expected a deprecation warning on stderr: %s", res)
+	}
+}
+
+func runAzudWithStdin(t *testing.T, dir, stdin string, args ...string) cliResult {
+	t.Helper()
+	bin := requireCLI(t)
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	cmd.Env = cleanEnv()
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	exit := 0
+	if err := cmd.Run(); err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run azud %v: %v", args, err)
+		}
+		exit = exitErr.ExitCode()
+	}
+	return cliResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		Combined: stdout.String() + stderr.String(),
+		Exit:     exit,
 	}
 }
 

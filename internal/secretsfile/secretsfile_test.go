@@ -267,6 +267,18 @@ func TestValidateValue(t *testing.T) {
 	}
 }
 
+func TestValidateValueLength(t *testing.T) {
+	if err := ValidateValue("K", strings.Repeat("x", MaxValueBytes)); err != nil {
+		t.Fatalf("ValidateValue at the limit = %v", err)
+	}
+	if err := ValidateValue("K", strings.Repeat("x", MaxValueBytes+1)); err == nil || !strings.Contains(err.Error(), "exceeds 60 KiB") {
+		t.Fatalf("ValidateValue above the limit = %v, want a length error", err)
+	}
+	if _, err := Format("", map[string]string{"K": strings.Repeat("x", MaxValueBytes+1)}); err == nil {
+		t.Fatal("Format accepted a value above the limit")
+	}
+}
+
 func TestInsecureMode(t *testing.T) {
 	skipModeChecksOnWindows(t)
 	dir := t.TempDir()
