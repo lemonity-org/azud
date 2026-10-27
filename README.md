@@ -336,7 +336,7 @@ cron:
   db_backup:
     schedule: "0 2 * * *"
     command: bin/rails db:backup
-    lock: true
+    lock: true # mounts only a read-only per-job lock file, never Azud state
 
 deploy:
   readiness_delay: 7s

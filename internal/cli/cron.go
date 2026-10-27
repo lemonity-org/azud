@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/shell"
+	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
 
@@ -166,18 +168,29 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 		for _, host := range hosts {
 			containerName := getCronContainerName(name)
 
-			// Check if already running
-			running, err := containerManager.IsRunning(host, containerName)
+			// Containers created by older releases mount the whole state
+			// directory for cron.lock; replace them even while running.
+			existing, err := inspectCronContainer(containerManager, host, containerName)
 			if err != nil {
 				bootErrors = append(bootErrors, fmt.Sprintf("%s@%s inspect: %v", name, host, err))
 				continue
 			}
-			if running {
-				log.HostSuccess(host, "Cron %s already running", name)
-				continue
+			recreate := existing.needsRecreate(cronConfig.Lock)
+			if recreate {
+				log.Host(host, "Recreating cron %s to narrow its lock mount...", name)
+			} else {
+				// Check if already running
+				running, err := containerManager.IsRunning(host, containerName)
+				if err != nil {
+					bootErrors = append(bootErrors, fmt.Sprintf("%s@%s inspect: %v", name, host, err))
+					continue
+				}
+				if running {
+					log.HostSuccess(host, "Cron %s already running", name)
+					continue
+				}
+				log.Host(host, "Starting cron job %s...", name)
 			}
-
-			log.Host(host, "Starting cron job %s...", name)
 
 			// Pull the image first
 			if err := imageManager.Pull(host, cfg.Image); err != nil {
@@ -191,8 +204,31 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
+			if cronConfig.Lock {
+				if err := prepareCronLock(sshClient, host, name); err != nil {
+					log.HostError(host, "%v", err)
+					bootErrors = append(bootErrors, fmt.Sprintf("%s@%s lock: %v", name, host, err))
+					continue
+				}
+			}
+
 			// Build the cron container config
 			containerConfig := buildCronContainerConfig(name, cronConfig)
+
+			// Only replace the old container once everything that can fail
+			// before Run has succeeded, so a failed boot keeps it scheduled.
+			if recreate {
+				if err := containerManager.Stop(host, containerName, 30); err != nil && !podman.IsNoSuchContainer(err) {
+					log.HostError(host, "Failed to stop cron %s: %v", name, err)
+					bootErrors = append(bootErrors, fmt.Sprintf("%s@%s stop: %v", name, host, err))
+					continue
+				}
+				if err := containerManager.Remove(host, containerName, true); err != nil {
+					log.HostError(host, "Failed to remove cron %s: %v", name, err)
+					bootErrors = append(bootErrors, fmt.Sprintf("%s@%s remove: %v", name, host, err))
+					continue
+				}
+			}
 
 			// Run the container
 			_, err = containerManager.Run(host, containerConfig)
@@ -392,11 +428,40 @@ func runCronRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		log.Host(host, "Acquiring lock %s...", lockFile)
-		err := sshClient.WithRemoteLock(host, lockFile, lockTimeout, func() error {
+		if err := prepareCronLock(sshClient, host, name); err != nil {
+			return err
+		}
+		scheduled, err := inspectCronContainer(containerManager, host, getCronContainerName(name))
+		if err != nil {
+			return fmt.Errorf("failed to inspect cron %s on %s: %w", name, host, err)
+		}
+
+		runContainer := func() error {
 			_, runErr := containerManager.Run(host, containerConfig)
 			return runErr
-		})
+		}
+		run := runContainer
+		if scheduled.LegacyMount {
+			// Until cron boot recreates it, the scheduled container still
+			// locks the legacy file in the state directory. Hold that lock
+			// too so a manual run cannot overlap a scheduled one.
+			log.Warn("Cron %s on %s still mounts the Azud state directory; run 'azud cron boot' to recreate it", name, host)
+			legacyLock := legacyCronLockFile(name)
+			run = func() error {
+				result, err := sshClient.Execute(host, legacyCronLockCheckCommand(name))
+				if err != nil {
+					return fmt.Errorf("failed to check legacy cron lock: %w", err)
+				}
+				if result.ExitCode != 0 {
+					return fmt.Errorf("refusing to use legacy cron lock %s: it is a symlink", legacyLock)
+				}
+				log.Host(host, "Acquiring legacy lock %s...", legacyLock)
+				return sshClient.WithRemoteLock(host, legacyLock, lockTimeout, runContainer)
+			}
+		}
+
+		log.Host(host, "Acquiring lock %s...", lockFile)
+		err = sshClient.WithRemoteLock(host, lockFile, lockTimeout, run)
 		if err != nil {
 			return fmt.Errorf("cron job failed: %w", err)
 		}
@@ -509,16 +574,138 @@ func getCronContainerName(name string) string {
 	return fmt.Sprintf("%s-cron-%s", cfg.Service, name)
 }
 
+const (
+	// cronContainerLockDir is where a scheduled cron container sees its
+	// read-only, per-job lock directory.
+	cronContainerLockDir = "/run/azud-cron-lock"
+
+	// cronLockLabel marks scheduled cron containers whose lock mount is the
+	// per-job lock directory rather than the whole Azud state directory.
+	cronLockLabel      = "azud.cron.lock"
+	cronLockLabelValue = "job-dir"
+
+	// legacyCronStateMount is where older releases mounted the entire host
+	// state directory (Caddy config, deploy locks) read-write for cron.lock.
+	legacyCronStateMount = "/var/lib/azud"
+)
+
 // cronLockFile returns the path to the host-level lock file for a cron job.
 // This lock file is shared between the scheduled container and manual runs.
 func cronLockFile(name string) string {
-	return state.LockFile(cfg.SSH.User, fmt.Sprintf("%s-cron-%s", cfg.Service, name))
+	return state.CronLockFile(cfg.SSH.User, cfg.Service, name)
 }
 
 // cronLockFileInContainer returns the lock file path as seen from inside
-// the cron container. The host state directory is mounted at /var/lib/azud.
+// the cron container. The per-job lock directory is mounted read-only at
+// cronContainerLockDir, so this is the same inode as cronLockFile.
 func cronLockFileInContainer(name string) string {
-	return fmt.Sprintf("/var/lib/azud/%s-cron-%s.lock", cfg.Service, name)
+	return cronContainerLockDir + "/" + state.CronLockFileName
+}
+
+// legacyCronLockFile returns the lock file used by cron containers created
+// before the lock directory moved out of the state directory.
+func legacyCronLockFile(name string) string {
+	return state.LockFile(cfg.SSH.User, fmt.Sprintf("%s-cron-%s", cfg.Service, name))
+}
+
+// cronLockPrepareCommand creates the per-job lock directory and its lock file
+// so both can be bind-mounted read-only. Every level is checked for symlinks
+// before it is used. Parents stay private (0700); the job directory (0711)
+// and lock file (0644) let a non-root image user open the lock read-only,
+// which is all flock needs.
+func cronLockPrepareCommand(user, service, job string) string {
+	script := strings.Join([]string{
+		"set -eu",
+		"umask 077",
+		"root=" + state.LocksDirQuoted(user),
+		"dir=" + state.CronLockDirQuoted(user, service, job),
+		"lock=" + state.CronLockFileQuoted(user, service, job),
+		`for path in "$root" "$root/cron" "$root/cron/"` + shell.Quote(service) + ` "$dir"; do ` +
+			`if [ -L "$path" ]; then echo "refusing symlinked lock path $path" >&2; exit 1; fi; ` +
+			`mkdir -p "$path"; done`,
+		`chmod 700 "$root" "$root/cron" "$root/cron/"` + shell.Quote(service),
+		`chmod 711 "$dir"`,
+		`if [ -L "$lock" ]; then echo "refusing symlinked lock file $lock" >&2; exit 1; fi`,
+		`if [ ! -e "$lock" ]; then : > "$lock"; fi`,
+		`if [ ! -f "$lock" ]; then echo "lock path $lock is not a regular file" >&2; exit 1; fi`,
+		`chmod 644 "$lock"`,
+	}, "; ")
+	return "sh -c " + shell.Quote(script)
+}
+
+// prepareCronLock makes sure the per-job lock directory and file exist with
+// the expected modes before a container mounts them or a manual run locks.
+func prepareCronLock(sshClient *ssh.Client, host, name string) error {
+	result, err := sshClient.Execute(host, cronLockPrepareCommand(cfg.SSH.User, cfg.Service, name))
+	if err != nil {
+		return fmt.Errorf("failed to prepare cron lock for %s on %s: %w", name, host, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to prepare cron lock for %s on %s: %s", name, host, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+// cronContainerState is what cron boot and run need to know about an existing
+// scheduled cron container.
+type cronContainerState struct {
+	Exists      bool
+	LegacyMount bool
+	LockLabel   string
+}
+
+// needsRecreate reports whether a scheduled container must be replaced so it
+// no longer mounts the state directory and uses the current lock mount.
+func (s cronContainerState) needsRecreate(lock bool) bool {
+	if !s.Exists {
+		return false
+	}
+	return s.LegacyMount || (lock && s.LockLabel != cronLockLabelValue)
+}
+
+func parseCronContainerInspect(raw string) (cronContainerState, error) {
+	var payload []struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+		Mounts []struct {
+			Destination string `json:"Destination"`
+		} `json:"Mounts"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return cronContainerState{}, err
+	}
+	if len(payload) == 0 {
+		return cronContainerState{}, fmt.Errorf("empty inspect result")
+	}
+	containerState := cronContainerState{
+		Exists:    true,
+		LockLabel: payload[0].Config.Labels[cronLockLabel],
+	}
+	for _, mount := range payload[0].Mounts {
+		if strings.TrimSuffix(mount.Destination, "/") == legacyCronStateMount {
+			containerState.LegacyMount = true
+		}
+	}
+	return containerState, nil
+}
+
+func inspectCronContainer(containerManager *podman.ContainerManager, host, containerName string) (cronContainerState, error) {
+	raw, err := containerManager.Inspect(host, containerName)
+	if err != nil {
+		if podman.IsNoSuchContainer(err) {
+			return cronContainerState{}, nil
+		}
+		return cronContainerState{}, err
+	}
+	return parseCronContainerInspect(raw)
+}
+
+// legacyCronLockCheckCommand refuses to lock a legacy lock path that a legacy
+// container (which can write the state directory) turned into a symlink.
+func legacyCronLockCheckCommand(name string) string {
+	lockFile := state.LockFileQuoted(cfg.SSH.User, fmt.Sprintf("%s-cron-%s", cfg.Service, name))
+	return fmt.Sprintf("test ! -L %s", lockFile) // safe: path comes from state.LockFileQuoted with a validated service and cron name
 }
 
 func getCronHosts(name string) []string {
@@ -609,16 +796,19 @@ func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman
 	// Add volumes from app config
 	containerConfig.Volumes = append([]string{}, cfg.Volumes...)
 
-	// If locking is enabled, mount the host state directory for coordination
-	// This allows the container's flock to coordinate with host-level locks
-	// Note: For non-root users, state.Dir returns ${HOME}/... which is expanded
-	// by the shell on the remote host when running podman. Inside the container,
-	// we mount to a fixed path (/var/lib/azud) to avoid ${HOME} mismatch issues.
+	// If locking is enabled, mount only this job's lock directory, read-only,
+	// so the container's flock coordinates with host-level manual runs. It
+	// never mounts the state directory, which holds the Caddy config and the
+	// deploy locks. flock needs only a read-only descriptor, and the read-only
+	// mount stops the workload from creating files or symlinks there.
+	// The private SELinux label (Z) is safe because no other container
+	// mounts the directory; the host-side flock is unaffected by labels.
+	// Note: For non-root users, the source starts with ${HOME}/..., which is
+	// expanded by the shell on the remote host when running podman.
 	if cronConfig.Lock {
-		stateDir := state.Dir(cfg.SSH.User)
-		// Mount to /var/lib/azud inside container for consistent path access
 		containerConfig.Volumes = append(containerConfig.Volumes,
-			fmt.Sprintf("%s:/var/lib/azud:rw", stateDir))
+			fmt.Sprintf("%s:%s:ro,Z", state.CronLockDir(cfg.SSH.User, cfg.Service, name), cronContainerLockDir))
+		containerConfig.Labels[cronLockLabel] = cronLockLabelValue
 	}
 
 	return containerConfig
@@ -631,8 +821,8 @@ func buildCronCommand(name string, cronConfig config.CronConfig) string {
 	lockPrefix := ""
 	lockSuffix := ""
 	if cronConfig.Lock {
-		// Use flock with the in-container lock file path for cross-container coordination
-		// The host state directory is mounted at /var/lib/azud inside the container
+		// Use flock with the in-container lock file path for coordination
+		// with host-level manual runs; the lock directory is mounted read-only
 		lockFile := cronLockFileInContainer(name)
 		lockPrefix = fmt.Sprintf("flock -n %s ", lockFile)
 		lockSuffix = " || echo 'Skipped: lock held'"
@@ -661,7 +851,6 @@ func buildCronCommand(name string, cronConfig config.CronConfig) string {
 	// Use shell.Quote for the echo argument to prevent breakage when
 	// cron commands or log paths contain single quotes or shell metacharacters.
 	script := fmt.Sprintf(`
-mkdir -p /var/lib/azud 2>/dev/null || true
 echo %s > /tmp/crontab
 crontab /tmp/crontab
 exec crond -f -l 2

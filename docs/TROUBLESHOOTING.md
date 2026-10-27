@@ -69,6 +69,18 @@ Fixes:
 - In mixed mode (`podman.rootless: true` + `proxy.rootful: true`), keep proxy ports at `80/443`
 - If `ssh.user` is non-root and `proxy.rootful: true`, ensure passwordless `sudo` is available for Podman commands
 
+## Locked cron job runs twice
+
+Symptoms:
+- A `lock: true` job started by `azud cron run` overlaps a scheduled run
+
+Fixes:
+- Upgrade every machine and CI job that runs `azud cron run`. Older releases
+  lock only the old file in the Azud state directory, which a cron container
+  recreated by a newer `azud cron boot` no longer uses.
+- To downgrade, run `azud cron stop <job>` and then that release's
+  `azud cron boot`; older releases keep a running cron container as it is.
+
 ## App serves old version
 
 Symptoms:

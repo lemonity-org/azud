@@ -15,6 +15,7 @@ import (
 
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
+	"github.com/lemonity-org/azud/internal/shell"
 	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
@@ -382,12 +383,19 @@ func (m *Manager) persistConfig(host string) error {
 	return nil
 }
 
+// persistConfigCommand writes stdin to the protected Caddy config. The temp
+// file comes from mktemp (random name, O_EXCL), so a pre-planted path or
+// symlink is never written through. A symlink left at the final path is
+// removed rather than followed, and mv then renames over it.
 func persistConfigCommand(user string) string {
 	configDir := state.DirQuoted(user)
 	configFile := state.ConfigFileQuoted(user, CaddyConfigFileName)
-	tmpFile := state.ConfigFileQuoted(user, CaddyConfigFileName+".tmp")
-	return fmt.Sprintf("umask 077 && mkdir -p %s && chmod 700 %s && cat > %s && chmod 600 %s && mv %s %s && chmod 600 %s", // safe: all values come from state.*Quoted
-		configDir, configDir, tmpFile, tmpFile, tmpFile, configFile, configFile)
+	script := fmt.Sprintf("set -eu; umask 077; mkdir -p %s; chmod 700 %s; "+ // safe: all values come from state.*Quoted
+		"tmp=$(mktemp %s/.%s.XXXXXX); trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; "+
+		"cat > \"$tmp\"; chmod 600 \"$tmp\"; "+
+		"if [ -L %s ]; then rm -f %s; fi; mv -f \"$tmp\" %s; trap - EXIT",
+		configDir, configDir, configDir, CaddyConfigFileName, configFile, configFile, configFile)
+	return "sh -c " + shell.Quote(script)
 }
 
 // restoreConfig reads a previously persisted Caddy config from CaddyConfigFile
@@ -419,7 +427,8 @@ func (m *Manager) restoreConfig(host string) error {
 func restoreConfigCommand(user string) string {
 	configDir := state.DirQuoted(user)
 	configFile := state.ConfigFileQuoted(user, CaddyConfigFileName)
-	return fmt.Sprintf("test -f %s && chmod 700 %s && chmod 600 %s && cat %s", configFile, configDir, configFile, configFile) // safe: all values come from state.*Quoted
+	// Refuse a symlink: chmod and cat would otherwise act on its target.
+	return fmt.Sprintf("test -f %s && test ! -L %s && chmod 700 %s && chmod 600 %s && cat %s", configFile, configFile, configDir, configFile, configFile) // safe: all values come from state.*Quoted
 }
 
 type ProxyConfig struct {

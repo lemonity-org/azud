@@ -827,18 +827,26 @@ func TestPersistConfigCommandsProtectPrivateCaddyState(t *testing.T) {
 				"umask 077",
 				"mkdir -p " + tt.dir,
 				"chmod 700 " + tt.dir,
-				"chmod 600 " + tt.file,
-				"mv ",
+				"mktemp " + tt.dir + "/.caddy-config.json.XXXXXX",
+				`chmod 600 "$tmp"`,
+				"if [ -L " + tt.file + " ]; then rm -f " + tt.file + "; fi",
+				`mv -f "$tmp" ` + tt.file,
 			} {
 				if !strings.Contains(persist, want) {
 					t.Fatalf("persist command %q missing %q", persist, want)
 				}
+			}
+			if strings.Contains(persist, "caddy-config.json.tmp") {
+				t.Fatalf("persist command still writes a predictable temp path: %q", persist)
 			}
 
 			restore := restoreConfigCommand(tt.user)
 			if !strings.Contains(restore, "chmod 700 "+tt.dir) ||
 				!strings.Contains(restore, "chmod 600 "+tt.file) {
 				t.Fatalf("restore command does not repair modes: %q", restore)
+			}
+			if !strings.Contains(restore, "test ! -L "+tt.file+" && chmod") {
+				t.Fatalf("restore command does not refuse symlinks before chmod: %q", restore)
 			}
 		})
 	}

@@ -159,6 +159,10 @@ func TestSetupIntegration(t *testing.T) {
 
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "cron", "boot", "heartbeat", "--host", host)
 	assertContainerRunning(t, client, host, "azud-it-cron-heartbeat")
+	cronMounts := assertRemoteSuccess(t, client, host, "podman container inspect azud-it-cron-heartbeat --format '{{range .Mounts}}{{.Destination}} {{.RW}};{{end}}'")
+	if strings.TrimSpace(cronMounts) != "/run/azud-cron-lock false;" {
+		t.Fatalf("cron lock must mount only the read-only job lock dir, got %q", cronMounts)
+	}
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "cron", "list")
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "cron", "run", "heartbeat", "--host", host)
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "cron", "stop", "heartbeat", "--host", host)

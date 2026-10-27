@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/lemonity-org/azud/internal/shell"
 )
 
 const (
@@ -13,6 +15,17 @@ const (
 
 	// UserStateDirName is the directory name under user home
 	UserStateDirName = ".local/share/azud"
+
+	// RootLocksDir holds lock directories that are bind-mounted into workload
+	// containers for root users. It is a sibling of RootStateDir, never a
+	// child, so no container mount can expose Azud state.
+	RootLocksDir = "/var/lib/azud-locks"
+
+	// UserLocksDirName is the lock directory name under user home
+	UserLocksDirName = ".local/share/azud-locks"
+
+	// CronLockFileName is the lock file inside a cron job's lock directory
+	CronLockFileName = "cron.lock"
 )
 
 // Dir returns the appropriate state directory path for the given SSH user.
@@ -107,4 +120,56 @@ func ConfigFileQuoted(user, name string) string {
 		return RootStateDir + "/" + name
 	}
 	return "\"${HOME}/" + UserStateDirName + "/" + name + "\""
+}
+
+// LocksDir returns the root of the container-mountable lock directories for
+// the given SSH user. It is never inside Dir(user). The returned path may
+// contain ${HOME} for non-root users.
+func LocksDir(user string) string {
+	if user == "" || user == "root" {
+		return RootLocksDir
+	}
+	return "${HOME}/" + UserLocksDirName
+}
+
+// LocksDirQuoted returns the lock root in a shell-safe quoted form.
+func LocksDirQuoted(user string) string {
+	if user == "" || user == "root" {
+		return RootLocksDir
+	}
+	return "\"${HOME}/" + UserLocksDirName + "\""
+}
+
+// CronLockDir returns the per-job lock directory that is mounted read-only
+// into the scheduled container of a cron job.
+// The returned path may contain ${HOME} for non-root users.
+func CronLockDir(user, service, job string) string {
+	return LocksDir(user) + "/cron/" + service + "/" + job
+}
+
+// CronLockDirQuoted returns the per-job cron lock directory in a shell-safe
+// quoted form.
+func CronLockDirQuoted(user, service, job string) string {
+	return quoteLocksPath(user, "cron/"+service+"/"+job)
+}
+
+// CronLockFile returns the lock file shared by a cron job's scheduled
+// container and host-side manual runs.
+// The returned path may contain ${HOME} for non-root users.
+func CronLockFile(user, service, job string) string {
+	return CronLockDir(user, service, job) + "/" + CronLockFileName
+}
+
+// CronLockFileQuoted returns the cron lock file in a shell-safe quoted form.
+func CronLockFileQuoted(user, service, job string) string {
+	return quoteLocksPath(user, "cron/"+service+"/"+job+"/"+CronLockFileName)
+}
+
+// quoteLocksPath quotes a path below LocksDir. Only the ${HOME} prefix is
+// left for the remote shell to expand; the rest is single-quoted.
+func quoteLocksPath(user, relative string) string {
+	if user == "" || user == "root" {
+		return shell.Quote(RootLocksDir + "/" + relative)
+	}
+	return "\"${HOME}/\"" + shell.Quote(UserLocksDirName+"/"+relative)
 }
