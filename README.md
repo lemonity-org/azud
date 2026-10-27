@@ -79,6 +79,8 @@ cannot contain the release metadata injected into official binaries.
    azud init
    ```
    This creates `.azud/secrets` for local secrets. Keep it out of version control.
+   It also adds `.azud/secrets` to `.gitignore` and creates a `.dockerignore`
+   (or extends your existing one) so the file never ends up in an image.
 
 2. **Configure** your deployment in `config/deploy.yml`:
    ```yaml

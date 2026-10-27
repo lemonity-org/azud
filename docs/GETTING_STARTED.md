@@ -22,6 +22,9 @@ This creates:
 - `config/deploy.yml` (main config)
 - `.azud/secrets` (local secrets; keep out of git)
 - `.azud/hooks/` (optional deployment hooks)
+- `.dockerignore` keeps `.azud/`, `.git/`, and the secrets file out of images.
+  If a container ignore file already exists, init appends the missing rules to
+  it instead.
 
 ## 3) Configure a minimal deploy
 

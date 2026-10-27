@@ -48,9 +48,13 @@ Practical security recommendations for Azud deployments.
 ## Secrets Handling
 
 - Keep `.azud/secrets` out of git
-- Remote builds never upload the configured `secrets_path` or any nested
-  `.azud/secrets`; ignore-file negations cannot re-include them. Local builds
-  send the context unchanged, so exclude secrets with `.containerignore`.
+- Builds never send `.azud/secrets` at any depth, the configured
+  `secrets_path` when it is inside the build context, or leftover
+  `.secrets-*.tmp` files of the secrets writer next to them; ignore-file
+  negations cannot re-include them. Remote builds also exclude hard links to
+  the secrets file. Local builds pass these rules to `podman build
+  --ignorefile`, which matches paths only, so keep hard-linked or renamed
+  copies of secrets out of the build context.
 - Store secrets in your CI secret store and reconstruct at runtime
 - Prefer environment variables or secret managers in production
 - `azud env push` and `azud setup` deliver the runtime secrets file only to
@@ -87,6 +91,10 @@ Practical security recommendations for Azud deployments.
 - `azud init` keeps an existing `.azud/secrets` and existing hook scripts.
 - Loading a secrets file that group or others can read prints a warning with
   the `chmod 600` fix. `azud preflight` fails on such a file.
+- Local `azud build` always excludes `.azud/secrets` at any depth and an
+  in-context `secrets_path` from the build context, after your own ignore
+  rules. `azud init` scaffolds a `.dockerignore` that also excludes `.azud/`
+  and `.git/`.
 
 ## Configuration Trust
 

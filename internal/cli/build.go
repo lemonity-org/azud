@@ -125,11 +125,24 @@ func buildLocal(imageTag, latestTag string, multiarch bool) error {
 
 	cacheFrom, cacheTo := resolveCacheSpecs(cfg.Builder.Cache)
 
+	// Local builds read the context directly, so always pass an ignore file
+	// that excludes the local secrets files.
+	ignoreDockerfile := cfg.Builder.Dockerfile
+	if ignoreDockerfile == "" && !multiarch {
+		ignoreDockerfile = "Dockerfile" // the -f default used below
+	}
+	ignoreFile, cleanupIgnoreFile, err := writeLocalBuildIgnoreFile(cfg.Builder.Context, ignoreDockerfile)
+	if err != nil {
+		return fmt.Errorf("failed to prepare build ignore file: %w", err)
+	}
+	defer cleanupIgnoreFile()
+
 	if multiarch {
 		buildConfig := &podman.ManifestBuildConfig{
 			BuildConfig: podman.BuildConfig{
 				Context:    cfg.Builder.Context,
 				Dockerfile: cfg.Builder.Dockerfile,
+				IgnoreFile: ignoreFile,
 				Tag:        imageTag,
 				Tags:       []string{latestTag},
 				Args:       cfg.Builder.Args,
@@ -227,6 +240,7 @@ func buildLocal(imageTag, latestTag string, multiarch bool) error {
 	if context == "" {
 		context = "."
 	}
+	args = append(args, "--ignorefile", ignoreFile)
 	args = append(args, context)
 
 	log.Info("Running podman build...")

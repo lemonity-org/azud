@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -255,6 +257,118 @@ func TestInitRefusesSymlinkedGitignore(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join("config", "deploy.yml")); !os.IsNotExist(err) {
 		t.Fatalf("init wrote a config before refusing: %v", err)
+	}
+}
+
+func TestInitCreatesDockerignore(t *testing.T) {
+	chdirToTempDir(t)
+	resetCLIState()
+
+	rootCmd.SetArgs([]string{"init"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	lines := strings.Split(readFileString(t, ".dockerignore"), "\n")
+	for _, want := range []string{".azud/", ".git/", ".azud/secrets"} {
+		if !slices.Contains(lines, want) {
+			t.Fatalf(".dockerignore is missing %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+	}
+	if _, err := os.Stat(".containerignore"); !os.IsNotExist(err) {
+		t.Fatalf("init must not create .containerignore: %v", err)
+	}
+}
+
+func TestInitAppendsToExistingBuildIgnoreFile(t *testing.T) {
+	tests := []struct {
+		name      string
+		file      string
+		existing  string
+		wantAdded []string
+	}{
+		{name: "dockerignore", file: ".dockerignore", existing: "node_modules\n", wantAdded: []string{".azud/", ".git/", ".azud/secrets"}},
+		{name: "containerignore", file: ".containerignore", existing: "node_modules", wantAdded: []string{".azud/", ".git/", ".azud/secrets"}},
+		{name: "containerfile specific", file: "Dockerfile.containerignore", existing: ".git\n", wantAdded: []string{".azud/", ".azud/secrets"}},
+		{name: "already covered", file: ".dockerignore", existing: "/.azud\n.git/\n", wantAdded: nil},
+		{name: "comment mention", file: ".dockerignore", existing: "# .azud/ and .git/ are fine\n", wantAdded: []string{".azud/", ".git/", ".azud/secrets"}},
+		{name: "user re-includes hooks", file: ".dockerignore", existing: ".azud\n!.azud/hooks\n.git\n", wantAdded: nil},
+		{name: "user re-includes secrets", file: ".dockerignore", existing: ".azud\n!.azud/secrets\n.git\n", wantAdded: []string{".azud/secrets"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chdirToTempDir(t)
+			if err := os.WriteFile(tt.file, []byte(tt.existing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			resetCLIState()
+
+			rootCmd.SetArgs([]string{"init"})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("init failed: %v", err)
+			}
+
+			body := readFileString(t, tt.file)
+			if !strings.HasPrefix(body, tt.existing) {
+				t.Fatalf("init rewrote existing rules:\n%s", body)
+			}
+			var added []string
+			for _, line := range strings.Split(strings.TrimPrefix(body, tt.existing), "\n") {
+				if line != "" && !strings.HasPrefix(line, "#") {
+					added = append(added, line)
+				}
+			}
+			if !slices.Equal(added, tt.wantAdded) {
+				t.Fatalf("appended %q, want %q:\n%s", added, tt.wantAdded, body)
+			}
+			for _, other := range initBuildIgnoreFiles {
+				if other == tt.file {
+					continue
+				}
+				if _, err := os.Stat(other); !os.IsNotExist(err) {
+					t.Fatalf("init created %s next to %s: %v", other, tt.file, err)
+				}
+			}
+		})
+	}
+}
+
+func TestInitSkipsSymlinkedContainerIgnoreFile(t *testing.T) {
+	for _, link := range []string{".dockerignore", ".containerignore"} {
+		t.Run(link, func(t *testing.T) {
+			chdirToTempDir(t)
+			target := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.WriteFile(target, []byte("node_modules\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			resetCLIState()
+
+			var out bytes.Buffer
+			rootCmd.SetOut(&out)
+			t.Cleanup(func() { rootCmd.SetOut(nil) })
+			rootCmd.SetArgs([]string{"init"})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("init failed: %v", err)
+			}
+
+			assertFileExists(t, "config/deploy.yml")
+			assertFileExists(t, ".azud/secrets")
+			if body := readFileString(t, ".gitignore"); !strings.Contains(body, ".azud/secrets\n") {
+				t.Fatalf(".gitignore does not ignore the secrets file:\n%s", body)
+			}
+			if body := readFileString(t, target); body != "node_modules\n" {
+				t.Fatalf("symlink target was modified:\n%s", body)
+			}
+			if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("%s is no longer a symbolic link: %v", link, err)
+			}
+			if !strings.Contains(out.String(), link+" unchanged because it is a symbolic link") {
+				t.Fatalf("init did not warn about the symlinked %s:\n%s", link, out.String())
+			}
+		})
 	}
 }
 
