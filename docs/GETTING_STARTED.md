@@ -104,6 +104,10 @@ Then deploy with:
 azud deploy --destination staging
 ```
 
+Destination names start with a letter or digit and may contain letters,
+digits, dots, underscores, and hyphens, so the override file always sits next
+to `config/deploy.yml`.
+
 ## 6c) Secrets providers
 
 By default, secrets are read from `.azud/secrets`. You can also load secrets from:

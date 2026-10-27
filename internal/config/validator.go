@@ -38,6 +38,20 @@ func (e ValidationErrors) Error() string {
 // Must start with a letter, contain only alphanumeric, underscore, hyphen, and dot.
 var serviceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 
+// destinationNameRegex validates -d/--destination values, which are
+// interpolated into the destination config filename (deploy.<name>.yml).
+var destinationNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
+
+// ValidateDestination reports whether name is a safe destination name. It must
+// not contain path separators or "..", so the destination config file always
+// stays next to the base config file.
+func ValidateDestination(name string) error {
+	if !destinationNameRegex.MatchString(name) || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid destination %q: must start with a letter or digit and contain only letters, digits, dots, underscores, and hyphens (max 63 chars, no \"..\")", name)
+	}
+	return nil
+}
+
 // resourceNameRegex validates cron and accessory names. These map keys are used
 // to build container names and remote lock-file paths that are interpolated into
 // shell commands, so they must not contain shell metacharacters.

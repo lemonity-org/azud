@@ -104,11 +104,11 @@ proxy:
 }
 
 // ---------------------------------------------------------------------------
-// Finding: -d/--destination is interpolated into a filename without validation,
-// so it can read an arbitrary YAML file outside the config directory.
+// Control: -d/--destination is validated before it is interpolated into a
+// filename, so it cannot read a YAML file outside the config directory.
 // ---------------------------------------------------------------------------
 
-func TestFinding_DestinationPathTraversal(t *testing.T) {
+func TestControl_DestinationPathTraversalIsRejected(t *testing.T) {
 	dir := newWorkdir(t)
 	base := writeConfig(t, dir, `service: shop
 image: example/shop:v1
@@ -118,18 +118,20 @@ servers:
 proxy:
   host: shop.example.com
 `)
-	// filepath.Join("config", "deploy."+"/../../victim"+".yml") resolves to
-	// victim.yml in the current directory.
+	// filepath.Join("config", "deploy."+"/../../victim"+".yml") would resolve
+	// to victim.yml in the current directory.
 	writeFile(t, filepath.Join(dir, "victim.yml"), "service: attacker-owned\nimage: attacker/image:v1\n", 0o600)
 
 	res := runAzud(t, dir, nil, "-c", base, "-d", "/../../victim", "config")
-	if res.Exit != 0 {
-		t.Fatalf("config with traversing destination failed: %s", res)
+	if res.Exit == 0 {
+		t.Fatalf("traversing destination was accepted: %s", res)
 	}
-	if !strings.Contains(res.Combined, "Service: attacker-owned") {
-		t.Fatalf("destination traversal did not load the outside file: %s", res)
+	if !strings.Contains(res.Combined, "invalid destination") {
+		t.Fatalf("expected an invalid destination error: %s", res)
 	}
-	t.Logf("VULNERABLE: -d %q merged %s", "/../../victim", filepath.Join(dir, "victim.yml"))
+	if strings.Contains(res.Combined, "attacker-owned") {
+		t.Fatalf("destination traversal loaded the outside file: %s", res)
+	}
 }
 
 // ---------------------------------------------------------------------------
