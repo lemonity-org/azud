@@ -433,3 +433,63 @@ func TestControl_EnvPullWritesPrivateSecretsFile(t *testing.T) {
 		t.Fatalf("unexpected secrets content:\n%s", body)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Control: env pull distinguishes a missing remote file from a read failure
+// and never replaces the local file after a failed or partial read.
+// ---------------------------------------------------------------------------
+
+func TestControl_EnvPullFailsOnUnreadableRemoteFile(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
+		if strings.Contains(command, "cat ") {
+			// Partial stdout followed by a failure must not be written.
+			return fakeResult{Stdout: "DB_PASS=partial\n", Stderr: "cat: permission denied", Exit: 1}
+		}
+		return fakeResult{}
+	})
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+	secretsPath := filepath.Join(dir, ".azud", "secrets")
+	writeFile(t, secretsPath, "DB_PASS=local\nOTHER=kept\n", 0o600)
+
+	res := runAzud(t, dir, nil, "-c", configPath, "env", "pull", "--host", "127.0.0.1")
+	if res.Exit == 0 {
+		t.Fatalf("env pull succeeded despite the remote read failure: %s", res)
+	}
+	if !strings.Contains(res.Combined, "permission denied") {
+		t.Fatalf("expected the remote error in the output, got: %s", res)
+	}
+	read := fake.waitCommand(t, "cat ", 5*time.Second)
+	if strings.Contains(read.Command, "|| echo") {
+		t.Fatalf("read command still masks failures:\n%s", read.Command)
+	}
+	body, err := os.ReadFile(secretsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "DB_PASS=local\nOTHER=kept\n" {
+		t.Fatalf("local secrets file changed after a failed pull:\n%s", body)
+	}
+}
+
+func TestControl_EnvPullReportsMissingRemoteFile(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
+		if strings.Contains(command, "cat ") {
+			return fakeResult{Exit: 3}
+		}
+		return fakeResult{}
+	})
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+
+	res := runAzud(t, dir, nil, "-c", configPath, "env", "pull", "--host", "127.0.0.1")
+	if res.Exit != 0 {
+		t.Fatalf("env pull failed for a missing remote file: %s", res)
+	}
+	if !strings.Contains(res.Combined, "No secrets file on 127.0.0.1") {
+		t.Fatalf("expected a missing-file message, got: %s", res)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".azud", "secrets")); !os.IsNotExist(err) {
+		t.Fatalf("env pull created a local secrets file for a missing remote file (err=%v)", err)
+	}
+}
