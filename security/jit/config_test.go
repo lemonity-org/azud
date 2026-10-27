@@ -272,25 +272,49 @@ proxy:
 	}
 }
 
-func TestFinding_ImageReferenceValidationIsPermissive(t *testing.T) {
-	dir := newWorkdir(t)
-	// isValidImageRef only rejects whitespace/control characters. A leading
-	// dash or shell metacharacter is accepted. Shell quoting prevents command
-	// injection, but the value can become a podman option.
-	path := writeConfig(t, dir, `service: shop
-image: --privileged
+func TestControl_ImageReferenceValidationRejectsNonReferences(t *testing.T) {
+	base := `service: shop
 servers:
-  worker:
+  web:
     hosts: [127.0.0.1]
-`)
-	res := runAzud(t, dir, nil, "-c", path, "config")
-	if res.Exit != 0 {
-		t.Fatalf("expected permissive image validation to accept --privileged: %s", res)
+proxy:
+  host: shop.example.com
+`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "option-shaped image", body: "image: --privileged\n" + base},
+		{name: "shell metacharacter image", body: "image: foo;bar\n" + base},
+		{name: "leading dash path", body: "image: -x/y\n" + base},
+		{
+			name: "accessory image",
+			body: "image: example/shop:v1\n" + base + `accessories:
+  db:
+    image: --privileged
+    host: 127.0.0.1
+`,
+		},
+		{
+			name: "healthcheck helper image",
+			body: "image: example/shop:v1\n" + base + `  healthcheck:
+    helper_image: --privileged
+`,
+		},
 	}
-	if !strings.Contains(res.Combined, "Image: --privileged") {
-		t.Fatalf("unexpected output: %s", res)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := newWorkdir(t)
+			path := writeConfig(t, dir, tt.body)
+			res := runAzud(t, dir, nil, "-c", path, "config")
+			if res.Exit == 0 {
+				t.Fatalf("invalid image reference was accepted: %s", res)
+			}
+			if !strings.Contains(res.Combined, "invalid image reference") {
+				t.Fatalf("config was rejected for an unexpected reason: %s", res)
+			}
+		})
 	}
-	t.Logf("VULNERABLE (low): image reference %q passed validation; repository syntax is not checked", "--privileged")
 }
 
 func firstLine(s string) string {

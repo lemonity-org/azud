@@ -103,7 +103,7 @@ func Validate(cfg *Config) error {
 	} else if !isValidImageRef(cfg.Image) {
 		errs = append(errs, ValidationError{
 			Field:   "image",
-			Message: fmt.Sprintf("invalid image reference: %s", cfg.Image),
+			Message: fmt.Sprintf("invalid image reference: %q", cfg.Image),
 		})
 	}
 
@@ -372,7 +372,7 @@ func Validate(cfg *Config) error {
 	if cfg.Proxy.Healthcheck.HelperImage != "" && !isValidImageRef(cfg.Proxy.Healthcheck.HelperImage) {
 		errs = append(errs, ValidationError{
 			Field:   "proxy.healthcheck.helper_image",
-			Message: fmt.Sprintf("invalid image reference: %s", cfg.Proxy.Healthcheck.HelperImage),
+			Message: fmt.Sprintf("invalid image reference: %q", cfg.Proxy.Healthcheck.HelperImage),
 		})
 	}
 	if cfg.Proxy.Buffering.MaxRequestBody < 0 {
@@ -497,7 +497,7 @@ func Validate(cfg *Config) error {
 		} else if !isValidImageRef(acc.Image) {
 			errs = append(errs, ValidationError{
 				Field:   fmt.Sprintf("accessories.%s.image", name),
-				Message: fmt.Sprintf("invalid image reference: %s", acc.Image),
+				Message: fmt.Sprintf("invalid image reference: %q", acc.Image),
 			})
 		}
 
@@ -1284,59 +1284,57 @@ func isValidBuilderSSH(spec string) bool {
 	return hasID
 }
 
-// isValidImageRef validates a container image reference.
+// Image reference grammar, following the OCI distribution reference format:
+// [domain[:port]/]path[:tag][@digest].
+var (
+	imageDomainRegex        = regexp.MustCompile(`^(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[[0-9a-fA-F:]+\])(?::[0-9]{1,5})?$`)
+	imagePathComponentRegex = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+	imageTagRegex           = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	imageDigestRegex        = regexp.MustCompile(`^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-f0-9]+$`)
+)
+
+// isValidImageRef validates a container image reference. The value is checked
+// exactly as it will be used, so it cannot carry whitespace, shell syntax, or
+// a leading '-' that podman would parse as an option.
 func isValidImageRef(image string) bool {
-	image = strings.TrimSpace(image)
-	if image == "" {
+	if image == "" || len(image) > 512 {
 		return false
 	}
 
-	// No spaces or control characters
-	for _, c := range image {
-		if c <= 0x20 || c == 0x7f {
+	name := image
+	if idx := strings.IndexByte(name, '@'); idx >= 0 {
+		if !imageDigestRegex.MatchString(name[idx+1:]) {
 			return false
 		}
+		name = name[:idx]
 	}
 
-	// Split off digest (@sha256:...)
-	ref := image
-	if idx := strings.Index(ref, "@"); idx >= 0 {
-		digest := ref[idx+1:]
-		ref = ref[:idx]
-		// Digest must be algorithm:hex
-		digestParts := strings.SplitN(digest, ":", 2)
-		if len(digestParts) != 2 || digestParts[0] == "" || digestParts[1] == "" {
+	// A colon after the last slash starts the tag; an earlier one is a
+	// registry port (e.g., localhost:5000/image).
+	if idx := strings.LastIndexByte(name, ':'); idx > strings.LastIndexByte(name, '/') {
+		if !imageTagRegex.MatchString(name[idx+1:]) {
 			return false
 		}
-		if !regexp.MustCompile(`^[a-z0-9]+$`).MatchString(digestParts[0]) {
-			return false
-		}
-		if !regexp.MustCompile(`^[a-f0-9]+$`).MatchString(digestParts[1]) {
-			return false
-		}
+		name = name[:idx]
 	}
 
-	// Split off tag (:tag)
-	if idx := strings.LastIndex(ref, ":"); idx >= 0 {
-		// Make sure this isn't a port in the registry (e.g., localhost:5000/image)
-		afterColon := ref[idx+1:]
-		beforeColon := ref[:idx]
-		// If there's a slash after the colon, it's a port not a tag
-		if !strings.Contains(afterColon, "/") {
-			// Validate tag: alphanumeric + . - _ (1-128 chars)
-			if len(afterColon) == 0 || len(afterColon) > 128 {
-				return false
-			}
-			if !regexp.MustCompile(`^[a-zA-Z0-9._-]+$`).MatchString(afterColon) {
-				return false
-			}
-			ref = beforeColon
-		}
-	}
-
-	// Remaining ref must be a valid name
-	if ref == "" {
+	if name == "" || len(name) > 255 {
 		return false
+	}
+
+	// The first component is a registry when it looks like a hostname, as in
+	// podman's own short-name resolution.
+	components := strings.Split(name, "/")
+	if len(components) > 1 && (strings.ContainsAny(components[0], ".:[") || components[0] == "localhost") {
+		if !imageDomainRegex.MatchString(components[0]) {
+			return false
+		}
+		components = components[1:]
+	}
+	for _, component := range components {
+		if !imagePathComponentRegex.MatchString(component) {
+			return false
+		}
 	}
 
 	return true
