@@ -50,6 +50,11 @@ Practical security recommendations for Azud deployments.
 - Keep `.azud/secrets` out of git
 - Store secrets in your CI secret store and reconstruct at runtime
 - Prefer environment variables or secret managers in production
+- `azud env push` and `azud setup` deliver the runtime secrets file only to
+  hosts that run application, accessory, or cron containers. The remote
+  builder and SSH bastion never receive it unless they also run a workload.
+  If you used an earlier version with a remote builder or bastion, delete any
+  leftover `~/.azud/secrets` (or your `secrets_remote_path`) on those hosts.
 - Keep registry and custom TLS secret references out of `env.secret`; Azud
   rejects cross-scope reuse. `azud env push` excludes those references from the
   remote runtime file and delivers TLS material directly to Caddy over SSH

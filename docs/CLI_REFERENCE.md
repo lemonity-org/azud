@@ -278,11 +278,15 @@ azud app details [flags]
 ### Secrets & Environment
 
 #### `azud env push`
-Push secrets from local `.azud/secrets` to servers.
+Push secrets from local `.azud/secrets` to servers. Secrets go only to hosts
+that run application, accessory, or cron containers; `builder.remote.host` and
+`ssh.proxy.host` do not receive them unless they also run one of those
+workloads. `--host` must name one of those workload hosts.
 **Flags:** `--host`
 
 #### `azud env pull`
-Pull secrets from a server to local `.azud/secrets`.
+Pull secrets from a server to local `.azud/secrets`. `--host` must name a
+server, accessory, or cron host.
 **Flags:** `--host` (required)
 
 #### `azud env list`

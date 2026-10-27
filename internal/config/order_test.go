@@ -44,3 +44,44 @@ func TestOperationalOrderingIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestGetWorkloadHostsExcludesBuilderAndSSHProxy(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]RoleConfig{
+			"web":    {Hosts: []string{"web-a", "shared"}},
+			"worker": {Hosts: []string{"worker-a"}},
+		},
+		Accessories: map[string]AccessoryConfig{
+			"db":    {Host: "db-host"},
+			"redis": {Hosts: []string{"redis-host", "shared"}},
+		},
+		Cron: map[string]CronConfig{
+			"default":  {},
+			"explicit": {Host: "cron-host"},
+		},
+		Builder: BuilderConfig{Remote: RemoteBuilderConfig{Host: "builder-host"}},
+		SSH:     SSHConfig{Proxy: SSHProxyConfig{Host: "bastion-host"}},
+	}
+
+	wantWorkload := []string{"web-a", "shared", "worker-a", "db-host", "redis-host", "cron-host"}
+	if got := cfg.GetWorkloadHosts(); !reflect.DeepEqual(got, wantWorkload) {
+		t.Fatalf("GetWorkloadHosts() = %v, want %v", got, wantWorkload)
+	}
+
+	wantSSH := append(append([]string{}, wantWorkload...), "builder-host", "bastion-host")
+	if got := cfg.GetAllSSHHosts(); !reflect.DeepEqual(got, wantSSH) {
+		t.Fatalf("GetAllSSHHosts() = %v, want %v", got, wantSSH)
+	}
+}
+
+func TestGetWorkloadHostsKeepsBuilderThatAlsoRunsWorkload(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]RoleConfig{"web": {Hosts: []string{"shared"}}},
+		Builder: BuilderConfig{Remote: RemoteBuilderConfig{Host: "shared"}},
+		SSH:     SSHConfig{Proxy: SSHProxyConfig{Host: "bastion-host"}},
+	}
+
+	if got, want := cfg.GetWorkloadHosts(), []string{"shared"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetWorkloadHosts() = %v, want %v", got, want)
+	}
+}

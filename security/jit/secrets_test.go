@@ -81,14 +81,12 @@ func TestFinding_EnvSetAllowsNewlineInjection(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: env push targets GetAllSSHHosts, which includes builder and bastion
-// hosts that never run the application.
+// Control: env push targets workload hosts only. The remote builder and SSH
+// bastion never receive application secrets.
 // ---------------------------------------------------------------------------
 
-func TestFinding_EnvPushSendsSecretsToRemoteBuilder(t *testing.T) {
-	fake := startFakeSSH(t, "0.0.0.0:0", permissive())
-	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, `service: shop
+func envPushBuilderConfig(t *testing.T, port int) string {
+	return `service: shop
 image: example/shop:v1
 servers:
   web:
@@ -100,13 +98,19 @@ builder:
   remote:
     host: 127.0.0.1
 ssh:
-  user: `+currentUser()+`
-  port: `+itoa(fake.port())+`
-  keys: ["`+filepath.ToSlash(clientKeyPath(t))+`"]
+  user: ` + currentUser() + `
+  port: ` + itoa(port) + `
+  keys: ["` + filepath.ToSlash(clientKeyPath(t)) + `"]
   connect_timeout: 2s
   command_timeout: 40s
   insecure_ignore_host_key: true
-`)
+`
+}
+
+func TestControl_EnvPushTargetsOnlyWorkloadHosts(t *testing.T) {
+	fake := startFakeSSH(t, "0.0.0.0:0", permissive())
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, envPushBuilderConfig(t, fake.port()))
 	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "DB_PASS=supersecret\n", 0o600)
 
 	res := runAzud(t, dir, nil, "-c", configPath, "env", "push")
@@ -114,19 +118,35 @@ ssh:
 		t.Fatalf("env push failed: %s", res)
 	}
 
-	// Both configured hosts connect to the same fake listener. Exactly two
-	// secret-file writes proves the builder received the application secret,
-	// not just the web host.
+	// Both configured hosts connect to the same fake listener. Exactly one
+	// secret-file write proves only the web host received the secret.
 	writes := fake.commandsMatching("cat > \"$tmp\"")
-	if len(writes) != 2 {
-		t.Fatalf("expected 2 secret writes (web + builder), got %d:\n%s", len(writes), commandDump(fake.snapshot()))
+	if len(writes) != 1 {
+		t.Fatalf("expected 1 secret write (web only), got %d:\n%s", len(writes), commandDump(fake.snapshot()))
 	}
-	for _, write := range writes {
-		if !strings.Contains(string(write.Stdin), "DB_PASS=supersecret") {
-			t.Fatalf("builder write did not contain the application secret:\n%s", write.Stdin)
+	if !strings.Contains(string(writes[0].Stdin), "DB_PASS=supersecret") {
+		t.Fatalf("web write did not contain the application secret:\n%s", writes[0].Stdin)
+	}
+}
+
+func TestControl_EnvPushRejectsRemoteBuilderHost(t *testing.T) {
+	fake := startFakeSSH(t, "0.0.0.0:0", permissive())
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, envPushBuilderConfig(t, fake.port()))
+	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "DB_PASS=supersecret\n", 0o600)
+
+	for _, command := range [][]string{{"env", "push", "--host", "127.0.0.1"}, {"env", "pull", "--host", "127.0.0.1"}} {
+		res := runAzud(t, dir, nil, append([]string{"-c", configPath}, command...)...)
+		if res.Exit == 0 {
+			t.Fatalf("%v targeting the remote builder succeeded: %s", command, res)
+		}
+		if !strings.Contains(res.Combined, "does not run application containers") {
+			t.Fatalf("%v: expected a workload-host error, got: %s", command, res)
 		}
 	}
-	t.Logf("VULNERABLE: env push wrote application secrets to the remote builder host as well as the web host")
+	if got := fake.snapshot(); len(got) != 0 {
+		t.Fatalf("expected no SSH commands for builder-targeted env push/pull, got:\n%s", commandDump(got))
+	}
 }
 
 func itoa(n int) string {
