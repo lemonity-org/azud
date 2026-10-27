@@ -147,6 +147,48 @@ func TestBuildCommand_MultipleTags(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_OptionsAreQuoted(t *testing.T) {
+	cfg := &BuildConfig{
+		Context: ".",
+		Options: []string{"--annotation=a b", "--label=$(id)", "--quiet"},
+	}
+
+	cmd := cfg.BuildCommand()
+
+	for _, want := range []string{"'--annotation=a b'", "'--label=$(id)'", " --quiet "} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("expected %q in build command, got: %s", want, cmd)
+		}
+	}
+	if !strings.HasSuffix(cmd, " .") {
+		t.Errorf("expected context to stay last, got: %s", cmd)
+	}
+}
+
+func TestManifestBuildCommands_OptionsAreQuoted(t *testing.T) {
+	cfg := &ManifestBuildConfig{
+		BuildConfig: BuildConfig{
+			Context: ".",
+			Tag:     "myapp:latest",
+			Options: []string{"--annotation=a b", "--label=$(id)"},
+		},
+		Platforms: []string{"linux/amd64", "linux/arm64"},
+	}
+
+	cmds := cfg.ManifestBuildCommands()
+
+	for _, cmd := range cmds[1:3] {
+		for _, want := range []string{"'--annotation=a b'", "'--label=$(id)'"} {
+			if !strings.Contains(cmd, want) {
+				t.Errorf("expected %q in platform build command, got: %s", want, cmd)
+			}
+		}
+		if !strings.HasSuffix(cmd, " .") {
+			t.Errorf("expected context to stay last, got: %s", cmd)
+		}
+	}
+}
+
 func TestManifestBuildCommands_Basic(t *testing.T) {
 	cfg := &ManifestBuildConfig{
 		BuildConfig: BuildConfig{
