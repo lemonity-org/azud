@@ -35,6 +35,7 @@ func FuzzShellQuotePreservesData(f *testing.F) {
 func FuzzQuadletContainerFileLineInjection(f *testing.F) {
 	for _, seed := range []string{
 		"x", "x\n[Service]\nExecStartPre=/bin/sh -c id", "x\r\n[Unit]\nAfter=evil", "%h%t", "a\"b\\c",
+		"x\\", "x \\ ", "x\u2028y\u0085z",
 	} {
 		f.Add(seed)
 	}
@@ -58,11 +59,12 @@ func FuzzQuadletContainerFileLineInjection(f *testing.F) {
 			HealthInterval:  "i" + payload,
 			Exec:            "e" + payload,
 			PodmanArgs:      []string{"--arg=" + payload},
-			Restart:         "always",
-			WantedBy:        "default.target",
+			Restart:         "r" + payload,
+			WantedBy:        "w" + payload,
 		}
 		out := quadlet.GenerateContainerFile(unit)
-		for _, section := range []string{"[Unit]", "[Container]", "[Service]", "[Install]"} {
+		sections := []string{"[Unit]", "[Container]", "[Service]", "[Install]"}
+		for _, section := range sections {
 			if exactLineCount(out, section) != 1 {
 				t.Fatalf("section injection for %q:\n%s", section, out)
 			}
@@ -72,5 +74,39 @@ func FuzzQuadletContainerFileLineInjection(f *testing.F) {
 				t.Fatalf("directive injection: %q\n%s", line, out)
 			}
 		}
+		// One directive line per field (15 container fields plus Restart and
+		// WantedBy), and no line may continue onto the next one.
+		assertQuadletLines(t, out, sections, 17)
+
+		assertQuadletLines(t, quadlet.GenerateNetworkFile("n"+payload, true), []string{"[Network]"}, 2)
+		assertQuadletLines(t, quadlet.GenerateVolumeFile("v"+payload), []string{"[Volume]"}, 1)
 	})
+}
+
+// assertQuadletLines checks that out has exactly want directive lines besides
+// its section headers, and that no line ends in a continuation backslash.
+func assertQuadletLines(t *testing.T, out string, sections []string, want int) {
+	t.Helper()
+	directives := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasSuffix(line, "\\") {
+			t.Fatalf("line continuation: %q\n%s", line, out)
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		header := false
+		for _, section := range sections {
+			if trimmed == section {
+				header = true
+			}
+		}
+		if !header {
+			directives++
+		}
+	}
+	if directives != want {
+		t.Fatalf("got %d directive lines, want %d:\n%s", directives, want, out)
+	}
 }
