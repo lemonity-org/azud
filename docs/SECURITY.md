@@ -85,6 +85,8 @@ Practical security recommendations for Azud deployments.
   or `proxy.ssl_private_key` are never written to that file, so a PEM
   certificate or key may span lines.
 - `azud init` keeps an existing `.azud/secrets` and existing hook scripts.
+- Loading a secrets file that group or others can read prints a warning with
+  the `chmod 600` fix. `azud preflight` fails on such a file.
 
 ## Configuration Trust
 

@@ -365,11 +365,11 @@ func keys[V any](m map[string]V) []string {
 }
 
 // ---------------------------------------------------------------------------
-// Hardening: a world-readable secrets file only produces a warning. The CLI
-// still loads it and proceeds.
+// Control (JIT-15): a world-readable secrets file still loads with an
+// actionable warning (backward compatible), but `azud preflight` fails on it.
 // ---------------------------------------------------------------------------
 
-func TestFinding_WorldReadableSecretsFileOnlyWarns(t *testing.T) {
+func TestControl_WorldReadableSecretsFileStillLoadsWithWarning(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
 	writeFile(t, filepath.Join(dir, ".azud", "secrets"), "DB_PASS=hunter2\n", 0o644)
@@ -377,12 +377,35 @@ func TestFinding_WorldReadableSecretsFileOnlyWarns(t *testing.T) {
 	// `env list` loads secrets; `config` deliberately does not.
 	res := runAzud(t, dir, nil, "-c", configPath, "env", "list")
 	if res.Exit != 0 {
-		t.Fatalf("env list should currently succeed despite insecure mode: %s", res)
+		t.Fatalf("secret loading must keep loading a 0644 secrets file: %s", res)
 	}
-	if !strings.Contains(res.Combined, "insecure permissions") {
-		t.Fatalf("expected an insecure-permissions warning: %s", res)
+	if !strings.Contains(res.Combined, "insecure permissions") || !strings.Contains(res.Combined, "chmod 600") {
+		t.Fatalf("expected an actionable insecure-permissions warning: %s", res)
 	}
-	t.Logf("HARDENING: a 0644 secrets file is loaded successfully after a warning; preflight has no mode check")
+}
+
+func TestControl_PreflightRejectsWorldReadableSecretsFile(t *testing.T) {
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", 1, clientKeyPath(t), "shop"))
+	secretsPath := filepath.Join(dir, ".azud", "secrets")
+	writeFile(t, secretsPath, "DB_PASS=hunter2\n", 0o644)
+
+	// The mode check runs before DNS and SSH, so no fake server is needed.
+	res := runAzud(t, dir, nil, "-c", configPath, "preflight")
+	if res.Exit == 0 {
+		t.Fatalf("preflight must fail on a world-readable secrets file: %s", res)
+	}
+	if !strings.Contains(res.Combined, "readable by group or others") || !strings.Contains(res.Combined, "chmod 600") {
+		t.Fatalf("expected a secrets mode blocker with a fix hint: %s", res)
+	}
+
+	if err := os.Chmod(secretsPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res = runAzud(t, dir, nil, "-c", configPath, "preflight")
+	if strings.Contains(res.Combined, "readable by group or others") {
+		t.Fatalf("preflight still reports a 0600 secrets file: %s", res)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/lemonity-org/azud/internal/secretsfile"
 )
 
 // Loader handles configuration file loading and merging
@@ -201,9 +203,10 @@ func (l *Loader) loadSecretsFromFile(cfg *Config) error {
 		return err
 	}
 
-	// Warn if the secrets file is readable by group or others
-	if perm := info.Mode().Perm(); perm&0077 != 0 {
-		fmt.Fprintf(os.Stderr, "  WARN   secrets file %s has insecure permissions %04o (recommended: 0600)\n", secretsPath, perm)
+	// Warn if the secrets file is readable by group or others. Loading stays
+	// non-fatal for compatibility; `azud preflight` fails on this instead.
+	if secretsfile.InsecureMode(info) {
+		fmt.Fprintf(os.Stderr, "  WARN   secrets file %s has insecure permissions %04o (recommended: 0600); run 'chmod 600 %s'\n", secretsPath, info.Mode().Perm(), secretsPath)
 	}
 
 	file, err := os.Open(secretsPath)

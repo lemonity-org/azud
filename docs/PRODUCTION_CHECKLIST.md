@@ -20,6 +20,7 @@ Use this before the first production launch and after major changes.
 ## Security
 
 - `.azud/secrets` is git‑ignored
+- `.azud/secrets` is mode `0600` (`azud preflight` fails otherwise)
 - Secrets exist for all `env.secret` keys
 - `security.require_non_root_ssh` enabled
 - `security.require_rootless_podman` enabled if supported

@@ -16,6 +16,7 @@ import (
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/proxy"
+	"github.com/lemonity-org/azud/internal/secretsfile"
 	"github.com/lemonity-org/azud/internal/server"
 	"github.com/lemonity-org/azud/internal/ssh"
 )
@@ -26,6 +27,7 @@ var preflightCmd = &cobra.Command{
 	Long: `Run a preflight checklist before deploying.
 
 Checks:
+  - Local secrets file is private (mode 0600) with the file provider
   - SSH connectivity and host key policy
   - Podman installation and rootless mode (if required)
   - Secrets file presence on hosts (if required)
@@ -70,6 +72,9 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("security.require_known_hosts enabled but ssh.insecure_ignore_host_key is true")
 	}
 	if err := validateLocalSecretRefs(); err != nil {
+		return err
+	}
+	if err := checkLocalSecretsFileMode(); err != nil {
 		return err
 	}
 
@@ -185,6 +190,26 @@ func validateLocalSecretRefs() error {
 		return fmt.Errorf("missing required local secrets: %s", strings.Join(missing, ", "))
 	}
 
+	return nil
+}
+
+// checkLocalSecretsFileMode fails when the file provider's secrets file is
+// readable by group or others. Loading only warns, so preflight is the gate.
+func checkLocalSecretsFileMode() error {
+	if !isFileSecretsProvider() {
+		return nil
+	}
+	path := getSecretsFilePath()
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect secrets file %s: %w", path, err)
+	}
+	if secretsfile.InsecureMode(info) {
+		return fmt.Errorf("secrets file %s is readable by group or others (mode %04o); run 'chmod 600 %s'", path, info.Mode().Perm(), path)
+	}
 	return nil
 }
 
