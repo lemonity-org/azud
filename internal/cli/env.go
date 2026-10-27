@@ -34,9 +34,13 @@ Runtime secrets are stored in $HOME/.azud/secrets on the server and loaded
 when containers are started. Registry and proxy TLS credentials stay local to
 Azud and must use distinct names from application env.secret entries.
 
+Secrets are pushed only to hosts that run application, accessory, or cron
+containers. The remote builder and SSH bastion do not receive them unless they
+also run a workload.
+
 Example:
-  azud env push           # Push to all servers
-  azud env push --host x  # Push to specific host`,
+  azud env push           # Push to all server, accessory, and cron hosts
+  azud env push --host x  # Push to one of those hosts`,
 	RunE: runEnvPush,
 }
 
@@ -154,12 +158,12 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	secrets := remoteRuntimeSecrets(cfg, loadedSecrets)
 
 	// Get target hosts
-	hosts := cfg.GetAllSSHHosts()
-	if envHost != "" {
-		if !containsString(cfg.GetAllSSHHosts(), envHost) {
-			return fmt.Errorf("host %s is not configured", envHost)
-		}
-		hosts = []string{envHost}
+	hosts, err := secretTargetHosts(cfg, envHost)
+	if err != nil {
+		return err
+	}
+	if len(hosts) == 0 {
+		return fmt.Errorf("no workload hosts configured")
 	}
 
 	sshClient := createSSHClient()
@@ -224,8 +228,8 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 func runEnvPull(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
-	if !containsString(cfg.GetAllSSHHosts(), envHost) {
-		return fmt.Errorf("host %s is not configured", envHost)
+	if _, err := secretTargetHosts(cfg, envHost); err != nil {
+		return err
 	}
 
 	sshClient := createSSHClient()
@@ -527,6 +531,24 @@ func getSecretsFilePath() string {
 	// Default path
 	configDir := getConfigDir()
 	return filepath.Join(filepath.Dir(configDir), ".azud", "secrets")
+}
+
+// secretTargetHosts returns the hosts that receive the runtime secrets file.
+// Only workload hosts (servers, accessories, and cron) consume it, so the
+// remote builder and SSH bastion never receive application secrets unless
+// they also run a workload. An explicit host must be one of those hosts.
+func secretTargetHosts(cfg *config.Config, host string) ([]string, error) {
+	workloadHosts := cfg.GetWorkloadHosts()
+	if host == "" {
+		return workloadHosts, nil
+	}
+	if containsString(workloadHosts, host) {
+		return []string{host}, nil
+	}
+	if containsString(cfg.GetAllSSHHosts(), host) {
+		return nil, fmt.Errorf("host %s does not run application containers; secrets are only delivered to server, accessory, and cron hosts", host)
+	}
+	return nil, fmt.Errorf("host %s is not configured", host)
 }
 
 func isFileSecretsProvider() bool {

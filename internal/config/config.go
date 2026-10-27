@@ -945,6 +945,27 @@ func (c *Config) GetAllCronHosts() []string {
 	return hosts
 }
 
+// GetWorkloadHosts returns all unique hosts that run application, accessory,
+// or cron containers. These are the only hosts that consume the remote runtime
+// secrets file; the remote builder and SSH bastion are not included unless
+// they also run a workload.
+func (c *Config) GetWorkloadHosts() []string {
+	hostSet := make(map[string]bool)
+	var hosts []string
+
+	for _, group := range [][]string{c.GetAllHosts(), c.GetAccessoryHosts(), c.GetAllCronHosts()} {
+		for _, host := range group {
+			if host == "" || hostSet[host] {
+				continue
+			}
+			hostSet[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+
+	return hosts
+}
+
 // GetAllSSHHosts returns all unique hosts that Azud connects to via SSH.
 func (c *Config) GetAllSSHHosts() []string {
 	hostSet := make(map[string]bool)
@@ -958,13 +979,7 @@ func (c *Config) GetAllSSHHosts() []string {
 		hosts = append(hosts, host)
 	}
 
-	for _, host := range c.GetAllHosts() {
-		addHost(host)
-	}
-	for _, host := range c.GetAccessoryHosts() {
-		addHost(host)
-	}
-	for _, host := range c.GetAllCronHosts() {
+	for _, host := range c.GetWorkloadHosts() {
 		addHost(host)
 	}
 	if c.Builder.Remote.Host != "" {

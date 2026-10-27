@@ -59,7 +59,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	log.Header("Setup / %s", cfg.Service)
 
-	hosts := setupRuntimeHosts()
+	hosts := cfg.GetWorkloadHosts()
 	if len(hosts) == 0 {
 		return fmt.Errorf("no hosts configured")
 	}
@@ -234,20 +234,6 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func setupRuntimeHosts() []string {
-	seen := make(map[string]bool)
-	var hosts []string
-	for _, group := range [][]string{cfg.GetAllHosts(), cfg.GetAccessoryHosts(), cfg.GetAllCronHosts()} {
-		for _, host := range group {
-			if host != "" && !seen[host] {
-				seen[host] = true
-				hosts = append(hosts, host)
-			}
-		}
-	}
-	return hosts
 }
 
 func setupProxyEnabled(appConfig *config.Config, skipProxy bool) bool {
