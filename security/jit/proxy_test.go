@@ -677,30 +677,42 @@ accessories:
 }
 
 // ---------------------------------------------------------------------------
-// Hardening: the proxy container is not dropped to a non-root user and does
-// not use the same isolation flags Azud applies to its helper container.
+// Control: the proxy container drops every capability except
+// NET_BIND_SERVICE, cannot gain privileges, and has a read-only root
+// filesystem, matching the isolation of Azud's helper containers. It keeps
+// the image's root user on purpose (root-owned certificate volumes and
+// host-network port 80/443 binds), so --user is not required.
 // ---------------------------------------------------------------------------
 
-func TestFinding_ProxyContainerLacksHardeningFlags(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", proxyBootHandler())
-	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+func TestControl_ProxyContainerHardeningFlags(t *testing.T) {
+	for _, topology := range proxyTopologies() {
+		t.Run(topology.name, func(t *testing.T) {
+			fake := startFakeSSH(t, "127.0.0.1:0", proxyBootHandler())
+			dir := newWorkdir(t)
+			configPath := writeConfig(t, dir, topology.config(fake.port(), clientKeyPath(t)))
 
-	res := runAzud(t, dir, nil, "-c", configPath, "proxy", "boot")
-	if res.Exit != 0 {
-		t.Fatalf("proxy boot failed: %s", res)
+			res := runAzud(t, dir, nil, "-c", configPath, "proxy", "boot")
+			if res.Exit != 0 {
+				t.Fatalf("proxy boot failed: %s", res)
+			}
+			boot := fake.waitCommand(t, "--name azud-proxy", 5*time.Second)
+			for _, flag := range []string{
+				"--read-only",
+				"--cap-drop all --cap-add NET_BIND_SERVICE",
+				"--security-opt no-new-privileges",
+				"--tmpfs '/run/azud-admin:",
+				"-v caddy_data:/data",
+				"-v caddy_config:/config",
+			} {
+				if !strings.Contains(boot.Command, flag) {
+					t.Fatalf("proxy boot command missing %q:\n%s", flag, boot.Command)
+				}
+			}
+			if strings.Count(boot.Command, "--cap-add") != 1 || strings.Contains(boot.Command, "--privileged") {
+				t.Fatalf("proxy boot command grants extra privileges:\n%s", boot.Command)
+			}
+		})
 	}
-	boot := fake.waitCommand(t, "--name azud-proxy", 5*time.Second)
-	var missing []string
-	for _, flag := range []string{"--cap-drop", "--security-opt", "--read-only", "--user"} {
-		if !strings.Contains(boot.Command, flag) {
-			missing = append(missing, flag)
-		}
-	}
-	if len(missing) == 0 {
-		t.Fatalf("proxy container now uses hardening flags; this finding may be fixed:\n%s", boot.Command)
-	}
-	t.Logf("HARDENING: proxy container lacks %s; it runs the upstream Caddy image as its default user and has the full default capability set", strings.Join(missing, ", "))
 }
 
 // ---------------------------------------------------------------------------

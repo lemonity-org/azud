@@ -922,6 +922,17 @@ func NewProxyContainerConfig(httpPort, httpsPort int, hostNetwork bool) *podman.
 		// mount namespace: no host path, bind mount or other container can
 		// reach it, and it is recreated empty on every start.
 		Tmpfs: []string{CaddyAdminTmpfs},
+		// Caddy writes only to the /data and /config volumes, the admin tmpfs
+		// and Podman's default read-only tmpfs mounts (/tmp, /run, /var/tmp).
+		// NET_BIND_SERVICE is the only capability it needs: /usr/bin/caddy
+		// carries it as a file capability and exec fails without it in the
+		// bounding set, even for container root. The image's root user is
+		// kept on purpose: existing volumes hold root-owned certificates and
+		// the mixed host-network mode must bind 80/443 directly.
+		ReadOnly:        true,
+		CapDrop:         []string{"all"},
+		CapAdd:          []string{"NET_BIND_SERVICE"},
+		NoNewPrivileges: true,
 	}
 	if hostNetwork {
 		containerConfig.Network = "host"

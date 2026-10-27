@@ -200,6 +200,27 @@ func TestBuildRunCommand_WithTypedRuntimeHardening(t *testing.T) {
 	}
 }
 
+func TestBuildRunCommand_RendersCapAddAfterCapDrop(t *testing.T) {
+	cfg := &ContainerConfig{
+		Image:   "caddy:latest",
+		CapDrop: []string{"all"},
+		CapAdd:  []string{"NET_BIND_SERVICE", "X;id"},
+	}
+
+	cmd := cfg.BuildRunCommand()
+	if !strings.Contains(cmd, "--cap-drop all --cap-add NET_BIND_SERVICE --cap-add 'X;id'") {
+		t.Fatalf("expected quoted --cap-add after --cap-drop in %q", cmd)
+	}
+}
+
+func TestValidateOptionsStillRejectsCapAdd(t *testing.T) {
+	for _, option := range []string{"--cap-add", "--cap-add=SYS_ADMIN", "--CAP-ADD=ALL"} {
+		if err := ValidateOptions([]string{option}); err == nil {
+			t.Fatalf("option %q was accepted", option)
+		}
+	}
+}
+
 func TestBuildCreateCommandOmitsRunOnlyFlags(t *testing.T) {
 	cfg := &ContainerConfig{
 		Name:    "candidate",

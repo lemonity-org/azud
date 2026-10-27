@@ -183,8 +183,18 @@ func TestBuildProxyQuadletUnit_ServesAdminOnlyOnPrivateSocket(t *testing.T) {
 			if !strings.Contains(file, `Environment="CADDY_ADMIN=unix//run/azud-admin/admin.sock|0600"`) {
 				t.Fatalf("unit does not set the socket listener:\n%s", file)
 			}
-			if !reflect.DeepEqual(unit.PodmanArgs, []string{"--tmpfs=" + proxy.CaddyAdminTmpfs}) {
-				t.Fatalf("admin socket tmpfs missing: %v", unit.PodmanArgs)
+			wantArgs := []string{
+				"--read-only",
+				"--cap-drop=all",
+				"--cap-add=NET_BIND_SERVICE",
+				"--security-opt=no-new-privileges",
+				"--tmpfs=" + proxy.CaddyAdminTmpfs,
+			}
+			if !reflect.DeepEqual(unit.PodmanArgs, wantArgs) {
+				t.Fatalf("proxy PodmanArgs = %v, want %v", unit.PodmanArgs, wantArgs)
+			}
+			if strings.Contains(file, "--user") {
+				t.Fatalf("proxy unit changes the image user:\n%s", file)
 			}
 			if unit.Label[proxy.ProxySpecLabel] != proxy.ProxySpecVersion {
 				t.Fatalf("spec label = %q", unit.Label[proxy.ProxySpecLabel])

@@ -87,6 +87,7 @@ func TestSetupIntegration(t *testing.T) {
 	}
 	assertContainerRunningWithPodman(t, client, host, "azud-proxy", proxyPodmanCommand)
 	assertCaddyAdminIsPrivate(t, client, host, proxyPodmanCommand, rootless && proxyRootful)
+	assertProxyHardened(t, client, host, proxyPodmanCommand)
 	assertContainerRunning(t, client, host, "azud-it")
 	assertContainerRunning(t, client, host, "azud-it-worker")
 	assertContainerRunning(t, client, host, "azud-it-cache")
@@ -438,6 +439,15 @@ func assertCaddyAdminIsPrivate(t *testing.T, client *ssh.Client, host, proxyPodm
 	peer := "podman run --rm --network azud --entrypoint curl " + shell.Quote(proxy.CaddyImage)
 	assertRemoteSuccess(t, client, host, peer+" -sS -m 3 -o /dev/null http://azud-proxy:80/")
 	assertRemoteSuccess(t, client, host, "! "+peer+" -fsS -m 3 http://azud-proxy:2019/config/")
+}
+
+// assertProxyHardened checks the proxy runs with a read-only root filesystem
+// and NET_BIND_SERVICE as its only capability.
+func assertProxyHardened(t *testing.T, client *ssh.Client, host, proxyPodman string) {
+	t.Helper()
+	assertRemoteContains(t, client, host,
+		proxyPodman+` container inspect azud-proxy --format '{{.HostConfig.ReadonlyRootfs}} {{json .BoundingCaps}}'`,
+		`true ["CAP_NET_BIND_SERVICE"]`)
 }
 
 func assertHTTPAvailable(t *testing.T, client *ssh.Client, host string, port int) {

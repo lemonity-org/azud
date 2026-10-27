@@ -142,6 +142,12 @@ security:
   read the proxy configuration (including custom TLS keys) or replace it.
   Azud reaches the socket only through `podman exec` over SSH. See
   `docs/TROUBLESHOOTING.md` for the operator command.
+- The Caddy proxy container runs with a read-only root filesystem,
+  `--cap-drop all --cap-add NET_BIND_SERVICE`, and
+  `--security-opt no-new-privileges`, both when booted directly and from the
+  Quadlet unit. Caddy writes only to its `caddy_data`/`caddy_config` volumes
+  and tmpfs mounts. It keeps the image's root user so existing root-owned
+  certificate volumes and host-network binds of ports 80/443 keep working.
 
 ## TLS / HTTPS
 
