@@ -553,30 +553,6 @@ func TestControl_RegistryLoginTerminatesPodmanOptions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: env pull masks a remote read failure as "no secrets".
-// ---------------------------------------------------------------------------
-
-func TestFinding_EnvPullMasksRemoteReadFailure(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
-		if strings.Contains(command, "cat ") {
-			return fakeResult{Stderr: "cat: permission denied", Exit: 1}
-		}
-		return fakeResult{}
-	})
-	dir := newWorkdir(t)
-	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
-
-	res := runAzud(t, dir, nil, "-c", configPath, "env", "pull", "--host", "127.0.0.1")
-	if res.Exit != 0 {
-		t.Fatalf("expected exit 0 despite the read failure: %s", res)
-	}
-	if !strings.Contains(res.Combined, "No secrets found") {
-		t.Fatalf("expected the misleading message; got: %s", res)
-	}
-	t.Logf("VULNERABLE (low): env pull ignores the remote cat exit status and reports 'No secrets found'")
-}
-
-// ---------------------------------------------------------------------------
 // Finding: remote output is printed without escaping terminal control bytes.
 // ---------------------------------------------------------------------------
 

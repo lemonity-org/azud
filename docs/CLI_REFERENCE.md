@@ -286,7 +286,10 @@ workloads. `--host` must name one of those workload hosts.
 
 #### `azud env pull`
 Pull secrets from a server to local `.azud/secrets`. `--host` must name a
-server, accessory, or cron host.
+server, accessory, or cron host. A missing remote secrets file exits `0` with a
+"No secrets file" message. A remote file that cannot be read (permissions,
+including a parent directory the SSH user cannot search, I/O, SSH timeout)
+exits non-zero and leaves the local file untouched.
 **Flags:** `--host` (required)
 
 #### `azud env list`

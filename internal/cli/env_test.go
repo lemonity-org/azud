@@ -2,6 +2,9 @@ package cli
 
 import (
 	"maps"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -116,6 +119,78 @@ func TestSecretTargetHosts(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Fatalf("secretTargetHosts(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnvPullReadCommandDoesNotMaskFailures(t *testing.T) {
+	cmd := envPullReadCommand("$HOME/.azud/secrets")
+	if strings.Contains(cmd, "|| echo") || strings.Contains(cmd, "2>/dev/null") {
+		t.Fatalf("read command masks failures: %q", cmd)
+	}
+	if !strings.Contains(cmd, `cat -- "$secrets_file"`) || !strings.Contains(cmd, "exit 3") {
+		t.Fatalf("read command = %q, want cat -- and the missing-file exit status", cmd)
+	}
+}
+
+func TestEnvPullReadCommandExitStatus(t *testing.T) {
+	dir := t.TempDir()
+	readable := filepath.Join(dir, "secrets")
+	if err := os.WriteFile(readable, []byte("DB_PASS=value\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	unreadable := filepath.Join(dir, "unreadable")
+	if err := os.WriteFile(unreadable, []byte("A=1\n"), 0000); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(dir, "locked")
+	if err := os.MkdirAll(filepath.Join(locked, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "secrets"), []byte("A=1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0700) })
+
+	tests := []struct {
+		name       string
+		path       string
+		wantExit   int
+		wantStdout string
+		skipRoot   bool
+	}{
+		{name: "readable", path: readable, wantExit: 0, wantStdout: "DB_PASS=value\n"},
+		{name: "missing", path: filepath.Join(dir, "missing"), wantExit: envPullMissingExitCode},
+		{name: "missing parent directories", path: filepath.Join(dir, "nope", "deeper", "secrets"), wantExit: envPullMissingExitCode},
+		{name: "dangling symlink", path: dangling, wantExit: 1},
+		{name: "unreadable", path: unreadable, wantExit: 1, skipRoot: true},
+		{name: "unsearchable parent", path: filepath.Join(locked, "secrets"), wantExit: 1, skipRoot: true},
+		{name: "unsearchable grandparent", path: filepath.Join(locked, "sub", "secrets"), wantExit: 1, skipRoot: true},
+		{name: "parent is a file", path: filepath.Join(readable, "secrets"), wantExit: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.skipRoot && os.Geteuid() == 0 {
+				t.Skip("root bypasses file permissions")
+			}
+			out, err := exec.Command("sh", "-c", envPullReadCommand(tt.path)).Output()
+			exit := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exit = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if exit != tt.wantExit || string(out) != tt.wantStdout {
+				t.Fatalf("exit = %d, stdout = %q; want exit %d, stdout %q", exit, out, tt.wantExit, tt.wantStdout)
 			}
 		})
 	}

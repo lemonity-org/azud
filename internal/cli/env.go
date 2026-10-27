@@ -237,11 +237,22 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	log.Header("Pulling Secrets from %s", envHost)
 
-	// Read secrets from remote
-	readCmd := fmt.Sprintf("cat %s 2>/dev/null || echo ''", remotePathShellArg(remoteSecretsPath()))
-	result, err := sshClient.Execute(envHost, readCmd)
+	// Read secrets from remote. A missing file is reported with a dedicated
+	// exit status; any other failure (permissions, I/O, timeout) is an error
+	// so partial or empty output never replaces the local file.
+	result, err := sshClient.Execute(envHost, envPullReadCommand(remoteSecretsPath()))
 	if err != nil {
 		return fmt.Errorf("failed to read secrets from server: %w", err)
+	}
+	if result.Error != nil {
+		return fmt.Errorf("failed to read secrets from %s: %w", envHost, result.Error)
+	}
+	if result.ExitCode == envPullMissingExitCode {
+		log.Info("No secrets file on %s (%s)", envHost, remoteSecretsPath())
+		return nil
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to read secrets from %s (exit %d): %s", envHost, result.ExitCode, strings.TrimSpace(result.Stderr))
 	}
 
 	if strings.TrimSpace(result.Stdout) == "" {
@@ -309,6 +320,21 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	log.Success("Pulled %d secrets to %s", len(secrets), secretsPath)
 	return nil
+}
+
+// envPullMissingExitCode is the exit status envPullReadCommand uses when the
+// remote secrets file does not exist.
+const envPullMissingExitCode = 3
+
+// envPullReadCommand reads the remote secrets file, exiting with
+// envPullMissingExitCode only when the file does not exist. Read errors keep
+// cat's own non-zero status and stderr.
+//
+// test -e is also false when a parent directory cannot be searched, so the
+// file only counts as missing when its nearest existing ancestor is a
+// searchable directory; otherwise the command fails with exit status 1.
+func envPullReadCommand(path string) string {
+	return fmt.Sprintf(`secrets_file=%s; if [ ! -e "$secrets_file" ] && [ ! -L "$secrets_file" ]; then d=$secrets_file; while d=$(dirname -- "$d") && [ ! -e "$d" ] && [ ! -L "$d" ]; do :; done; if [ -d "$d" ] && [ -x "$d" ]; then exit %d; fi; printf '%%s\n' "cannot read $secrets_file: $d is not a searchable directory" >&2; exit 1; fi; cat -- "$secrets_file"`, remotePathShellArg(path), envPullMissingExitCode)
 }
 
 func runEnvList(cmd *cobra.Command, args []string) error {
