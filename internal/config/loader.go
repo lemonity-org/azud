@@ -2,9 +2,9 @@ package config
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -52,14 +52,15 @@ func (l *Loader) Load() (*Config, error) {
 	// Apply defaults
 	applyDefaults(cfg)
 
+	// Validate configuration before loading secrets, so an invalid
+	// configuration never executes secrets_command.
+	if err := Validate(cfg); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
 	// Load secrets
 	if err := l.loadSecrets(cfg); err != nil {
 		return nil, fmt.Errorf("failed to load secrets: %w", err)
-	}
-
-	// Validate configuration
-	if err := Validate(cfg); err != nil {
-		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	return cfg, nil
@@ -69,59 +70,16 @@ func (l *Loader) Load() (*Config, error) {
 // This prevents memory exhaustion from extremely large or malicious YAML input.
 const maxConfigFileSize = 1 << 20 // 1 MiB
 
-// safeExpandEnv performs environment variable expansion only for variables
-// whose names match safe patterns (uppercase letters, digits, underscores).
-// This prevents accidental leakage of sensitive variables like AWS_SECRET_KEY
-// that might match patterns in the YAML file.
-func safeExpandEnv(s string) string {
-	return os.Expand(s, func(key string) string {
-		// $HOME in deployment configuration refers to the remote SSH user's
-		// home, not the workstation running Azud.
-		if key == "HOME" {
-			return "$HOME"
-		}
-		// Only expand variables that look like intentional config references:
-		// uppercase letters, digits, and underscores (e.g., APP_NAME, PORT).
-		for _, c := range key {
-			if (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
-				return fmt.Sprintf("${%s}", key) // leave unexpanded
-			}
-		}
-		return os.Getenv(key)
-	})
-}
-
 // loadFile reads and parses a single YAML file
 func (l *Loader) loadFile(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(data) > maxConfigFileSize {
-		return nil, fmt.Errorf("config file exceeds maximum size (%d bytes)", maxConfigFileSize)
-	}
-
-	// Expand only safe environment variables
-	data = []byte(safeExpandEnv(string(data)))
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-	if err := validateConfigSchema(&node); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-
-	var cfg Config
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-
-	return &cfg, nil
+	cfg, _, err := l.loadFileWithNode(path)
+	return cfg, err
 }
 
+// loadFileWithNode reads and parses a single YAML file and also returns the
+// parsed document, which records the keys the file sets. Environment
+// references are expanded inside scalar values after parsing, so they can
+// never change the document's structure.
 func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -132,19 +90,28 @@ func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 		return nil, nil, fmt.Errorf("config file exceeds maximum size (%d bytes)", maxConfigFileSize)
 	}
 
-	data = []byte(safeExpandEnv(string(data)))
+	protected, restore, err := protectEnvReferences(data)
+	if err != nil {
+		return nil, nil, err
+	}
 	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse YAML nodes: %w", err)
+	if err := yaml.Unmarshal(protected, &node); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+	if node.Kind == 0 {
+		return nil, nil, fmt.Errorf("failed to parse YAML: %w", io.EOF)
+	}
+	if err := expandEnvInNode(&node, restore); err != nil {
+		return nil, nil, fmt.Errorf("failed to expand environment variables: %w", err)
 	}
 	if err := validateConfigSchema(&node); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
+	// Node.Decode rejects duplicate mapping keys; unknown keys were rejected
+	// by validateConfigSchema above.
 	var cfg Config
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := node.Decode(&cfg); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 

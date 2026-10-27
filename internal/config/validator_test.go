@@ -164,15 +164,6 @@ func TestValidateAllowsDistinctInfrastructureSecrets(t *testing.T) {
 	}
 }
 
-func TestSafeExpandEnvPreservesRemoteHome(t *testing.T) {
-	t.Setenv("HOME", "/local/home")
-	t.Setenv("AZUD_TEST_VALUE", "expanded")
-	got := safeExpandEnv(`path: $HOME/.azud/secrets value: ${AZUD_TEST_VALUE}`)
-	if got != `path: $HOME/.azud/secrets value: expanded` {
-		t.Fatalf("safeExpandEnv = %q", got)
-	}
-}
-
 func TestValidate_ServiceName(t *testing.T) {
 	validBase := func(service string) *Config {
 		return &Config{

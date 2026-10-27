@@ -57,6 +57,21 @@ Practical security recommendations for Azud deployments.
   Certificate and key references must be paired, present, non-empty, parseable,
   and matching; proxy startup fails rather than falling back when they are not.
 
+## Configuration Trust
+
+- Treat `config/deploy.yml`, destination files, hooks, and the environment
+  Azud runs in as trusted input, like a Makefile. Loading the configuration
+  can run `secrets_command` on your machine, so do not run Azud commands in a
+  repository you do not trust.
+- Environment references in the config are expanded only inside values: an
+  environment value cannot add keys, list items, or comments, and multi-line
+  values are rejected. See "Environment Variable References" in
+  `docs/CONFIG_REFERENCE.md`.
+- Fields that a shell runs (`secrets_command`, cron commands, `cmd` values
+  that use shell syntax) still receive expanded values as shell code. If a
+  variable can carry less-trusted text, such as CI metadata, write `"$$NAME"`
+  so the shell reads the variable itself.
+
 ## Rootless Containers
 
 Podman supports rootless mode. Use it where possible for a smaller blast radius.

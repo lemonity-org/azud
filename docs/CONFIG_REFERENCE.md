@@ -214,6 +214,53 @@ env:
     - DATABASE_URL
 ```
 
+## Environment Variable References
+
+Configuration values can read the environment of the machine running Azud:
+
+```yaml
+image: ${IMAGE}
+servers:
+  web:
+    hosts: [${WEB_HOST_1}, ${WEB_HOST_2}]
+proxy:
+  app_port: ${APP_PORT}
+```
+
+Azud parses the YAML first and then substitutes references inside values.
+The rules are:
+
+- Only names made of uppercase letters, digits, and underscores are expanded
+  (`$NAME` or `${NAME}`). Other forms, such as `${lower}` or `${NAME:-default}`,
+  are left as written. An unbraced name that is not expanded, such as `$name`,
+  is rewritten as `${name}`. An unset variable expands to an empty string.
+- `$HOME` and `${HOME}` are never expanded locally. They stay as `$HOME` so
+  they refer to the remote SSH user's home directory.
+- `$$` writes a literal `$`. Use it for any dollar sign that must reach a value
+  unchanged, such as a registry username (`username: robot$$ci` for
+  `robot$ci`, or `$$oauthtoken`). Use `$$NAME` when a shell that runs later
+  should read `NAME` from its own environment (see below).
+- A substituted value is always a single string. It cannot add keys, list
+  items, or comments, so `hosts: [${HOSTS}]` with `HOSTS="a, b"` is one invalid
+  host, not two. List each host as its own reference. Inside quotes the value
+  is taken literally; in an unquoted value it is read as a number, boolean, or
+  string just as if it had been typed there, so `app_port: ${APP_PORT}` works.
+- Values containing a newline or other control character (tab is allowed), or
+  longer than 64 KiB, are rejected with an error that names the variable but
+  not its value.
+- References in mapping keys are rejected, and references in comments are
+  ignored.
+
+The same rules apply to destination files such as `config/deploy.staging.yml`.
+
+Expansion happens before any shell sees the value. In fields that a shell
+runs, such as `secrets_command`, `cron.*.command`, and `cmd` values that use
+shell syntax, an expanded value is shell code. Prefer `"$$NAME"` (with the
+double quotes) in those fields so the shell reads the variable itself instead
+of Azud pasting it in. `secrets_command` runs locally and sees Azud's
+environment; cron commands and `cmd` run in the container and see the
+container's environment.
+
 ## Builder
 
 ```yaml

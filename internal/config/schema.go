@@ -17,8 +17,9 @@ var yamlFieldAliases = map[reflect.Type]map[string]string{
 }
 
 // validateConfigSchema reports unknown YAML keys with their complete config
-// path before decoding. yaml.Decoder.KnownFields remains enabled as a second
-// line of defense, while this pass supplies the actionable path and typo hint.
+// path before decoding. The configuration is decoded from the parsed node,
+// which cannot enable yaml.Decoder.KnownFields, so this pass is the check that
+// rejects unknown keys; it also supplies the actionable path and typo hint.
 func validateConfigSchema(document *yaml.Node) error {
 	if document == nil || len(document.Content) == 0 {
 		return nil
