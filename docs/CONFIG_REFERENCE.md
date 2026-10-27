@@ -391,6 +391,14 @@ secrets_command: ./bin/print-secrets
 secrets_remote_path: "~/.azud/secrets"
 ```
 
+With `secrets_provider: command`, Azud runs `secrets_command` locally with
+`sh -c` and reads `KEY=VALUE` lines from its stdout only. stderr is shown as
+the command writes it and is never parsed as secrets, so keep secret values
+off stderr (for example, avoid `set -x`). If the command fails, Azud reports
+only its exit status, never its output. The command must finish within 30
+seconds, its stdout is limited to 1 MiB, and a background process that keeps
+stdout open after the command exits is an error.
+
 `azud env push` excludes `registry.password`, `proxy.ssl_certificate`, and
 `proxy.ssl_private_key` references from the remote runtime env file. Azud uses
 those values locally for registry login or sends custom TLS material directly

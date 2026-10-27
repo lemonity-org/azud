@@ -133,11 +133,11 @@ proxy:
 }
 
 // ---------------------------------------------------------------------------
-// Finding: a failing secrets_provider=command leaks its output, which commonly
-// contains the secrets it was printing.
+// Control: a failing secrets_provider=command never echoes its stdout, which
+// commonly contains the secrets it was printing. stderr is passed through.
 // ---------------------------------------------------------------------------
 
-func TestFinding_SecretsCommandOutputLeaksOnFailure(t *testing.T) {
+func TestControl_SecretsCommandFailureDoesNotLeakStdout(t *testing.T) {
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, `service: shop
 image: example/shop:v1
@@ -147,16 +147,23 @@ servers:
 secrets_provider: command
 secrets_command: |
   printf 'DB_PASS=hunter2\n'
+  echo 'vault: permission denied' >&2
   exit 1
 `)
-	res := runAzud(t, dir, nil, "-c", configPath, "config")
+	// `env list` loads secrets; `config` deliberately does not.
+	res := runAzud(t, dir, nil, "-c", configPath, "env", "list")
 	if res.Exit == 0 {
 		t.Fatalf("expected failure from secrets_command: %s", res)
 	}
-	if !strings.Contains(res.Combined, "hunter2") {
-		t.Fatalf("expected secret value to be echoed in the error, got: %s", res)
+	if !strings.Contains(res.Combined, "secrets_command failed") {
+		t.Fatalf("expected a secrets_command error: %s", res)
 	}
-	t.Logf("VULNERABLE: secrets_command output (including secret values) is embedded in the error message")
+	if strings.Contains(res.Combined, "hunter2") {
+		t.Fatalf("secret value from stdout was echoed: %s", res)
+	}
+	if !strings.Contains(res.Combined, "vault: permission denied") {
+		t.Fatalf("expected stderr diagnostics to be passed through: %s", res)
+	}
 }
 
 // ---------------------------------------------------------------------------
