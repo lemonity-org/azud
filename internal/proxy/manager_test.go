@@ -61,6 +61,36 @@ func TestProxyContainerConfigServesAdminOnlyOnPrivateSocket(t *testing.T) {
 	}
 }
 
+func TestProxyContainerConfigIsHardened(t *testing.T) {
+	for _, hostNetwork := range []bool{false, true} {
+		cfg := NewProxyContainerConfig(80, 443, hostNetwork)
+		if !cfg.ReadOnly || !cfg.NoNewPrivileges ||
+			!slices.Equal(cfg.CapDrop, []string{"all"}) ||
+			!slices.Equal(cfg.CapAdd, []string{"NET_BIND_SERVICE"}) {
+			t.Fatalf("hostNetwork=%t: proxy is not hardened: %#v", hostNetwork, cfg)
+		}
+		// Changing the user would strand root-owned certificates in existing
+		// volumes; --read-only depends on both volumes for Caddy's state.
+		if cfg.User != "" {
+			t.Fatalf("hostNetwork=%t: proxy user = %q, want the image default", hostNetwork, cfg.User)
+		}
+		if !slices.Equal(cfg.Volumes, []string{"caddy_data:/data", "caddy_config:/config"}) {
+			t.Fatalf("hostNetwork=%t: volumes = %v", hostNetwork, cfg.Volumes)
+		}
+		command := cfg.BuildRunCommand()
+		for _, want := range []string{
+			"--read-only",
+			"--cap-drop all --cap-add NET_BIND_SERVICE",
+			"--security-opt no-new-privileges",
+			"--tmpfs '" + CaddyAdminTmpfs + "'",
+		} {
+			if !strings.Contains(command, want) {
+				t.Fatalf("hostNetwork=%t: run command missing %q: %s", hostNetwork, want, command)
+			}
+		}
+	}
+}
+
 func TestProxyContainerOutdatedReasons(t *testing.T) {
 	current := func() *proxyContainer {
 		return &proxyContainer{

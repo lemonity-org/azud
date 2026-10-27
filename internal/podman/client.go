@@ -112,6 +112,10 @@ type ContainerConfig struct {
 	User            string
 	ReadOnly        bool
 	CapDrop         []string
+	// CapAdd is for containers Azud defines itself, such as the proxy. It is
+	// never populated from user configuration, and Options still rejects
+	// --cap-add through deniedContainerOptions.
+	CapAdd          []string
 	NoNewPrivileges bool
 	Tmpfs           []string
 	NoHealthcheck   bool
@@ -214,6 +218,9 @@ func (c *ContainerConfig) buildContainerCommand(subcommand string) string {
 	}
 	for _, capability := range c.CapDrop {
 		args = append(args, "--cap-drop", shell.Quote(capability))
+	}
+	for _, capability := range c.CapAdd {
+		args = append(args, "--cap-add", shell.Quote(capability))
 	}
 	if c.NoNewPrivileges {
 		args = append(args, "--security-opt", "no-new-privileges")

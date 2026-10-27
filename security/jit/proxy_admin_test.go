@@ -551,7 +551,7 @@ func TestControl_SystemdEnableMigratesProxyToPrivateSocket(t *testing.T) {
 			unit := records[steps[0]].Command
 			for _, want := range []string{
 				`Environment="CADDY_ADMIN=unix//run/azud-admin/admin.sock|0600"`,
-				"PodmanArgs=--tmpfs=/run/azud-admin:rw,nosuid,nodev,noexec,mode=0700,size=64k",
+				"PodmanArgs=--read-only\nPodmanArgs=--cap-drop=all\nPodmanArgs=--cap-add=NET_BIND_SERVICE\nPodmanArgs=--security-opt=no-new-privileges\nPodmanArgs=--tmpfs=/run/azud-admin:rw,nosuid,nodev,noexec,mode=0700,size=64k",
 				`Label="azud.proxy.spec=2"`,
 				"Exec=caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --resume",
 			} {

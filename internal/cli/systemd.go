@@ -404,6 +404,9 @@ func proxyQuadletPodmanArgs(containerCfg *podman.ContainerConfig) []string {
 	for _, capability := range containerCfg.CapDrop {
 		args = append(args, "--cap-drop="+capability)
 	}
+	for _, capability := range containerCfg.CapAdd {
+		args = append(args, "--cap-add="+capability)
+	}
 	if containerCfg.NoNewPrivileges {
 		args = append(args, "--security-opt=no-new-privileges")
 	}

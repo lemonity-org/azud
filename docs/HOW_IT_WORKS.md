@@ -47,6 +47,11 @@ restores, persists, or resumes from Caddy's autosave has its `admin` object
 replaced with that socket listener; other admin settings such as `remote` or
 `config.load` are removed with a warning.
 
+The proxy container is hardened like Azud's helper containers: read-only root
+filesystem, every capability dropped except `NET_BIND_SERVICE` (the Caddy
+binary needs it to start), and `no-new-privileges`. Caddy's state lives in the
+`caddy_data` and `caddy_config` volumes.
+
 Azud labels the proxy container with `azud.proxy.spec`. `azud proxy boot`,
 `azud proxy reboot`, `azud deploy` and canary deploys recreate a proxy created
 by an older release once: stop, normalize the autosave, rename the old
