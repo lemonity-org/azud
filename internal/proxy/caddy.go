@@ -403,6 +403,10 @@ func adminRequestError(result *ssh.Result) error {
 		strings.Contains(lower, "failed to connect"),
 		strings.Contains(lower, "could not connect"):
 		return fmt.Errorf("caddy admin socket %s is not accepting connections; if this proxy was created by an older Azud release, run 'azud proxy reboot': %s", CaddyAdminSocket, stderr)
+	case result.ExitCode == 28:
+		// A listener moved away from the socket leaves it unanswered rather
+		// than refused, so curl only gives up at --max-time.
+		return fmt.Errorf("caddy admin socket %s did not answer; if its listener was moved or this proxy was created by an older Azud release, run 'azud proxy reboot': %s", CaddyAdminSocket, stderr)
 	default:
 		return fmt.Errorf("API request failed: %s", result.Stderr)
 	}
