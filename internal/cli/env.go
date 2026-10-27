@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"maps"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/secretsfile"
 	"github.com/lemonity-org/azud/internal/shell"
 )
 
@@ -156,6 +158,10 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	secrets := remoteRuntimeSecrets(cfg, loadedSecrets)
+	content, err := remoteSecretsContent(secrets)
+	if err != nil {
+		return err
+	}
 
 	// Get target hosts
 	hosts, err := secretTargetHosts(cfg, envHost)
@@ -172,22 +178,6 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	log.Header("Pushing Secrets")
 	log.Info("Pushing %d secrets to %d host(s)...", len(secrets), len(hosts))
 
-	// Build the secrets content
-	var content strings.Builder
-	content.WriteString("# Azud Secrets - synced from local\n")
-	content.WriteString("# Do not edit directly, use 'azud env set' instead\n\n")
-
-	// Sort keys for consistent output
-	var keys []string
-	for k := range secrets {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
-	}
-
 	// Push to each host
 	hasErrors := false
 	remoteDir := remoteSecretsDir()
@@ -202,7 +192,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		// file. Paths are assigned as quoted data while documented home
 		// prefixes expand on the remote host.
 		writeCmd := fmt.Sprintf(`dir=%s; path=%s; tmp="${path}.tmp.$$"; umask 077 && mkdir -p "$dir" && chmod 700 "$dir" && trap 'rm -f "$tmp"' EXIT HUP INT TERM && cat > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$path" && chmod 600 "$path" && test "$(stat -c '%%a' "$path" 2>/dev/null || stat -f '%%Lp' "$path")" = 600 && trap - EXIT`, remoteDirArg, remoteSecretsArg)
-		result, err := sshClient.ExecuteWithStdin(host, writeCmd, strings.NewReader(content.String()))
+		result, err := sshClient.ExecuteWithStdin(host, writeCmd, bytes.NewReader(content))
 		if err != nil {
 			log.HostError(host, "Failed to write secrets: %v", err)
 			hasErrors = true
@@ -269,57 +259,24 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	// Write to local secrets file
 	secretsPath := getSecretsFilePath()
-
-	// Ensure directory exists
-	secretsDir := filepath.Dir(secretsPath)
-	if err := os.MkdirAll(secretsDir, 0700); err != nil {
-		return fmt.Errorf("failed to create secrets directory: %w", err)
-	}
-	if err := os.Chmod(secretsDir, 0700); err != nil {
-		return fmt.Errorf("failed to secure secrets directory: %w", err)
-	}
-
-	// Write secrets file
-	var content strings.Builder
-	content.WriteString("# Azud Secrets - pulled from server\n\n")
-
-	var keys []string
-	for k := range secrets {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
-	}
-
-	tmpFile, err := os.CreateTemp(secretsDir, ".secrets-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create secrets temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if err := tmpFile.Chmod(0600); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to secure secrets temp file: %w", err)
-	}
-	if _, err := tmpFile.WriteString(content.String()); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write secrets file: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync secrets file: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close secrets file: %w", err)
-	}
-	if err := os.Rename(tmpPath, secretsPath); err != nil {
-		return fmt.Errorf("failed to commit secrets file: %w", err)
+	if err := writeSecretsFile(log, secretsPath, "# Azud Secrets - pulled from server\n\n", secrets); err != nil {
+		return err
 	}
 
 	log.Success("Pulled %d secrets to %s", len(secrets), secretsPath)
 	return nil
+}
+
+// remoteSecretsContent renders the remote runtime env file, sorted by key. A
+// value containing CR, LF, or NUL would add or override entries in the
+// line-based file the workloads read, so it is rejected before any host is
+// contacted. Errors name the key, never the value.
+func remoteSecretsContent(secrets map[string]string) ([]byte, error) {
+	content, err := secretsfile.Format("# Azud Secrets - synced from local\n# Do not edit directly, use 'azud env set' instead\n\n", secrets)
+	if err != nil {
+		return nil, fmt.Errorf("cannot push secrets: %w", err)
+	}
+	return content, nil
 }
 
 // envPullMissingExitCode is the exit status envPullReadCommand uses when the
@@ -396,15 +353,26 @@ func runEnvEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	secretsPath := getSecretsFilePath()
+	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
 
-	// Ensure file exists
-	if _, err := os.Stat(secretsPath); os.IsNotExist(err) {
-		// Create empty secrets file
-		if err := os.MkdirAll(filepath.Dir(secretsPath), 0755); err != nil {
-			return fmt.Errorf("failed to create secrets directory: %w", err)
-		}
-		if err := os.WriteFile(secretsPath, []byte("# Azud Secrets\n\n"), 0600); err != nil {
+	// Ensure the file exists and is private before handing it to an editor.
+	info, err := os.Lstat(secretsPath)
+	switch {
+	case os.IsNotExist(err):
+		if _, err := secretsfile.WriteFile(secretsPath, []byte("# Azud Secrets\n\n")); err != nil {
 			return fmt.Errorf("failed to create secrets file: %w", err)
+		}
+	case err != nil:
+		return fmt.Errorf("failed to inspect secrets file: %w", err)
+	case info.Mode()&os.ModeSymlink != 0:
+		log.Warn("%s is a symbolic link; Azud will not create or change its target", secretsPath)
+	default:
+		tightened, err := secretsfile.Tighten(secretsPath)
+		if err != nil {
+			return fmt.Errorf("failed to secure secrets file: %w", err)
+		}
+		if tightened {
+			log.Warn("Tightened permissions on %s from %04o to 0600", secretsPath, info.Mode().Perm())
 		}
 	}
 
@@ -417,7 +385,6 @@ func runEnvEdit(cmd *cobra.Command, args []string) error {
 		editor = "vi"
 	}
 
-	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
 	log.Header("Environment / editor")
 	log.Info("File: %s", secretsPath)
 	// We cannot replace the current process here, so expose the exact command.
@@ -448,18 +415,24 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("env set requires secrets_provider=file")
 	}
 
-	output.SetVerbose(verbose)
-	log := output.DefaultLogger
+	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
 
 	key := args[0]
 	value := args[1]
+	if err := secretsfile.ValidateKey(key); err != nil {
+		return err
+	}
+	if err := secretsfile.ValidateValue(key, value); err != nil {
+		return err
+	}
 
 	secretsPath := getSecretsFilePath()
 
-	// Load existing secrets
-	secrets, _ := loadSecretsFile(secretsPath)
-	if secrets == nil {
-		secrets = make(map[string]string)
+	// Load existing secrets. A read failure must not be mistaken for an empty
+	// file, or the rewrite below would drop every other secret.
+	secrets, err := loadSecretsFile(secretsPath)
+	if err != nil {
+		return fmt.Errorf("failed to load secrets: %w", err)
 	}
 
 	// Check if key exists
@@ -471,27 +444,8 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 	// Set the value
 	secrets[key] = value
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(secretsPath), 0755); err != nil {
-		return fmt.Errorf("failed to create secrets directory: %w", err)
-	}
-
-	// Write secrets file
-	var content strings.Builder
-	content.WriteString("# Azud Secrets\n\n")
-
-	var keys []string
-	for k := range secrets {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
-	}
-
-	if err := os.WriteFile(secretsPath, []byte(content.String()), 0600); err != nil {
-		return fmt.Errorf("failed to write secrets file: %w", err)
+	if err := writeSecretsFile(log, secretsPath, "# Azud Secrets\n\n", secrets); err != nil {
+		return err
 	}
 
 	log.Success("Set %s in %s", key, secretsPath)
@@ -505,8 +459,7 @@ func runEnvDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("env delete requires secrets_provider=file")
 	}
 
-	output.SetVerbose(verbose)
-	log := output.DefaultLogger
+	log := output.NewLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), verbose)
 
 	key := args[0]
 
@@ -525,27 +478,30 @@ func runEnvDelete(cmd *cobra.Command, args []string) error {
 	// Remove the key
 	delete(secrets, key)
 
-	// Write secrets file
-	var content strings.Builder
-	content.WriteString("# Azud Secrets\n\n")
-
-	var keys []string
-	for k := range secrets {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		_, _ = fmt.Fprintf(&content, "%s=%s\n", k, secrets[k])
-	}
-
-	if err := os.WriteFile(secretsPath, []byte(content.String()), 0600); err != nil {
-		return fmt.Errorf("failed to write secrets file: %w", err)
+	if err := writeSecretsFile(log, secretsPath, "# Azud Secrets\n\n", secrets); err != nil {
+		return err
 	}
 
 	log.Success("Deleted %s from %s", key, secretsPath)
 	log.Info("Run 'azud env push' to sync to servers")
 
+	return nil
+}
+
+// writeSecretsFile renders secrets and replaces the local secrets file through
+// the hardened writer: mode 0600, no symlink following, atomic rename.
+func writeSecretsFile(log *output.Logger, path, header string, secrets map[string]string) error {
+	content, err := secretsfile.Format(header, secrets)
+	if err != nil {
+		return err
+	}
+	result, err := secretsfile.WriteFile(path, content)
+	if err != nil {
+		return err
+	}
+	if result.Tightened() {
+		log.Warn("Tightened permissions on %s from %04o to 0600", path, result.PreviousMode)
+	}
 	return nil
 }
 

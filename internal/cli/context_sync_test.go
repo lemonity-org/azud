@@ -355,6 +355,43 @@ func TestCreateContextArchiveExcludesConfiguredSecretsPath(t *testing.T) {
 	}
 }
 
+func TestCreateContextArchiveExcludesSecretsWriterTempFiles(t *testing.T) {
+	for name, ignore := range map[string]string{
+		"no ignore file":     "",
+		"negated":            "!.azud\n!conf\n!.azud/.secrets-123.tmp\n!**/.secrets-*.tmp\n",
+		"init .dockerignore": ".azud/\n.git/\n.azud/secrets\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			project := t.TempDir()
+			for name, content := range map[string]string{
+				"Dockerfile":                         "FROM scratch\n",
+				".azud/secrets":                      "DEFAULT_SECRET=1\n",
+				".azud/.secrets-123.tmp":             "DEFAULT_SECRET=1\n",
+				"services/shop/.azud/.secrets-7.tmp": "NESTED_SECRET=1\n",
+				"conf/prod.env":                      "CUSTOM_SECRET=1\n",
+				"conf/.secrets-999.tmp":              "CUSTOM_SECRET=1\n",
+				"other/.secrets-1.tmp":               "not written by Azud\n",
+			} {
+				writeTestFile(t, filepath.Join(project, filepath.FromSlash(name)), content)
+			}
+			if ignore != "" {
+				writeTestFile(t, filepath.Join(project, ".dockerignore"), ignore)
+			}
+
+			useSecretsPath(t, project, "conf/prod.env")
+			headers := archiveHeadersExcluding(t, project, readContainerIgnore(project), secretContextExclusions(project))
+			for _, leftover := range []string{".azud/.secrets-123.tmp", "services/shop/.azud/.secrets-7.tmp", "conf/.secrets-999.tmp"} {
+				if _, ok := headers[leftover]; ok {
+					t.Errorf("secrets writer temp file %s was archived", leftover)
+				}
+			}
+			if _, ok := headers["other/.secrets-1.tmp"]; !ok {
+				t.Error("a .secrets-*.tmp file outside the secrets directories was excluded")
+			}
+		})
+	}
+}
+
 func TestRemoteBuildDirCommandUsesPrivateMktemp(t *testing.T) {
 	cmd := remoteBuildDirCommand("shop")
 	for _, want := range []string{"umask 077", "mktemp -d /tmp/azud-build-shop.XXXXXXXXXX", `chmod 700 "$d"`, `test ! -L "$d"`} {
