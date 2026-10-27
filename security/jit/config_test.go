@@ -4,6 +4,7 @@ package jit
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -397,31 +398,75 @@ func firstLine(s string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Finding: init's .gitignore check is a substring test, so a comment that
-// merely mentions .azud/secrets suppresses the real ignore rule.
+// Control (JIT-17): init only treats an exact, active .gitignore rule as
+// protecting .azud/secrets. Comments, near misses and negations get the rule
+// appended, and a symlinked .gitignore is never written through.
 // ---------------------------------------------------------------------------
 
-func TestFinding_InitGitignoreSubstringCheck(t *testing.T) {
-	dir := newWorkdir(t)
-	writeFile(t, filepath.Join(dir, ".gitignore"), "# .azud/secrets are documented elsewhere\nnode_modules/\n", 0o644)
-	res := runAzud(t, dir, nil, "init")
-	if res.Exit != 0 {
-		t.Fatalf("init failed: %s", res)
+func TestControl_InitGitignoreIgnoresCommentMentions(t *testing.T) {
+	for name, existing := range map[string]string{
+		"comment":        "# .azud/secrets are documented elsewhere\nnode_modules/\n",
+		"directory only": ".azud/secrets/\n",
+		"near miss":      ".azud/secrets.bak\n",
+		"monorepo path":  "sub/.azud/secrets\n",
+		"negation":       "!.azud/secrets\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, ".gitignore"), existing, 0o644)
+			res := runAzud(t, dir, nil, "init")
+			if res.Exit != 0 {
+				t.Fatalf("init failed: %s", res)
+			}
+			body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(string(body), "\n")
+			hasExactRule := false
+			for _, line := range lines {
+				if line == ".azud/secrets" {
+					hasExactRule = true
+				}
+			}
+			if !hasExactRule {
+				t.Fatalf(".gitignore has no exact .azud/secrets rule:\n%s", body)
+			}
+			// Where git is available, confirm git itself ignores the file and
+			// the secrets writer's temporary copies without relying on the
+			// developer's global excludes.
+			if _, err := exec.LookPath("git"); err == nil {
+				out, code := runShell(t, dir, "git init -q && git -c core.excludesFile=/dev/null check-ignore -q .azud/secrets")
+				if code != 0 {
+					t.Fatalf("git does not ignore .azud/secrets (exit %d): %s\n%s", code, out, body)
+				}
+				out, code = runShell(t, dir, "git -c core.excludesFile=/dev/null check-ignore -q .azud/.secrets-123.tmp")
+				if code != 0 {
+					t.Fatalf("git does not ignore .azud/.secrets-123.tmp (exit %d): %s\n%s", code, out, body)
+				}
+			}
+		})
 	}
-	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+}
+
+func TestControl_InitRefusesSymlinkedGitignore(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	writeFile(t, victim, "ORIGINAL CONTENT\n", 0o644)
+	if err := os.Symlink(victim, filepath.Join(dir, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	res := runAzud(t, dir, nil, "init")
+	if res.Exit == 0 || !strings.Contains(res.Combined, "symbolic link") {
+		t.Fatalf("init must refuse a symlinked .gitignore: %s", res)
+	}
+	body, err := os.ReadFile(victim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hasExactRule := false
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.TrimSpace(line) == ".azud/secrets" {
-			hasExactRule = true
-		}
+	if string(body) != "ORIGINAL CONTENT\n" {
+		t.Fatalf("symlink target was modified:\n%s", body)
 	}
-	if hasExactRule {
-		t.Fatalf(".gitignore now contains an exact rule; finding may be fixed:\n%s", body)
-	}
-	t.Logf("VULNERABLE (low/medium): a comment containing '.azud/secrets' suppressed the ignore rule; generated secrets file is not ignored:\n%s", body)
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	default:
 		keepSecrets = true
 	}
+	if _, err := readIgnoreFile(".gitignore"); err != nil {
+		return fmt.Errorf("failed to protect .azud/secrets in .gitignore: %w", err)
+	}
 
 	log.Header("Initialize / configuration")
 
@@ -596,29 +599,21 @@ func createFileExclusive(path string, content []byte, perm os.FileMode) (bool, e
 }
 
 func appendToGitignore(log *output.Logger) error {
-	content, err := os.ReadFile(".gitignore")
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	if strings.Contains(string(content), ".azud/secrets") {
-		return nil
-	}
-
-	f, err := os.OpenFile(".gitignore", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	content, err := readIgnoreFile(".gitignore")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
 
-	prefix := ""
-	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
-		prefix = "\n"
+	missing := missingIgnoreLines(content, azudSecretsIgnoreRule, azudSecretsTempIgnoreRule)
+	if len(missing) == 0 {
+		return nil
 	}
-	if _, err := f.WriteString(prefix + "# Azud secrets\n.azud/secrets\n"); err != nil {
+
+	block := ignoreAppendBlock(content, "# Azud secrets", missing)
+	if err := secretsfile.AppendFile(".gitignore", []byte(block), 0644); err != nil {
 		return err
 	}
-	log.Success("Added .azud/secrets to .gitignore")
+	log.Success("Added %s to .gitignore", strings.Join(missing, ", "))
 	return nil
 }
 
