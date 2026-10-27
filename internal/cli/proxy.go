@@ -93,6 +93,7 @@ var (
 	proxyHost        string
 	proxyFollow      bool
 	proxyTail        string
+	proxyRaw         bool
 	proxyForceRemove bool
 )
 
@@ -110,6 +111,7 @@ func init() {
 	proxyLogsCmd.Flags().StringVar(&proxyHost, "host", "", "Specific host to get logs from")
 	proxyLogsCmd.Flags().BoolVarP(&proxyFollow, "follow", "f", false, "Follow log output")
 	proxyLogsCmd.Flags().StringVar(&proxyTail, "tail", "100", "Number of lines to show")
+	proxyLogsCmd.Flags().BoolVar(&proxyRaw, "raw", false, rawOutputFlagUsage)
 
 	// Status flags
 	proxyStatusCmd.Flags().StringVar(&proxyHost, "host", "", "Specific host to check")
@@ -328,7 +330,10 @@ func runProxyLogs(cmd *cobra.Command, args []string) error {
 
 	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 	if proxyFollow {
-		if err := manager.LogsStream(host, true, proxyTail, os.Stdout, os.Stderr); err != nil {
+		stdout, stderr, flush := remoteStreams(os.Stdout, os.Stderr, remoteLogStream, proxyRaw)
+		err := manager.LogsStream(host, true, proxyTail, stdout, stderr)
+		flush()
+		if err != nil {
 			return fmt.Errorf("failed to follow logs: %w", err)
 		}
 		return nil
@@ -339,10 +344,7 @@ func runProxyLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get logs: %w", err)
 	}
 
-	fmt.Print(result.Stdout)
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+	printRemoteResult(os.Stdout, os.Stderr, result, remoteLogStream, proxyRaw)
 	if result.ExitCode != 0 {
 		return fmt.Errorf("proxy logs exited with status %d", result.ExitCode)
 	}

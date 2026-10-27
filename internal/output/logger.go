@@ -69,28 +69,28 @@ func (l *Logger) SetWidth(columns int) {
 func (l *Logger) Info(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeOutRecord("INFO", Blue, fmt.Sprintf(format, args...))
+	l.writeOutRecord("INFO", Blue, recordMessage(format, args...))
 }
 
 // Success prints a successful-state record.
 func (l *Logger) Success(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeOutRecord("OK", Green, fmt.Sprintf(format, args...))
+	l.writeOutRecord("OK", Green, recordMessage(format, args...))
 }
 
 // Warn prints a warning record.
 func (l *Logger) Warn(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeOutRecord("WARN", Yellow, fmt.Sprintf(format, args...))
+	l.writeOutRecord("WARN", Yellow, recordMessage(format, args...))
 }
 
 // Error prints an error record.
 func (l *Logger) Error(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeRecord(l.err, "ERROR", Red, fmt.Sprintf(format, args...))
+	l.writeRecord(l.err, "ERROR", Red, recordMessage(format, args...))
 }
 
 // Fatal prints an error message and exits.
@@ -106,35 +106,35 @@ func (l *Logger) Debug(format string, args ...interface{}) {
 	if !l.verbose {
 		return
 	}
-	l.writeOutRecord("DEBUG", Gray, fmt.Sprintf(format, args...))
+	l.writeOutRecord("DEBUG", Gray, recordMessage(format, args...))
 }
 
 // Host prints an in-progress host record.
 func (l *Logger) Host(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeOutRecord("HOST", Blue, hostMessage(host, fmt.Sprintf(format, args...)))
+	l.writeOutRecord("HOST", Blue, hostMessage(SanitizeTerminal(host), recordMessage(format, args...)))
 }
 
 // HostSuccess prints a successful host record.
 func (l *Logger) HostSuccess(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeOutRecord("OK", Green, hostMessage(host, fmt.Sprintf(format, args...)))
+	l.writeOutRecord("OK", Green, hostMessage(SanitizeTerminal(host), recordMessage(format, args...)))
 }
 
 // HostError prints a failed host record.
 func (l *Logger) HostError(host, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeRecord(l.err, "ERROR", Red, hostMessage(host, fmt.Sprintf(format, args...)))
+	l.writeRecord(l.err, "ERROR", Red, hostMessage(SanitizeTerminal(host), recordMessage(format, args...)))
 }
 
 // Step prints a numbered operation record.
 func (l *Logger) Step(step int, total int, format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	message := fmt.Sprintf("%d/%d  %s", step, total, fmt.Sprintf(format, args...))
+	message := fmt.Sprintf("%d/%d  %s", step, total, recordMessage(format, args...))
 	l.writeOutRecord("STEP", Blue, message)
 }
 
@@ -142,11 +142,12 @@ func (l *Logger) Step(step int, total int, format string, args ...interface{}) {
 func (l *Logger) Command(command string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.writeOutRecord("CMD", Gray, command)
+	l.writeOutRecord("CMD", Gray, SanitizeTerminal(command))
 }
 
 // Output prints captured child-command output beneath the preceding record.
-// Leading whitespace and meaningful blank lines are preserved.
+// Leading whitespace and meaningful blank lines are preserved; terminal
+// control sequences are neutralized with SanitizeTerminal.
 func (l *Logger) Output(output string) {
 	if output == "" {
 		return
@@ -157,7 +158,8 @@ func (l *Logger) Output(output string) {
 	l.outStarted = true
 }
 
-// OutputError prints captured child-command diagnostics on stderr.
+// OutputError prints captured child-command diagnostics on stderr. Terminal
+// control sequences are neutralized with SanitizeTerminal.
 func (l *Logger) OutputError(output string) {
 	if output == "" {
 		return
@@ -172,7 +174,7 @@ func (l *Logger) writeOutput(writer io.Writer, output string) {
 		return
 	}
 
-	normalized := normalizeLines(output)
+	normalized := SanitizeTerminal(output)
 	normalized = strings.TrimSuffix(normalized, "\n")
 	rail := "|"
 	if supportsUnicode(writer) {
@@ -201,13 +203,15 @@ func (l *Logger) Header(format string, args ...interface{}) {
 		rule = "─"
 	}
 
-	title := fmt.Sprintf(format, args...)
+	title := recordMessage(format, args...)
 	_, _ = fmt.Fprintf(l.out, "%s%s %s\n", recordIndent, styleForWriter(l.out, Red, marker, true), title)
 	_, _ = fmt.Fprintf(l.out, "%s%s\n", recordIndent, styleForWriter(l.out, Gray, strings.Repeat(rule, l.ruleWidth()), false))
 	l.outStarted = true
 }
 
-// Print writes raw output. Use it for machine-readable command surfaces.
+// Print writes raw output. Use it for machine-readable command surfaces. It
+// does not sanitize terminal controls; callers printing untrusted text must
+// apply SanitizeTerminal themselves.
 func (l *Logger) Print(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -215,7 +219,9 @@ func (l *Logger) Print(format string, args ...interface{}) {
 	l.outStarted = true
 }
 
-// Println writes a raw line. Use it for machine-readable command surfaces.
+// Println writes a raw line. Use it for machine-readable command surfaces. It
+// does not sanitize terminal controls; callers printing untrusted text must
+// apply SanitizeTerminal themselves.
 func (l *Logger) Println(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -267,7 +273,7 @@ func (l *Logger) TrafficBar(canaryPct int, canaryLabel, stableLabel string) {
 }
 
 func (l *Logger) writeTrafficDetails(canaryPct int, canaryLabel string, stablePct int, stableLabel string) {
-	details := fmt.Sprintf("%d%% %s / %d%% %s", canaryPct, canaryLabel, stablePct, stableLabel)
+	details := recordMessage("%d%% %s / %d%% %s", canaryPct, canaryLabel, stablePct, stableLabel)
 	width := l.outputWidth()
 	if width == 0 {
 		l.writeContinuation(l.out, details)
@@ -290,14 +296,15 @@ func (l *Logger) HostPhase(host string, phases []Phase) {
 
 	parts := make([]string, 0, len(phases))
 	for _, phase := range phases {
+		name := SanitizeTerminal(phase.Name)
 		if phase.Complete {
-			parts = append(parts, styleForWriter(l.out, Green, complete, false)+" "+phase.Name)
+			parts = append(parts, styleForWriter(l.out, Green, complete, false)+" "+name)
 		} else {
-			parts = append(parts, styleForWriter(l.out, Gray, pending, false)+" "+phase.Name)
+			parts = append(parts, styleForWriter(l.out, Gray, pending, false)+" "+name)
 		}
 	}
 
-	message := host
+	message := SanitizeTerminal(host)
 	if len(parts) > 0 {
 		message += " / " + strings.Join(parts, "  ")
 	}
@@ -321,8 +328,8 @@ func (l *Logger) StatusBadge(label, status string) {
 		tone = Red
 	}
 
-	chip := styleForWriter(l.out, tone, "["+strings.ToUpper(status)+"]", true)
-	l.writeOutRecord("STATE", tone, padRight(label, 16)+" "+chip)
+	chip := styleForWriter(l.out, tone, "["+strings.ToUpper(SanitizeTerminal(status))+"]", true)
+	l.writeOutRecord("STATE", tone, padRight(SanitizeTerminal(label), 16)+" "+chip)
 }
 
 // Timer tracks and logs operation duration.
@@ -526,6 +533,13 @@ func (l *Logger) outputWidth() int {
 	return columns
 }
 
+// recordMessage formats a record message and neutralizes terminal controls.
+// Messages often embed remote data such as stderr from a failed command, so
+// records sanitize the message text while keeping Azud's own label styling.
+func recordMessage(format string, args ...interface{}) string {
+	return SanitizeTerminal(fmt.Sprintf(format, args...))
+}
+
 func hostMessage(host, message string) string {
 	if message == "" {
 		return host
@@ -596,22 +610,12 @@ func sanitizeTable(headers []string, rows [][]string) ([]string, [][]string) {
 	return cleanHeaders, cleanRows
 }
 
+// sanitizeTableCell applies the terminal policy of SanitizeTerminal and then
+// keeps each cell on one line with a stable width.
 func sanitizeTableCell(value string) string {
-	value = ansiPattern.ReplaceAllString(normalizeLines(value), "")
-	var clean strings.Builder
-	for _, character := range value {
-		switch {
-		case character == '\n':
-			clean.WriteString(`\n`)
-		case character == '\t':
-			clean.WriteString("    ")
-		case character < 0x20 || (character >= 0x7f && character <= 0x9f):
-			fmt.Fprintf(&clean, `\x%02x`, character)
-		default:
-			clean.WriteRune(character)
-		}
-	}
-	return clean.String()
+	value = SanitizeTerminal(value)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	return strings.ReplaceAll(value, "\t", "    ")
 }
 
 func sum(values []int) int {

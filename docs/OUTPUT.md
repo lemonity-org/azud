@@ -40,16 +40,42 @@ Do not scrape the human display when a machine surface exists:
 - `azud version --short` prints one unstyled version value.
 - `azud env get <key>` prints the value only.
 - `azud ssh trust --template` prints YAML only.
-- app, accessory, proxy, and cron log/exec streams remain undecorated.
+- app, accessory, proxy, and cron log/exec streams remain undecorated; see
+  [Remote output](#remote-output) for how control sequences are handled.
 - `server exec` labels captured stdout and stderr beneath the relevant host.
 - shell completion output remains undecorated.
 
 Azud-generated non-TTY records use deterministic ASCII framing without ANSI;
-UTF-8 values remain intact.
-Direct log and exec streams can still contain bytes emitted by the child
-process. Plain records are the default in GitHub Actions. The generated
-deployment workflow also sets `NO_COLOR=1` on the Azud deploy step so the
-contract is explicit.
+UTF-8 values remain intact. Plain records are the default in GitHub Actions.
+The generated deployment workflow also sets `NO_COLOR=1` on the Azud deploy
+step so the contract is explicit.
+
+## Remote output
+
+Container logs, exec output, and remote command diagnostics are untrusted: a
+compromised workload controls those bytes. Azud neutralizes terminal control
+sequences before printing them so a workload cannot write the clipboard (OSC
+52), clear the screen, move the cursor, or forge Azud records.
+
+Neutralizing means: SGR color sequences are removed; CRLF and lone CR become
+LF; newline and tab are kept; every other control byte, escape sequence, C1
+control, invalid UTF-8 byte, and Unicode bidi override is shown as visible
+text such as `\x1b]52;c;` or `\u202e`. UTF-8 text is otherwise unchanged.
+
+| Surface | Policy |
+|---|---|
+| `app logs`, `accessory logs`, `proxy logs`, `cron logs` (including `-f`) | Neutralized on every destination, including pipes and files |
+| `app exec`, `accessory exec` without `-i`/`-t` | Neutralized only when the stream is a terminal; piped or redirected output stays byte-exact for dumps and archives |
+| `app exec -i`/`-t` | Never filtered: an interactive session is full terminal access to the container |
+| `server exec` captured output and every Azud record (`INFO`, `ERROR`, ...), including errors that quote remote stderr | Always neutralized |
+
+Pass `--raw` to a log or non-interactive exec command to print remote bytes
+unchanged, for example to keep an application's own colors. `NO_COLOR` and
+`CLICOLOR` only control Azud's styling; they do not change this policy.
+
+Neutralizing control bytes does not stop plain-text output that a CI system
+interprets, such as GitHub Actions workflow commands (`::add-mask::`) printed by
+a container. Treat log output in CI as untrusted text.
 
 ## Status vocabulary
 

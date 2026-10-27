@@ -142,6 +142,16 @@ security:
 - Use Caddy automatic TLS for public domains
 - For internal-only services, consider terminating TLS at a load balancer
 
+## Untrusted Remote Output
+
+- Container logs, exec output, and remote stderr are treated as untrusted.
+  Azud neutralizes terminal control sequences in them before printing; see
+  `docs/OUTPUT.md` (Remote output).
+- `--raw` on log and exec commands disables this; use it only for output you
+  trust or that goes to a file or another program.
+- Interactive sessions (`azud app exec -i`/`-t`) are never filtered: they give
+  the container full control of your terminal by design.
+
 ## Related docs
 
 - `docs/TROUBLESHOOTING.md`

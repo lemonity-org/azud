@@ -91,6 +91,7 @@ var (
 	appTail        string
 	appInteractive bool
 	appTTY         bool
+	appRaw         bool
 )
 
 func init() {
@@ -99,12 +100,14 @@ func init() {
 	appLogsCmd.Flags().StringVar(&appRole, "role", "", "Specific role")
 	appLogsCmd.Flags().BoolVarP(&appFollow, "follow", "f", false, "Follow log output")
 	appLogsCmd.Flags().StringVar(&appTail, "tail", "100", "Number of lines")
+	appLogsCmd.Flags().BoolVar(&appRaw, "raw", false, rawOutputFlagUsage)
 
 	// Exec flags
 	appExecCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
 	appExecCmd.Flags().StringVar(&appRole, "role", "", "Specific role (default: web)")
 	appExecCmd.Flags().BoolVarP(&appInteractive, "interactive", "i", false, "Keep STDIN open")
 	appExecCmd.Flags().BoolVarP(&appTTY, "tty", "t", false, "Allocate a pseudo-TTY")
+	appExecCmd.Flags().BoolVar(&appRaw, "raw", false, rawOutputFlagUsage)
 
 	// Start/Stop/Restart flags
 	appStartCmd.Flags().StringVar(&appHost, "host", "", "Specific host")
@@ -160,7 +163,10 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	if appFollow {
-		if err := containerManager.LogsStream(host, logsConfig, os.Stdout, os.Stderr); err != nil {
+		stdout, stderr, flush := remoteStreams(os.Stdout, os.Stderr, remoteLogStream, appRaw)
+		err := containerManager.LogsStream(host, logsConfig, stdout, stderr)
+		flush()
+		if err != nil {
 			return fmt.Errorf("failed to follow logs: %w", err)
 		}
 		return nil
@@ -170,10 +176,7 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get logs: %w", err)
 	}
 
-	fmt.Print(result.Stdout)
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+	printRemoteResult(os.Stdout, os.Stderr, result, remoteLogStream, appRaw)
 	if result.ExitCode != 0 {
 		return fmt.Errorf("logs exited with code %d", result.ExitCode)
 	}
@@ -219,10 +222,7 @@ func runAppExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("exec failed: %w", err)
 	}
 
-	fmt.Print(result.Stdout)
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+	printRemoteResult(os.Stdout, os.Stderr, result, remoteExecStream, appRaw)
 
 	if result.ExitCode != 0 {
 		return fmt.Errorf("command exited with code %d", result.ExitCode)
@@ -445,6 +445,8 @@ var (
 func init() {
 	accessoryLogsCmd.Flags().BoolVarP(&appFollow, "follow", "f", false, "Follow logs")
 	accessoryLogsCmd.Flags().StringVar(&appTail, "tail", "100", "Number of lines")
+	accessoryLogsCmd.Flags().BoolVar(&appRaw, "raw", false, rawOutputFlagUsage)
+	accessoryExecCmd.Flags().BoolVar(&appRaw, "raw", false, rawOutputFlagUsage)
 	accessoryBootCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
 	accessoryStopCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
 	accessoryLogsCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
@@ -619,7 +621,10 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 		Tail:      appTail,
 	}
 	if appFollow {
-		if err := containerManager.LogsStream(host, logsConfig, os.Stdout, os.Stderr); err != nil {
+		stdout, stderr, flush := remoteStreams(os.Stdout, os.Stderr, remoteLogStream, appRaw)
+		err := containerManager.LogsStream(host, logsConfig, stdout, stderr)
+		flush()
+		if err != nil {
 			return fmt.Errorf("failed to follow accessory logs: %w", err)
 		}
 		return nil
@@ -630,10 +635,7 @@ func runAccessoryLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get logs: %w", err)
 	}
 
-	fmt.Print(result.Stdout)
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+	printRemoteResult(os.Stdout, os.Stderr, result, remoteLogStream, appRaw)
 	if result.ExitCode != 0 {
 		return fmt.Errorf("accessory logs exited with status %d", result.ExitCode)
 	}
@@ -693,10 +695,7 @@ func runAccessoryExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("exec failed: %w", err)
 	}
 
-	fmt.Print(result.Stdout)
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+	printRemoteResult(os.Stdout, os.Stderr, result, remoteExecStream, appRaw)
 	if result.ExitCode != 0 {
 		return fmt.Errorf("accessory exec exited with status %d", result.ExitCode)
 	}

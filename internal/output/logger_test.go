@@ -357,3 +357,49 @@ func TestPlainSurfaceContainsNoANSIOrUnicodeStructure(t *testing.T) {
 		}
 	}
 }
+
+const terminalPayload = "\x1b]52;c;ZXZpbA==\x07\x1b[2J\x1b[31mFORGED\x1b[0m"
+
+func TestRecordsNeutralizeControlSequences(t *testing.T) {
+	usePlainProfile(t)
+	logger, out, errOut := newTestLogger(true)
+
+	logger.Info("info %s", terminalPayload)
+	logger.Warn("warn %s", terminalPayload)
+	logger.Debug("debug %s", terminalPayload)
+	logger.Host("app\x1b[2J", "host %s", terminalPayload)
+	logger.Command("podman " + terminalPayload)
+	logger.HostPhase("app\x1b[2J", []Phase{{Name: "Pull" + terminalPayload}})
+	logger.StatusBadge("web"+terminalPayload, "running"+terminalPayload)
+	logger.Output(terminalPayload + "\n")
+	logger.Error("failed to stop: %s", terminalPayload)
+	logger.HostError("app-02", "exit: %s", terminalPayload)
+	logger.OutputError(terminalPayload + "\n")
+
+	combined := out.String() + errOut.String()
+	if strings.Contains(combined, "\x1b") || strings.Contains(combined, "\x07") {
+		t.Fatalf("records retained terminal controls: %q", combined)
+	}
+	if !strings.Contains(errOut.String(), `ERROR  failed to stop: \x1b]52;c;ZXZpbA==\x07\x1b[2JFORGED`) {
+		t.Fatalf("error record did not visibly escape the payload: %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), `| \x1b]52;c;ZXZpbA==\x07\x1b[2JFORGED`) {
+		t.Fatalf("captured output did not visibly escape the payload: %q", out.String())
+	}
+}
+
+func TestRecordSanitizationKeepsAzudStyling(t *testing.T) {
+	SetProfile(ProfileBasic)
+	t.Cleanup(ResetProfile)
+	logger, out, _ := newTestLogger()
+
+	logger.Info("remote %s", terminalPayload)
+
+	got := out.String()
+	if !strings.HasPrefix(got, "  \x1b[1;34mINFO \x1b[0m") {
+		t.Fatalf("record label lost Azud styling: %q", got)
+	}
+	if strings.Count(got, "\x1b") != 2 {
+		t.Fatalf("record message retained terminal controls: %q", got)
+	}
+}

@@ -128,7 +128,8 @@ func runHistoryShow(cmd *cobra.Command, args []string) error {
 	log.Println("Rolled Back: %t", record.RolledBack || record.Status == deploy.StatusRolledBack)
 
 	if record.Error != "" {
-		log.Println("Error: %s", record.Error)
+		// The stored error can embed remote stderr.
+		log.Println("Error: %s", output.SanitizeTerminal(record.Error))
 	}
 
 	if len(record.Metadata) > 0 {
