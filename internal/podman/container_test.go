@@ -1,6 +1,8 @@
 package podman
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -65,6 +67,53 @@ func TestParseHostPort(t *testing.T) {
 			}
 			if port != tt.wantPort {
 				t.Fatalf("unexpected port: want %d got %d", tt.wantPort, port)
+			}
+		})
+	}
+}
+
+func TestIsNoSuchContainer(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "podman inspect",
+			err:  errors.New(`failed to inspect container: Error: no container with name or ID "azud-proxy" found: no such container`),
+			want: true,
+		},
+		{
+			name: "podman stop",
+			err:  errors.New(`failed to stop container: Error: no container with name or ID "shop-cron-backup" found: no such container`),
+			want: true,
+		},
+		{
+			name: "docker",
+			err:  errors.New("Error response from daemon: No such container: azud-proxy"),
+			want: true,
+		},
+		{
+			name: "wrapped",
+			err:  fmt.Errorf("proxy: %w", errors.New("NO SUCH CONTAINER")),
+			want: true,
+		},
+		{
+			name: "sudo failure",
+			err:  errors.New("failed to inspect container: sudo: a password is required"),
+		},
+		{
+			name: "stop timeout",
+			err:  errors.New("failed to stop container: simulated stop failure"),
+		},
+		{
+			name: "nil",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsNoSuchContainer(tt.err); got != tt.want {
+				t.Fatalf("IsNoSuchContainer(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

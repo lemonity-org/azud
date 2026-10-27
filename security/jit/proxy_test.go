@@ -188,30 +188,95 @@ ssh:
 }
 
 // ---------------------------------------------------------------------------
-// Finding: proxy stop is fail-open.
+// Control: proxy stop fails closed, is idempotent for a missing container, and
+// refuses to fight systemd over a Quadlet-managed proxy.
 // ---------------------------------------------------------------------------
 
-func TestFinding_ProxyStopReportsSuccessOnFailure(t *testing.T) {
-	fake := startFakeSSH(t, "127.0.0.1:0", func(command string, stdin io.Reader) fakeResult {
-		if strings.Contains(command, "podman stop") {
-			return fakeResult{Stderr: "simulated stop failure", Exit: 1}
+const runningProxyInspect = `[{"Id":"abc","Config":{"Labels":{"azud.managed":"true","azud.type":"proxy"}},"State":{"Running":true}}]`
+
+func proxyStopHandler(inspect, stop fakeResult) fakeHandler {
+	return func(command string, stdin io.Reader) fakeResult {
+		switch {
+		case strings.Contains(command, "container inspect"):
+			return inspect
+		case strings.Contains(command, "podman stop"):
+			return stop
+		default:
+			return fakeResult{}
 		}
-		return fakeResult{}
-	})
+	}
+}
+
+func TestControl_ProxyStopFailsClosed(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", proxyStopHandler(
+		fakeResult{Stdout: runningProxyInspect},
+		fakeResult{Stderr: "simulated stop failure", Exit: 1},
+	))
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+
+	res := runAzud(t, dir, nil, "-c", configPath, "proxy", "stop")
+	if res.Exit == 0 {
+		t.Fatalf("proxy stop exited 0 although stopping failed: %s", res)
+	}
+	if strings.Contains(res.Combined, "Proxy stopped") {
+		t.Fatalf("proxy stop printed a success line although stopping failed: %s", res)
+	}
+	for _, want := range []string{"proxy stop failed on 1 host(s)", "simulated stop failure"} {
+		if !strings.Contains(res.Combined, want) {
+			t.Fatalf("proxy stop output missing %q: %s", want, res)
+		}
+	}
+	if len(fake.commandsMatching("podman stop")) == 0 {
+		t.Fatalf("proxy stop never attempted podman stop:\n%s", commandDump(fake.snapshot()))
+	}
+}
+
+func TestControl_ProxyStopTreatsMissingContainerAsStopped(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", proxyStopHandler(
+		fakeResult{Stderr: `Error: no container with name or ID "azud-proxy" found: no such container`, Exit: 125},
+		fakeResult{Stderr: "podman stop must not run for a missing container", Exit: 1},
+	))
 	dir := newWorkdir(t)
 	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
 
 	res := runAzud(t, dir, nil, "-c", configPath, "proxy", "stop")
 	if res.Exit != 0 {
-		t.Fatalf("expected the fail-open behavior (exit 0), got: %s", res)
+		t.Fatalf("proxy stop failed for an absent proxy: %s", res)
 	}
-	if !strings.Contains(res.Combined, "Proxy stopped") {
-		t.Fatalf("expected misleading success message: %s", res)
+	for _, want := range []string{"Proxy not present", "Proxy stopped"} {
+		if !strings.Contains(res.Combined, want) {
+			t.Fatalf("proxy stop output missing %q: %s", want, res)
+		}
 	}
-	if !strings.Contains(res.Combined, "simulated stop failure") {
-		t.Fatalf("expected the underlying error to be logged: %s", res)
+	if stops := fake.commandsMatching("podman stop"); len(stops) != 0 {
+		t.Fatalf("proxy stop ran podman stop for an absent proxy:\n%s", commandDump(stops))
 	}
-	t.Logf("VULNERABLE: proxy stop exits 0 and prints 'Proxy stopped' even when every host failed")
+}
+
+func TestControl_ProxyStopRefusesSystemdManagedProxy(t *testing.T) {
+	fake := startFakeSSH(t, "127.0.0.1:0", proxyStopHandler(
+		fakeResult{Stdout: `[{"Id":"abc","Config":{"Labels":{"azud.type":"proxy","PODMAN_SYSTEMD_UNIT":"azud-proxy.service"}},"State":{"Running":true}}]`},
+		fakeResult{},
+	))
+	dir := newWorkdir(t)
+	configPath := writeConfig(t, dir, baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop"))
+
+	res := runAzud(t, dir, nil, "-c", configPath, "proxy", "stop")
+	if res.Exit == 0 {
+		t.Fatalf("proxy stop reported success for a systemd-managed proxy: %s", res)
+	}
+	if strings.Contains(res.Combined, "Proxy stopped") {
+		t.Fatalf("proxy stop printed a success line for a systemd-managed proxy: %s", res)
+	}
+	for _, want := range []string{"azud-proxy.service", "systemctl --user stop"} {
+		if !strings.Contains(res.Combined, want) {
+			t.Fatalf("proxy stop output missing %q: %s", want, res)
+		}
+	}
+	if stops := fake.commandsMatching("podman stop"); len(stops) != 0 {
+		t.Fatalf("proxy stop ran podman stop although systemd restarts the unit:\n%s", commandDump(stops))
+	}
 }
 
 // ---------------------------------------------------------------------------

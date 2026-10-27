@@ -573,7 +573,7 @@ func runAccessoryRemove(cmd *cobra.Command, args []string) error {
 	var removeErrors []string
 	for _, host := range hosts {
 		log.Host(host, "Stopping accessory %s...", name)
-		if err := containerManager.Stop(host, containerName, 30); err != nil && !strings.Contains(err.Error(), "No such container") {
+		if err := containerManager.Stop(host, containerName, 30); err != nil && !podman.IsNoSuchContainer(err) {
 			removeErrors = append(removeErrors, fmt.Sprintf("%s stop: %v", host, err))
 			continue
 		}

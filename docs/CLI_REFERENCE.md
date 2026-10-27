@@ -419,6 +419,11 @@ Start the proxy on servers.
 
 #### `azud proxy stop`
 Stop the proxy.
+Exits non-zero if the proxy cannot be stopped on any selected host. A host
+without a proxy container counts as stopped. A proxy managed by a systemd
+(Quadlet) unit is not stopped with Podman, because the unit's `Restart=always`
+would start it again; the command fails and prints the `systemctl stop` command
+to use instead.
 **Flags:** `--host`
 
 #### `azud proxy reboot`

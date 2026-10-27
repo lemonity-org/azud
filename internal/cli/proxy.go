@@ -232,11 +232,22 @@ func runProxyStop(cmd *cobra.Command, args []string) error {
 
 	manager := proxy.NewManagerWithOptions(sshClient, log, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
 
+	return stopProxyHosts(hosts, manager.Stop, log)
+}
+
+// stopProxyHosts stops the proxy on every host and reports success only when
+// all of them stopped, so scripts never mistake a partial stop for a full one.
+func stopProxyHosts(hosts []string, stop func(string) error, log *output.Logger) error {
+	var stopErrors []string
 	for _, host := range hosts {
-		if err := manager.Stop(host); err != nil {
+		if err := stop(host); err != nil {
 			log.HostError(host, "failed to stop proxy: %v", err)
+			stopErrors = append(stopErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
+	}
+	if len(stopErrors) > 0 {
+		return fmt.Errorf("proxy stop failed on %d host(s): %s", len(stopErrors), strings.Join(stopErrors, "; "))
 	}
 
 	log.Success("Proxy stopped")
