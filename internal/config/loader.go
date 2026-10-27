@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -33,21 +34,37 @@ func NewLoader(basePath, destination string) *Loader {
 
 // Load reads and parses the configuration file(s)
 func (l *Loader) Load() (*Config, error) {
+	if l.destination != "" {
+		if err := ValidateDestination(l.destination); err != nil {
+			return nil, err
+		}
+	}
+
 	// Load base configuration
 	cfg, err := l.loadFile(l.basePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config %s: %w", l.basePath, err)
 	}
 
-	// Load destination-specific configuration if specified
+	// Load destination-specific configuration if specified. A destination
+	// without an override file is allowed (it may only be used for image tags
+	// and history), but any other error reading it must not silently fall
+	// back to the base configuration.
 	if l.destination != "" {
-		destPath := l.getDestinationPath()
-		if _, err := os.Stat(destPath); err == nil {
+		destPath, err := l.getDestinationPath()
+		if err != nil {
+			return nil, err
+		}
+		_, err = os.Stat(destPath)
+		switch {
+		case err == nil:
 			destCfg, destNode, err := l.loadFileWithNode(destPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to load destination config %s: %w", destPath, err)
 			}
 			cfg = mergeConfigs(cfg, destCfg, destNode)
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("failed to load destination config %s: %w", destPath, err)
 		}
 	}
 
@@ -121,12 +138,16 @@ func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 }
 
 // getDestinationPath returns the path for destination-specific config
-func (l *Loader) getDestinationPath() string {
+func (l *Loader) getDestinationPath() (string, error) {
 	dir := filepath.Dir(l.basePath)
 	ext := filepath.Ext(l.basePath)
 	base := strings.TrimSuffix(filepath.Base(l.basePath), ext)
 
-	return filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, l.destination, ext))
+	path := filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, l.destination, ext))
+	if filepath.Dir(path) != dir {
+		return "", fmt.Errorf("destination config path %s escapes the config directory", path)
+	}
+	return path, nil
 }
 
 // loadSecrets loads secrets from the secrets file

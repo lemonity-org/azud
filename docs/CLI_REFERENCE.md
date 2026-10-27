@@ -7,7 +7,7 @@ This document provides a comprehensive reference for the Azud command-line inter
 The following flags are available for all commands:
 
 *   `-c, --config string`: Path to the configuration file (default: `config/deploy.yml`, `deploy.yml`, or `.azud/deploy.yml`)
-*   `-d, --destination string`: Destination environment (e.g., `staging`, `production`). Merges configuration from `config/deploy.staging.yml`.
+*   `-d, --destination string`: Destination environment (e.g., `staging`, `production`). Merges configuration from `config/deploy.staging.yml`. Names start with a letter or digit and contain only letters, digits, dots, underscores, and hyphens (max 63 characters, no `..`). A destination without an override file uses the base configuration; an override file that exists but cannot be read is an error.
 *   `-v, --verbose`: Enable verbose output for debugging.
 
 ## Output and Automation
