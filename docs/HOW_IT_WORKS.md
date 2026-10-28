@@ -58,7 +58,13 @@ by an older release once: stop, normalize the autosave, rename the old
 container to `azud-proxy-legacy`, start the new container, wait for the admin
 socket, remove the old container, then restore the configuration. If the new
 container does not answer, Azud removes it, puts back the old container and
-its autosave, restarts it and fails with the reason. Routes survive through the
+its autosave, restarts it and fails with the reason. The whole migration runs
+under the host-wide Caddy lock, so commands for different services cannot
+interleave it. Before stopping the old container, Azud saves its running state
+and autosave to `proxy-migration.json` (mode 0600) in the Azud state directory
+and deletes the file once the migration succeeds or is rolled back; if a
+command is interrupted midway, the next boot resumes from that file and can
+still restore and restart the old container. Routes survive through the
 autosave; in-flight connections drop during the restart. Commands that do not
 boot the proxy, such as `azud proxy status`, report an outdated proxy and ask
 for `azud proxy reboot`; `azud preflight` reports it as a warning. A proxy
