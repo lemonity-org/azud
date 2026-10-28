@@ -216,7 +216,15 @@ func secretContextExclusions(absContext string) contextExclusions {
 			continue
 		}
 		variants := []string{abs}
-		if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+		real, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			// A missing secrets file may still have writer temp files in
+			// its real parent directory.
+			if dir, dirErr := filepath.EvalSymlinks(filepath.Dir(abs)); dirErr == nil {
+				real, err = filepath.Join(dir, filepath.Base(abs)), nil
+			}
+		}
+		if err == nil && real != abs {
 			variants = append(variants, real)
 		}
 		if info, err := os.Stat(abs); err == nil && info.Mode().IsRegular() {

@@ -138,11 +138,12 @@ release notes for the corresponding signed tag.
   `.azud/.secrets-*.tmp` files.
 - Changed local `azud build` to always pass `podman build --ignorefile`
   with the effective ignore file plus `.azud/secrets` at any depth, an
-  in-context `secrets_path` and the writer's temporary files appended last,
-  so local images can no longer contain local secrets. This needs Podman 4
-  or later. `azud init` now creates or extends `.dockerignore` with
-  `.azud/`, `.git/`, and `.azud/secrets`, and leaves a symlinked container
-  ignore file unchanged with a warning.
+  in-context `secrets_path` (also when it or the context is reached through
+  a symlink) and the writer's temporary files appended last, so local
+  images can no longer contain local secrets. This needs Podman 4 or later.
+  `azud init` now creates or extends `.dockerignore` with `.azud/`,
+  `.git/`, and `.azud/secrets`, and leaves a symlinked container ignore
+  file unchanged with a warning.
 - **Breaking:** Changed `app logs`, `accessory logs`, `proxy logs` and
   `cron logs` (including `--follow`) to neutralize terminal control
   sequences in remote output: colors are removed, CR becomes LF, and other
