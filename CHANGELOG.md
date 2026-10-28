@@ -114,7 +114,8 @@ release notes for the corresponding signed tag.
   other-readable file, with a warning. `.azud` is created with mode 0700.
 - **Breaking:** Changed `azud env set/delete/pull/edit` and `azud init` to
   refuse a secrets path that is a symbolic link or not a regular file; set
-  `secrets_path` to the real file instead.
+  `secrets_path` to the real file instead. A `secrets_path` containing `..`
+  is rejected, even before the path is cleaned.
 - **Breaking:** Changed `azud env set` to reject keys that do not match
   `[A-Za-z_][A-Za-z0-9_]*` and values containing CR, LF, or NUL or longer
   than 60 KiB, and `azud env push` and `azud setup` to reject such values

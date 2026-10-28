@@ -188,9 +188,12 @@ func (l *Loader) loadSecretsFromFile(cfg *Config) error {
 		secretsPath = ".azud/secrets"
 	}
 
-	// Prevent path traversal: reject paths with ".." components.
+	// Prevent path traversal: reject paths with ".." components. Check the raw
+	// path too: the OS follows a symlink before applying a later "..", so
+	// "dir/link/../secrets" may open a file other than the cleaned path names,
+	// and build-context exclusions are computed from the cleaned path.
 	cleaned := filepath.Clean(secretsPath)
-	if strings.Contains(cleaned, "..") {
+	if strings.Contains(cleaned, "..") || hasDotDotComponent(secretsPath) {
 		return fmt.Errorf("secrets_path must not contain path traversal (..): %s", secretsPath)
 	}
 
@@ -257,6 +260,16 @@ func (l *Loader) loadSecretsFromFile(cfg *Config) error {
 	SetLoadedSecrets(secrets)
 
 	return nil
+}
+
+// hasDotDotComponent reports whether path has a ".." element before cleaning.
+func hasDotDotComponent(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Loader) loadSecretsFromEnv(cfg *Config) error {

@@ -313,7 +313,10 @@ are resolved as for remote builds: a `secrets_path` that links to a file in the
 context is excluded under the target's path too, as is one reached through a
 symlinked context directory. Podman matches these rules by path, so unlike
 remote builds, a hard link to the secrets file under another name is not
-excluded. The flag needs a Podman release that supports `--ignorefile` (4.0 or
+excluded, and on a case-insensitive filesystem (the macOS default) a
+`secrets_path` spelled with different letter case than the build context is
+not recognized as inside it. `secrets_path` must not contain `..`. The flag
+needs a Podman release that supports `--ignorefile` (4.0 or
 later).
 
 ## Deployment Settings
