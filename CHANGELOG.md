@@ -9,6 +9,34 @@ release notes for the corresponding signed tag.
 - Changed the release workflow to wait for the required test and live
   integration checks on the tagged commit to finish instead of failing when a
   tag is pushed while they are still running.
+- **Breaking:** Changed cron `lock: true` to mount only a read-only,
+  per-job lock directory (`/var/lib/azud-locks/cron/<service>/<job>` for
+  root, `~/.local/share/azud-locks/cron/<service>/<job>` otherwise) at
+  `/run/azud-cron-lock` instead of the whole Azud state directory
+  read-write, so a cron workload can no longer read the persisted Caddy
+  config or custom TLS keys, hold deploy locks, or plant symlinks. Upgrade
+  every machine and CI job that runs `azud cron run` first, then run
+  `azud cron boot` to recreate running cron containers; older clients lock
+  only the previous file. `cron boot` pulls and validates the image and
+  prepares the lock before replacing a container, so a failed boot leaves
+  the old job scheduled.
+- Fixed cron `lock: true` jobs in images that run as a non-root user
+  always printing "Skipped: lock held".
+- **Breaking:** Fixed `azud proxy stop` printing "Proxy stopped" and
+  exiting 0 when stopping failed on a host. It now fails with
+  `proxy stop failed on N host(s)`, treats a host without a proxy container
+  as stopped, and refuses a systemd-managed proxy, printing the
+  `systemctl stop` command to use instead.
+- Fixed `azud cron stop` and `azud accessory remove` not recognizing
+  Podman's lowercase "no such container" error.
+- Changed persisting the Caddy config to write through a random temporary
+  file without following a symlink at the final path, and restoring it to
+  refuse a symlinked file.
+- Changed proxy reconciliation to always remove the server's
+  `logs.should_log_credentials` setting, so Caddy's built-in redaction of
+  Authorization, Cookie, Proxy-Authorization and Set-Cookie in access logs
+  stays on. Documented that other credential headers need
+  `redact_request_headers` and that query strings are logged in clear.
 
 ## 1.2.1 - 2026-09-28
 
