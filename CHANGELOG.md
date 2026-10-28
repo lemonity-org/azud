@@ -134,6 +134,22 @@ release notes for the corresponding signed tag.
   or later. `azud init` now creates or extends `.dockerignore` with
   `.azud/`, `.git/`, and `.azud/secrets`, and leaves a symlinked container
   ignore file unchanged with a warning.
+- **Breaking:** Changed `app logs`, `accessory logs`, `proxy logs` and
+  `cron logs` (including `--follow`) to neutralize terminal control
+  sequences in remote output: colors are removed, CR becomes LF, and other
+  control bytes, invalid UTF-8 and bidi overrides are shown as visible
+  `\xNN`/`\uNNNN` text. Pass the new `--raw` flag for byte-exact output.
+- Changed non-interactive `app exec` and `accessory exec` to neutralize
+  terminal control sequences when writing to a terminal; piped output stays
+  byte-exact, `--raw` disables the filter, and `-i`/`-t` sessions are
+  unchanged.
+- Fixed Azud's own records, `server exec` output, tables and `history show`
+  errors passing terminal escape sequences from remote output to the
+  terminal.
+- Hardened the HTTP health-check probe builders to validate the probe path
+  and single-quote the URL, podman build commands to quote each build
+  option, and Quadlet generation to sanitize every unit value so a value
+  ending in a backslash can no longer swallow the next directive.
 
 ## 1.2.1 - 2026-09-28
 
