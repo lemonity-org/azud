@@ -9,27 +9,27 @@ against an in-process fake SSH server. 40 tests and two fuzz targets; normal
 
 ## Summary
 
-| ID | Severity | Finding | Proof |
-|---|---|---|---|
-| JIT-01 | **High** | Unauthenticated Caddy admin API is reachable by every workload container on the `azud` network; custom TLS keys can be read and proxy config replaced | `TestFinding_CaddyAdminReachableFromSharedNetwork`, `TestFinding_CaddyConfigExposesTLSPrivateKeyToAdminAPI` |
-| JIT-02 | **High** | `cron.lock: true` mounts the whole Azud state directory (including `caddy-config.json` with TLS keys) read-write into a workload container | `TestFinding_CronLockExposesAzudStateAndCaddyConfig` |
-| JIT-03 | **High/Medium** | Environment expansion runs on raw YAML before parsing; an influenced env value becomes YAML structure, can disable host-key verification, and can execute `secrets_command` | `TestFinding_ConfigEnvExpansionBecomesYAMLStructure`, `TestFinding_ConfigEnvExpansionOverridesSSHSecurity` |
-| JIT-04 | **Medium** | `azud env set` preserves an existing 0644 secrets file and follows symlinks; `.azud` is created 0755 | `TestFinding_EnvSetPreservesInsecureSecretsMode`, `TestFinding_EnvSetFollowsSymlinkAndClobbersTarget`, `TestFinding_EnvSetAllowsNewlineInjection` |
-| JIT-05 | **Medium** | A failing `secrets_provider: command` includes the command's output (often the secrets) in the error | `TestFinding_SecretsCommandOutputLeaksOnFailure` |
-| JIT-06 | **Medium** | `azud proxy stop` is fail-open: exits 0 and prints "Proxy stopped" when every host fails | `TestFinding_ProxyStopReportsSuccessOnFailure` |
-| JIT-07 | **Low/Medium** | `-d/--destination` is interpolated into a filename without validation and can load arbitrary YAML | `TestFinding_DestinationPathTraversal` |
-| JIT-08 | **Medium** | `env push` sends application secrets to the remote builder and SSH bastion, not just workload hosts | `TestFinding_EnvPushSendsSecretsToRemoteBuilder` |
-| JIT-09 | **Medium** | Only the literal `.azud/secrets` is excluded from remote build contexts; a custom `secrets_path` is uploaded to the remote builder | `TestFinding_BuildContextUploadsCustomSecretsPath` |
-| JIT-10 | **Medium** | `registry login --host` accepts unconfigured hosts and sends the registry password there; `registry.server` is not validated and becomes a podman option | `TestFinding_RegistryLoginAcceptsUnconfiguredHost`, `TestFinding_RegistryServerFlagInjection` |
-| JIT-11 | **Low** | Remote stdout is printed without stripping ANSI/OSC control sequences | `TestFinding_TerminalEscapeInjectionFromRemoteOutput` |
-| JIT-12 | **Low** | `env pull` ignores a remote read failure and reports "No secrets found" | `TestFinding_EnvPullMasksRemoteReadFailure` |
-| JIT-13 | **Low/Medium** | The documented broad `AZUD_` secrets prefix captures unrelated `AZUD_*` variables and pushes them to hosts | `TestFinding_EnvPrefixPushesUnrelatedSecrets` |
-| JIT-14 | **Low** | Remote build contexts use a predictable, default-umask `/tmp/azud-build-*` directory | `TestFinding_BuildContextTempDirIsPredictable` |
-| JIT-15 | **Low** | A world-readable secrets file is only warned about; preflight has no mode check | `TestFinding_WorldReadableSecretsFileOnlyWarns` |
-| JIT-16 | **Low** | The Caddy proxy container lacks capability drop, `no-new-privileges`, read-only rootfs, and a non-root user | `TestFinding_ProxyContainerLacksHardeningFlags` |
-| JIT-17 | **Low/Medium** | `azud init`'s `.gitignore` check is a substring test; a comment mentioning `.azud/secrets` suppresses the ignore rule, leaving the secrets file committable | `TestFinding_InitGitignoreSubstringCheck` |
-| JIT-18 | **Low/Medium** | `init` does not create a container ignore file, and local builds send the raw context; `COPY . .` can bake `.azud/secrets` into an image | `TestFinding_InitDoesNotProtectBuildContext` |
-| JIT-19 | **Low** | Access-log redaction is opt-in; enabling logging produces a plain JSON encoder that can record Authorization/Cookie headers | `TestFinding_AccessLogRedactionIsOptIn` |
+| ID | Severity | Status | Finding | Proof |
+|---|---|---|---|---|
+| JIT-01 | **High** | Fixed | Unauthenticated Caddy admin API is reachable by every workload container on the `azud` network; custom TLS keys can be read and proxy config replaced | `TestFinding_CaddyAdminReachableFromSharedNetwork`, `TestFinding_CaddyConfigExposesTLSPrivateKeyToAdminAPI` |
+| JIT-02 | **High** | Fixed | `cron.lock: true` mounts the whole Azud state directory (including `caddy-config.json` with TLS keys) read-write into a workload container | `TestFinding_CronLockExposesAzudStateAndCaddyConfig` |
+| JIT-03 | **High/Medium** | Fixed | Environment expansion runs on raw YAML before parsing; an influenced env value becomes YAML structure, can disable host-key verification, and can execute `secrets_command` | `TestFinding_ConfigEnvExpansionBecomesYAMLStructure`, `TestFinding_ConfigEnvExpansionOverridesSSHSecurity` |
+| JIT-04 | **Medium** | Fixed | `azud env set` preserves an existing 0644 secrets file and follows symlinks; `.azud` is created 0755 | `TestFinding_EnvSetPreservesInsecureSecretsMode`, `TestFinding_EnvSetFollowsSymlinkAndClobbersTarget`, `TestFinding_EnvSetAllowsNewlineInjection` |
+| JIT-05 | **Medium** | Fixed | A failing `secrets_provider: command` includes the command's output (often the secrets) in the error | `TestFinding_SecretsCommandOutputLeaksOnFailure` |
+| JIT-06 | **Medium** | Fixed | `azud proxy stop` is fail-open: exits 0 and prints "Proxy stopped" when every host fails | `TestFinding_ProxyStopReportsSuccessOnFailure` |
+| JIT-07 | **Low/Medium** | Fixed | `-d/--destination` is interpolated into a filename without validation and can load arbitrary YAML | `TestFinding_DestinationPathTraversal` |
+| JIT-08 | **Medium** | Fixed | `env push` sends application secrets to the remote builder and SSH bastion, not just workload hosts | `TestFinding_EnvPushSendsSecretsToRemoteBuilder` |
+| JIT-09 | **Medium** | Fixed | Only the literal `.azud/secrets` is excluded from remote build contexts; a custom `secrets_path` is uploaded to the remote builder | `TestFinding_BuildContextUploadsCustomSecretsPath` |
+| JIT-10 | **Medium** | Fixed | `registry login --host` accepts unconfigured hosts and sends the registry password there; `registry.server` is not validated and becomes a podman option | `TestFinding_RegistryLoginAcceptsUnconfiguredHost`, `TestFinding_RegistryServerFlagInjection` |
+| JIT-11 | **Low** | Fixed | Remote stdout is printed without stripping ANSI/OSC control sequences | `TestFinding_TerminalEscapeInjectionFromRemoteOutput` |
+| JIT-12 | **Low** | Fixed | `env pull` ignores a remote read failure and reports "No secrets found" | `TestFinding_EnvPullMasksRemoteReadFailure` |
+| JIT-13 | **Low/Medium** | Fixed | The documented broad `AZUD_` secrets prefix captures unrelated `AZUD_*` variables and pushes them to hosts | `TestFinding_EnvPrefixPushesUnrelatedSecrets` |
+| JIT-14 | **Low** | Fixed | Remote build contexts use a predictable, default-umask `/tmp/azud-build-*` directory | `TestFinding_BuildContextTempDirIsPredictable` |
+| JIT-15 | **Low** | Fixed | A world-readable secrets file is only warned about; preflight has no mode check | `TestFinding_WorldReadableSecretsFileOnlyWarns` |
+| JIT-16 | **Low** | Fixed | The Caddy proxy container lacks capability drop, `no-new-privileges`, read-only rootfs, and a non-root user | `TestFinding_ProxyContainerLacksHardeningFlags` |
+| JIT-17 | **Low/Medium** | Fixed | `azud init`'s `.gitignore` check is a substring test; a comment mentioning `.azud/secrets` suppresses the ignore rule, leaving the secrets file committable | `TestFinding_InitGitignoreSubstringCheck` |
+| JIT-18 | **Low/Medium** | Fixed | `init` does not create a container ignore file, and local builds send the raw context; `COPY . .` can bake `.azud/secrets` into an image | `TestFinding_InitDoesNotProtectBuildContext` |
+| JIT-19 | **Low** | Fixed | Access-log redaction is opt-in; enabling logging produces a plain JSON encoder that can record Authorization/Cookie headers | `TestFinding_AccessLogRedactionIsOptIn` |
 
 Latent issues in exported helpers (not reachable through current validated
 configuration) are listed in [Latent unsafe helpers](#latent-unsafe-helpers).
@@ -40,6 +40,108 @@ the prior hardening record deliberately made the Caddy admin address
 "container-reachable" (`docs/AZUD_1.0.0_RELEASE_HARDENING.md`, AZ-001). This
 review treats application containers as untrusted and shows that this makes the
 proxy control plane part of the blast radius of a single workload compromise.
+
+## Remediation status
+
+**Status date:** 2026-10-28
+
+All findings (JIT-01..JIT-19) and latent issues (L-01..L-06) are fixed on
+branch `security/jit-hardening` and are tracked privately in advisory
+GHSA-ff4m-7w2r-4jf9. The analysis below is kept unchanged as the audit record
+of `28c2f20`. The `Proof` column above names the original `TestFinding_*`
+tests; each one is now an inverted `TestControl_*` regression test (see
+[`security/jit/README.md`](jit/README.md)).
+
+"Reassessed" is the severity after independent verification, where it differs
+from the original rating; "—" means unchanged.
+
+| ID | Fixing commit | Reassessed |
+|---|---|---|
+| JIT-01 | Serve the Caddy admin API only on a private unix socket (plus "Explain an unanswered Caddy admin socket") | — (High, now live-confirmed) |
+| JIT-02 | Mount only a read-only per-job lock directory | High only with `cron.lock: true`; not applicable otherwise |
+| JIT-03 | Expand environment references only inside YAML values | Medium; High only when a referenced variable carries multi-line or flow-syntax attacker text |
+| JIT-04 | Write local secrets files through one hardened writer | Low to Low/Medium (hardening) |
+| JIT-05 | Keep secrets_command output out of errors | — |
+| JIT-06 | Fail proxy stop when any host fails | Low (operational) |
+| JIT-07 | Validate destination names before building the override path | Low |
+| JIT-08 | Deliver runtime secrets only to workload hosts | — |
+| JIT-09 | Exclude the configured secrets file from remote build contexts | — (impact understated, see below) |
+| JIT-10 | Restrict login hosts and validate registry server arguments | Low to Low/Medium (hardening; operator-controlled inputs) |
+| JIT-11 | Neutralize terminal control sequences in remote output | — |
+| JIT-12 | Fail env pull when the remote secrets file cannot be read | — (correctness) |
+| JIT-13 | Skip Azud-owned variables when loading env-provider secrets | — |
+| JIT-14 | Use a private mktemp directory for remote build contexts | — |
+| JIT-15 | Fail on a group- or other-readable secrets file | — |
+| JIT-16 | Harden the Caddy proxy container | — (defense in depth) |
+| JIT-17 | Match exact active .gitignore rules for the secrets file | Low |
+| JIT-18 | Keep local secrets out of local build contexts | — |
+| JIT-19 | Keep Caddy's credential redaction in access logs | Informational; refuted as a credential leak (Caddy already redacts those headers) |
+| L-01 | Shell-quote and validate health-check probe URLs | Informational |
+| L-02 | Quote each podman build option | Informational |
+| L-03 | Sanitize every unit value and block line continuations | Informational |
+| L-04 | Validate image references against the OCI grammar | Low/Informational |
+| L-05 | Read env set values from stdin instead of argv | Low/Informational |
+| L-06 | Stop azud config and shell completion from running secrets_command | Low |
+
+### Corrections after verification
+
+Verification found these factual errors or omissions in the write-up below.
+
+- **JIT-01:** Now live-confirmed on rootless Podman 6.1.4 with the pinned
+  `caddy:2.11.4-alpine` digest: a peer container fetched `http://<proxy>:2019/config/`.
+- **JIT-01:** The Quadlet proxy unit had the same exposure (`CADDY_ADMIN=0.0.0.0:2019`
+  and a published `127.0.0.1:2019` in `internal/cli/systemd.go`).
+- **JIT-01:** An autosave whose `admin.listen` is TCP overrides `CADDY_ADMIN` under
+  `--resume`, and loading an old persisted config moves the listener back, so every
+  load, restore, persist and resume path has to normalize `admin` (the fix does).
+- **JIT-01:** Bridge mode applies whenever not (`podman.rootless` and `proxy.rootful`),
+  rootful bridge included. The host-loopback pivot is overstated, and the suggested
+  `unix//azud-state/...` socket path only exists, read-only, in the Quadlet unit.
+- **JIT-02:** "Medium otherwise" is wrong: without `lock: true` there is no mount.
+  The fixed `.tmp` name makes the symlink clobber plant-and-wait, not a race.
+- **JIT-03:** PR titles and branch names cannot carry newlines (commit messages, PR
+  bodies and free-form dispatch inputs can). A comma inside a flow collection and a
+  `#` comment are additional single-line vectors. Remediation item 3 already existed.
+- **JIT-04:** `env set` never loosened a mode; it failed to repair a loose one.
+  `env delete`, `env edit` and `init` had the same write problems.
+- **JIT-05:** Missed two related defects: stderr was parsed as secrets on success, and a
+  background child holding the pipe defeated the 30 s timeout.
+- **JIT-07:** Git refnames cannot contain `..`. The more realistic harm was a missing
+  override file silently falling back to the base config.
+- **JIT-08:** Delivery to a bastion usually fails outright, so this was also a reliability bug.
+- **JIT-09:** With `COPY . .` the file is baked into the image and pushed to the
+  registry; the default file also leaked when the context is a parent of the project.
+- **JIT-10:** The default login set was `GetAllHosts()`, and the unvalidated server also
+  reached the remote-builder login, the local login and logout.
+- **JIT-11:** `writeOutput` already normalized CR, but the scope was wider: accessory
+  logs/exec, follow-mode streams and remote stderr inside printed errors.
+- **JIT-12:** The masked read never overwrote the local file; the real overwrite risk
+  was partial output from a failed or timed-out read.
+- **JIT-13:** The `init` scaffold and `docs/CI_CD.md` already used `AZUD_SECRET_`; only
+  `docs/CONFIG_REFERENCE.md` showed `AZUD_`. Prefix stripping also let
+  `AZUD_REGISTRY_PASSWORD` bypass the infrastructure-secret filter.
+- **JIT-14:** The CWE-377 symlink race is mostly theoretical (nanosecond suffix, sticky
+  `/tmp`); the real issues were the 0755 directory and directories left behind on failure.
+- **JIT-16:** The suggested non-root user would break existing installs (root-owned
+  volumes, the `NET_BIND_SERVICE` file capability); the fix keeps the image user.
+- **JIT-17:** Near-miss paths, directory-only rules and negations are likelier
+  triggers than a comment.
+- **JIT-18:** The original test only proved no ignore file existed. The baked file can
+  also hold infrastructure secrets (registry password, custom TLS keys).
+- **JIT-19:** Caddy 2.11.4 redacts Authorization, Cookie, Proxy-Authorization and
+  Set-Cookie by default, so the claimed leak does not occur and the original test was
+  vacuous. `srv0.log_credentials` does not exist; the real key is
+  `logs.should_log_credentials`, which Azud now removes. Custom credential headers
+  and query strings remain the operator's responsibility.
+- **L-02:** The local multi-arch build also shell-evaluated `ManifestBuildCommands`.
+- **L-03:** Quoting `Restart=` as suggested would make systemd ignore it. A trailing
+  backslash continued lines even in sanitized container fields.
+- **L-04:** Current pull and run paths neutralize a flag-shaped image, so "can become a
+  podman option" was mostly theoretical.
+- **L-05:** `env get` never put values on argv; masking it would break scripting.
+- **L-06:** Every config-loading command and shell completion also ran
+  `secrets_command`, before validation, through `sh` resolved on `PATH`.
+- **What held up:** The 10k YAML depth limit is yaml.v3's built-in limit, not Azud code.
 
 ---
 
@@ -955,18 +1057,19 @@ These controls were tested and passed; keep them covered:
 - Built the real binary and drove it against an in-process fake SSH server that
   records commands and stdin. Normal `go test ./...` and `go test -race
   -tags security ./security/jit` pass.
-- No live Podman/Caddy daemon was available in this sandbox (rootless user
-  namespaces could not be created). JIT-01 is proven at the configuration level:
-  the exact boot command has `CADDY_ADMIN=0.0.0.0:2019` and `--network azud`,
-  and application containers join `azud`. Confirm peer reachability on a
-  disposable host before treating it as fully live-proven.
+- No live Podman/Caddy daemon was available in the original review sandbox
+  (rootless user namespaces could not be created), so JIT-01 was first proven at
+  the configuration level. Verification has since live-confirmed it on rootless
+  Podman 6.1.4 with the pinned Caddy digest, and
+  `scripts/caddy_admin_contract_test.sh` now checks live that a peer container
+  cannot reach the admin API after the fix.
 - Config files and hooks are executable by design. Findings that require a
   malicious config (JIT-03, JIT-07, JIT-10, L-02, etc.) matter most when a
   piece of config or environment is supplied by a less-trusted party
   (PR metadata, shared CI variables, generated config, a shared builder).
-- The suite intentionally asserts vulnerable behavior so it can stay green
-  while documenting issues. When a finding is fixed, move it to `TestControl_*`
-  and invert the assertion. See `security/jit/README.md`.
+- The suite originally asserted vulnerable behavior so it could stay green
+  while documenting issues. With the fixes, every `TestFinding_*` test has been
+  inverted into a `TestControl_*` regression test. See `security/jit/README.md`.
 
 ## Reproduction
 
@@ -978,7 +1081,7 @@ These controls were tested and passed; keep them covered:
 FUZZ=1 FUZZTIME=5s ./security/jit/run.sh
 
 # Focused tests
-go test -tags security -v ./security/jit -run 'TestFinding_Caddy|TestFinding_Cron'
+go test -tags security -v ./security/jit -run 'TestControl_CaddyAdmin|TestControl_Cron'
 ```
 
 Individual shell PoCs are in [`security/poc/`](poc/).

@@ -42,6 +42,5 @@ if [[ "${FUZZ:-0}" == "1" ]]; then
   done
 fi
 
-printf '\nAll JIT security checks completed. Finding tests log VULNERABLE while the\n'
-printf 'corresponding issue is present; a fixed issue should flip the test into a\n'
-printf 'normal security regression assertion.\n'
+printf '\nAll JIT security checks completed. Every finding is now a TestControl_*\n'
+printf 'regression test; a failure means a security control regressed.\n'

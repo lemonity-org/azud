@@ -27,36 +27,47 @@ uses harmless canary files.
 
 ## Test naming
 
-- `TestControl_*` — positive controls. These assert a security property that
-  should always hold. A failure is a real regression.
-- `TestFinding_*` — adversarial proof tests. While the issue exists they pass
-  and log a line beginning with `VULNERABLE` or `HARDENING`. Once an issue is
-  fixed, invert the assertion (or move it into the control group) so it becomes
-  a normal regression test.
+- `TestControl_*` — regression controls. Each asserts a security property that
+  should always hold; a failure is a real regression. During the review, the
+  findings were proven by `TestFinding_*` tests that passed while the issue
+  existed and logged `VULNERABLE` or `HARDENING`. Every finding has since been
+  fixed and its test inverted into a control, so no `TestFinding_*` tests
+  remain.
 - `Fuzz*` — seed-runnable fuzz targets. Run with `FUZZ=1` and optionally
   `FUZZTIME=5s`.
 
-The captured evidence from the review run is in `results.log`.
+The captured evidence from the original review run (revision `28c2f20`, before
+the fixes) is in `results.log`. It is a local, gitignored file and is not
+regenerated.
 
 ## Coverage
 
 | Area | Tests |
 |---|---|
 | Shell quoting round-trip (quotes, `$()`, backticks, newlines, CR, unicode) | `TestControl_ShellQuoteRoundTrip`, `TestControl_ShellJoinAndRemotePathAreDataSafe` |
-| Podman command builders (container, exec, logs, build) | `TestControl_ContainerCommandBuilderKeepsPayloadsAsArguments`, `TestControl_ExecAndLogsBuildersKeepPayloadsAsArguments`, `TestControl_BuildCommandBuilderKeepsPayloadsAsArguments` |
-| Config limits, strictness, validators | `TestControl_ConfigRejectsOversizedDuplicateAndDeepDocuments`, `TestControl_ConfigRejectsShellMetacharactersInExecutedFields` |
-| Config env expansion / destination traversal / secret leak | `TestFinding_ConfigEnvExpansion*`, `TestFinding_DestinationPathTraversal`, `TestFinding_SecretsCommandOutputLeaksOnFailure` |
-| Local secrets handling | `TestFinding_EnvSet*`, `TestFinding_WorldReadableSecretsFileOnlyWarns`, `TestControl_EnvPullWritesPrivateSecretsFile` |
-| Secret delivery scope | `TestFinding_EnvPush*`, `TestFinding_EnvPrefixPushesUnrelatedSecrets` |
-| Remote build context | `TestFinding_BuildContext*` |
-| Caddy admin / TLS / proxy lifecycle | `TestFinding_Caddy*`, `TestFinding_Proxy*`, `TestFinding_CronLockExposesAzudStateAndCaddyConfig` |
-| Registry | `TestFinding_Registry*` |
+| Podman command builders (container, exec, logs, build, build options) | `TestControl_ContainerCommandBuilderKeepsPayloadsAsArguments`, `TestControl_ExecAndLogsBuildersKeepPayloadsAsArguments`, `TestControl_BuildCommandBuilderKeepsPayloadsAsArguments`, `TestControl_BuildConfigOptionsAreQuoted` (L-02) |
+| Health-check probe builders | `TestControl_HealthcheckBuildersQuoteURL` (L-01) |
+| Config limits, strictness, validators | `TestControl_ConfigRejectsOversizedDuplicateAndDeepDocuments`, `TestControl_ConfigRejectsShellMetacharactersInExecutedFields`, `TestControl_ImageReferenceValidationRejectsNonReferences` (L-04) |
+| Config env expansion (JIT-03) | `TestControl_ConfigEnvExpansionCannotInjectYAMLStructure`, `TestControl_ConfigEnvExpansionCannotOverrideSSHSecurity`, `TestControl_ConfigEnvExpansionInCommentIsInert`, `TestControl_ConfigEnvExpansionFlowSequenceStaysOneScalar` |
+| Destination traversal (JIT-07) | `TestControl_DestinationPathTraversalIsRejected` |
+| `secrets_command` output and execution (JIT-05, L-06) | `TestControl_SecretsCommandFailureDoesNotLeakStdout`, `TestControl_ConfigCommandDoesNotExecuteSecretsCommand`, `TestControl_ShellCompletionDoesNotExecuteSecretsCommand` |
+| Local secrets writer (JIT-04) | `TestControl_EnvSetTightensInsecureSecretsMode`, `TestControl_EnvSetRefusesSymlinkedSecretsFile`, `TestControl_EnvDeleteRefusesSymlinkedSecretsFile`, `TestControl_EnvSetRejectsNewlineInValue`, `TestControl_EnvSetRejectsInvalidKey`, `TestControl_InitCreatesPrivateAzudDir`, `TestControl_InitKeepsExistingSecretsAndHooks` |
+| `env set` from stdin (L-05) | `TestControl_EnvSetReadsSecretFromStdin`, `TestControl_EnvSetStdinRejectsEmbeddedNewline`, `TestControl_EnvSetArgvFormWarns` |
+| Secrets file mode and preflight mode (JIT-15) | `TestControl_WorldReadableSecretsFileStillLoadsWithWarning`, `TestControl_PreflightRejectsWorldReadableSecretsFile` |
+| `env pull` (JIT-12) | `TestControl_EnvPullWritesPrivateSecretsFile`, `TestControl_EnvPullFailsOnUnreadableRemoteFile`, `TestControl_EnvPullReportsMissingRemoteFile` |
+| Secret delivery scope (JIT-08, JIT-13) | `TestControl_EnvPushTargetsOnlyWorkloadHosts`, `TestControl_EnvPushRejectsRemoteBuilderHost`, `TestControl_EnvPushRejectsNewlineInEnvProviderValue`, `TestControl_EnvPrefixSkipsReservedAzudVariables`, `TestControl_EnvPrefixDoesNotPushRegistryCredential` |
+| Remote build context (JIT-09, JIT-14) | `TestControl_BuildContextExcludesConfiguredSecretsPath`, `TestControl_BuildContextExcludesNestedProjectSecrets`, `TestControl_BuildContextUsesPrivateTempDir`, `TestControl_BuildContextCleanedUpOnSyncFailure`, `TestControl_BuildContextRejectsUnexpectedTempDir` |
+| Local build context and init scaffold (JIT-17, JIT-18) | `TestControl_InitGitignoreIgnoresCommentMentions`, `TestControl_InitRefusesSymlinkedGitignore`, `TestControl_InitProtectsBuildContext`, `TestControl_InitDoesNotShadowExistingDockerignore`, `TestControl_InitNeverWritesThroughSymlinkedContainerignore`, `TestControl_LocalBuildPassesMandatoryIgnoreFile` |
+| Caddy admin socket and TLS (JIT-01) | `TestControl_CaddyAdminIsPrivateUnixSocket`, `TestControl_CustomTLSConfigLoadsOnlyThroughPrivateAdminSocket`, `TestControl_RestoredPersistedConfigCannotMoveAdmin` |
+| Proxy admin migration (JIT-01) | `TestControl_ProxyBootRecreatesLegacyAdminContainer`, `TestControl_ProxyBootRestoresLegacyProxyWhenReplacementFails`, `TestControl_ProxyBootReportsAdminProbeError`, `TestControl_ProxyBootRefusesSystemdManagedLegacyProxy`, `TestControl_ProxyStatusReportsLegacyProxy`, `TestControl_PreflightBlocksOnlySystemdManagedLegacyProxy`, `TestControl_SystemdEnableMigratesProxyToPrivateSocket`, `TestControl_SystemdEnableStartsProxyUnitWhenPreparationFails` |
+| Proxy lifecycle and hardening (JIT-06, JIT-16) | `TestControl_ProxyStopFailsClosed`, `TestControl_ProxyStopTreatsMissingContainerAsStopped`, `TestControl_ProxyStopRefusesSystemdManagedProxy`, `TestControl_ProxyContainerHardeningFlags` |
+| Cron lock and boot ordering (JIT-02) | `TestControl_CronLockMountsOnlyReadOnlyJobLockDir`, `TestControl_CronBootRecreatesLegacyLockMount`, `TestControl_CronBootKeepsLegacyContainerWhenPreparationFails`, `TestControl_CronRunHoldsLegacyLockWhileLegacyContainerExists` |
+| Registry (JIT-10) | `TestControl_RegistryLoginRejectsUnconfiguredHost`, `TestControl_RegistryServerIsValidated`, `TestControl_RegistryLoginTerminatesPodmanOptions` |
 | Hooks | `TestControl_HooksRejectTraversalAndSymlinks` |
-| Init scaffold | `TestFinding_InitGitignoreSubstringCheck`, `TestFinding_InitDoesNotProtectBuildContext` |
-| Quadlet / systemd generation | `TestControl_QuadletContainerFieldsCannotInjectDirectives`, `TestFinding_QuadletUnsanitizedFieldsInjectDirectives` |
-| Terminal output | `TestFinding_TerminalEscapeInjectionFromRemoteOutput` |
-| Access logging | `TestFinding_AccessLogRedactionIsOptIn` |
-| Latent unsafe helpers | `TestFinding_HealthcheckBuildersExecuteDollarSubstitution`, `TestFinding_BuildConfigOptionsAreShellEvaluated` |
+| Quadlet / systemd generation (L-03) | `TestControl_QuadletContainerFieldsCannotInjectDirectives`, `TestControl_QuadletServiceInstallAndNamesCannotInjectDirectives`, `FuzzQuadletContainerFileLineInjection` |
+| Terminal output (JIT-11) | `TestControl_RemoteOutputNeutralizesTerminalEscapes` |
+| Access logging (JIT-19) | `TestControl_AccessLogKeepsCaddyCredentialRedaction` |
+| Shell quoting fuzz | `FuzzShellQuotePreservesData` |
 
 ## Requirements
 
@@ -70,10 +81,14 @@ The captured evidence from the review run is in `results.log`.
 ## Limitations
 
 The fake SSH server proves **what Azud sends**, not how a real Podman or Caddy
-process reacts. In particular, the Caddy admin exposure is proven from the
-generated `podman run` command (`CADDY_ADMIN=0.0.0.0:2019`, `--network azud`)
-plus the fact that application containers join the same network. Confirm live
-reachability on a disposable host with the commands in
+process reacts. For the Caddy admin API, the suite asserts that the generated
+`podman run` and Quadlet commands configure only the private unix socket
+(`CADDY_ADMIN=unix//run/azud-admin/admin.sock|0600` on a private tmpfs, nothing
+published on 2019) and that Azud reaches it through `podman exec ... curl
+--unix-socket`. Live proof against the pinned Caddy image, including that a
+peer container on the same network cannot reach the admin API and that a
+normalized autosave keeps the socket listener, is in
+`../../scripts/caddy_admin_contract_test.sh`. The pre-fix reachability PoC is
 `../poc/06-caddy-admin-exposure.sh`.
 
 Config files and hooks are executable by design. Tests that require a malicious

@@ -9,6 +9,5 @@
 //
 //	go test -tags security ./security/jit/...
 //
-// See README.md in this directory for the threat model, test inventory, and
-// interpretation of the VULNERABLE logs.
+// See README.md in this directory for the threat model and test inventory.
 package jit
