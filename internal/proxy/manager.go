@@ -787,8 +787,12 @@ func (m *Manager) bootLocked(host string, config *ProxyConfig) error {
 		return m.abortProxyMigration(host, migration, err)
 	}
 	if migration != nil {
-		m.removeLegacyProxy(host)
+		// Clear the rollback record (which may hold the previous autosave and
+		// its TLS keys) before removing the legacy container: if the removal
+		// is interrupted, recovery handles a running replacement next to a
+		// legacy container without needing the record.
 		m.clearProxyRollback(host)
+		m.removeLegacyProxy(host)
 	}
 
 	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
@@ -1039,8 +1043,8 @@ func (m *Manager) recoverInterruptedMigration(host string, exists, running bool)
 		return exists, running, nil
 	}
 	if running {
-		m.removeLegacyProxy(host)
 		m.clearProxyRollback(host)
+		m.removeLegacyProxy(host)
 		return exists, running, nil
 	}
 	m.log.Host(host, "Restoring proxy container left by an interrupted migration...")
