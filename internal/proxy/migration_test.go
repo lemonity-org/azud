@@ -407,6 +407,33 @@ func TestBootMigrationRemovesLegacyContainerOnlyAfterReplacementAnswers(t *testi
 	}
 }
 
+// Once the replacement answers, the rollback record (which can hold the
+// previous autosave and its TLS keys) must not outlive an interruption while
+// the legacy container is being removed.
+func TestBootMigrationClearsRollbackStateBeforeRemovingLegacyContainer(t *testing.T) {
+	h := newFakeProxyHost(legacyTestAutosave, map[string]*fakeProxyContainer{
+		CaddyContainerName: {legacy: true, running: true},
+	})
+	h.interruptAt = "podman rm -f azud-proxy-legacy"
+	manager, _ := startFakeProxySSH(t, h)
+	if err := manager.Boot("127.0.0.1", nil); err == nil {
+		t.Fatal("interrupted Boot() succeeded")
+	}
+	if _, kept := h.files[proxyRollbackFileName]; kept {
+		t.Fatal("rollback state was kept after the replacement answered")
+	}
+
+	h.mu.Lock()
+	h.interruptAt, h.interrupted = "", false
+	h.mu.Unlock()
+	if err := manager.Boot("127.0.0.1", nil); err != nil {
+		t.Fatalf("retried Boot() error = %v", err)
+	}
+	if len(h.containers) != 1 || h.containers[CaddyContainerName] == nil || h.containers[CaddyContainerName].legacy {
+		t.Fatalf("legacy container was not removed on retry: %#v", h.containers)
+	}
+}
+
 func TestRebootMigratesOutdatedProxyUnderOneLock(t *testing.T) {
 	h := newFakeProxyHost(legacyTestAutosave, map[string]*fakeProxyContainer{
 		CaddyContainerName: {legacy: true, running: true},

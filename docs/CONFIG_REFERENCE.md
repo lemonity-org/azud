@@ -200,6 +200,10 @@ Note:
 - In this mixed mode, `http_port`/`https_port` currently must stay at `80/443`.
 - When `proxy.rootful: true` and `ssh.user` is non-root, the SSH user needs
   passwordless `sudo` for Podman commands.
+- Manage a host's rootful proxy from a single SSH user. Azud serializes proxy
+  changes, including the one-time proxy migration, with a lock in that user's
+  state directory, so deploys from different SSH users to the same rootful
+  proxy do not exclude each other.
 
 ## Registry
 
