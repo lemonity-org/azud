@@ -68,6 +68,36 @@ release notes for the corresponding signed tag.
   tab completion to stop running `secrets_command`. `azud config` validates
   without loading secrets (use `azud env list` to check that secrets load),
   and completion no longer loads the configuration.
+- **Breaking:** Changed `azud env push` and `azud setup` to deliver the
+  runtime secrets file only to server, accessory, and cron hosts.
+  `builder.remote.host` and `ssh.proxy.host` no longer receive application
+  secrets unless they also run a workload, and `env push --host` and
+  `env pull --host` reject them. Delete any leftover `~/.azud/secrets` (or
+  `secrets_remote_path`) on builder-only and bastion-only hosts.
+- **Breaking:** Changed remote build contexts to never include the
+  configured `secrets_path` (matched by canonical path, including symlinked
+  and hard-linked copies) or any nested `.azud/secrets`, even when
+  `.containerignore`/`.dockerignore` negates them.
+- Changed remote build contexts to extract into a private `mktemp -d`
+  directory (`/tmp/azud-build-<service>.XXXXXXXXXX`, mode 0700) that is
+  removed on every sync failure.
+- **Breaking:** Changed `azud registry login/logout --host` to accept only
+  configured server, accessory, cron, or remote builder hosts, rejecting
+  others before the password is read. `registry.server` must now be
+  `host[:port][/namespace]` (an optional `http(s)://` prefix is accepted),
+  `registry.username` must not start with `-` or contain whitespace or
+  control characters, and every `podman login`/`logout` passes `--` before
+  the server.
+- **Breaking:** Fixed `azud env pull` reporting "No secrets found" and
+  exiting 0 when the remote secrets file or its directory could not be
+  read. It now fails, never writes partial output locally, and still exits
+  0 with a clear message when the file does not exist.
+- **Breaking:** Changed `secrets_provider: env` to skip Azud's own
+  `AZUD_*` variables (`AZUD_STATE_DIR`, hook variables, `AZUD_SSH_KEY`,
+  installer and test variables) and variables named exactly like a
+  registry password reference, with a warning naming them; a bare `AZUD_`
+  prefix also warns. Use a dedicated prefix such as `AZUD_SECRET_`. Custom
+  TLS references must name the secret without the prefix.
 
 ## 1.2.1 - 2026-09-28
 
