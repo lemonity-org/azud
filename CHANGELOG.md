@@ -150,6 +150,39 @@ release notes for the corresponding signed tag.
   and single-quote the URL, podman build commands to quote each build
   option, and Quadlet generation to sanitize every unit value so a value
   ending in a backslash can no longer swallow the next directive.
+- **Breaking:** Changed the Caddy admin API to listen only on a unix socket
+  (`/run/azud-admin/admin.sock`) inside a tmpfs private to the `azud-proxy`
+  container, in every network mode and in the Quadlet unit, so workload
+  containers and host users can no longer reach it. Port 2019 is no longer
+  published or bound. Scripts that used `curl localhost:2019` must use
+  `podman exec azud-proxy curl --unix-socket /run/azud-admin/admin.sock
+  http://localhost/...` (with `sudo -n` for a rootful proxy managed by a
+  non-root user).
+- **Breaking:** Existing proxy containers are recreated once on the next
+  `azud proxy boot`, `azud proxy reboot`, `azud deploy` or canary deploy,
+  with a brief interruption. Routes are kept through Caddy's autosave. The
+  old container is kept as `azud-proxy-legacy` until the replacement
+  answers; if it does not, Azud restores and restarts the old container
+  and fails with the reason. Quadlet-managed proxies are not recreated
+  imperatively: rerun `azud systemd enable`, and until then deploys and
+  `azud preflight` fail with that hint.
+- **Breaking:** Changed Azud to strip every Caddy `admin` setting other
+  than the socket `listen` (for example `remote`, `identity`,
+  `config.load`) from configs it loads, restores, persists or resumes, with
+  a warning, and to refuse admin requests to `/config/admin`.
+- Changed `azud systemd enable` to stop the previous proxy unit or
+  container, normalize Caddy's autosave (or seed it from Azud's protected
+  copy) and start the regenerated unit, starting it again if preparation
+  fails. The proxy unit no longer mounts the Azud state directory.
+- Hardened the Caddy proxy container with a read-only root filesystem,
+  `--cap-drop all --cap-add NET_BIND_SERVICE` and `no-new-privileges`; the
+  image user and ports are unchanged.
+- Changed `azud preflight` to no longer require `curl` on proxy hosts, and
+  fixed `azud proxy status` reporting 0 routes when the admin API could not
+  be read. A failed proxy start now reports the last admin probe error.
+- To downgrade, remove an imperative proxy with `podman rm -f azud-proxy`
+  and run the older `azud proxy boot`; for a Quadlet proxy, see
+  docs/TROUBLESHOOTING.md.
 
 ## 1.2.1 - 2026-09-28
 
