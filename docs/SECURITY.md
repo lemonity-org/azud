@@ -49,12 +49,12 @@ Practical security recommendations for Azud deployments.
 
 - Keep `.azud/secrets` out of git
 - Builds never send `.azud/secrets` at any depth, the configured
-  `secrets_path` when it is inside the build context, or leftover
-  `.secrets-*.tmp` files of the secrets writer next to them; ignore-file
-  negations cannot re-include them. Remote builds also exclude hard links to
-  the secrets file. Local builds pass these rules to `podman build
-  --ignorefile`, which matches paths only, so keep hard-linked or renamed
-  copies of secrets out of the build context.
+  `secrets_path` when it or its symlink target is inside the build context,
+  or leftover `.secrets-*.tmp` files of the secrets writer next to them;
+  ignore-file negations cannot re-include them. Remote builds also exclude
+  hard links to the secrets file. Local builds pass these rules to `podman
+  build --ignorefile`, which matches paths only, so keep hard-linked or
+  renamed copies of secrets out of the build context.
 - Store secrets in your CI secret store and reconstruct at runtime
 - Prefer environment variables or secret managers in production
 - `azud env push` and `azud setup` deliver the runtime secrets file only to

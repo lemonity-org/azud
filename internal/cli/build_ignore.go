@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/lemonity-org/azud/internal/secretsfile"
 )
 
 // writeLocalBuildIgnoreFile writes the ignore file passed to local podman
@@ -91,8 +93,11 @@ func effectiveContainerIgnore(contextDir, dockerfile string) ([]byte, error) {
 // exclude: .azud/secrets at any depth (projects nested below the context, as
 // in monorepos), the configured secrets file when it is inside the build
 // context, and leftover temporary files of the secrets writer next to either.
-// These match the excludes of remote builds, except that podman matches
-// paths, so a hard link to a secrets file under another name is not caught.
+// Secrets paths are resolved as for remote builds, so a secrets file that is
+// reached through a symbolic link, or a context that is, is excluded under
+// both its configured and its real path. Podman matches paths, so unlike
+// remote builds a hard link to a secrets file under another name is not
+// caught.
 func mandatoryLocalBuildExcludes(contextDir string) ([]string, error) {
 	excludes := []string{".azud/secrets", "**/.azud/secrets", ".azud/.secrets-*.tmp", "**/.azud/.secrets-*.tmp"}
 
@@ -100,36 +105,34 @@ func mandatoryLocalBuildExcludes(contextDir string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve build context path: %w", err)
 	}
-	absSecrets, err := filepath.Abs(getSecretsFilePath())
-	if err != nil {
+	// secretContextExclusions skips a path it cannot resolve; fail closed.
+	if _, err := filepath.Abs(getSecretsFilePath()); err != nil {
 		return nil, fmt.Errorf("failed to resolve secrets path: %w", err)
 	}
-	rel, err := filepath.Rel(absContext, absSecrets)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		// The secrets file is outside the context and cannot be sent.
-		return excludes, nil
-	}
 
-	rel = filepath.ToSlash(rel)
-	if rel == ".azud/secrets" {
-		return excludes, nil
-	}
-	pattern, err := escapeIgnorePattern(rel)
-	if err != nil {
-		return nil, err
-	}
-	excludes = append(excludes, pattern)
-
-	tmpPattern := ".secrets-*.tmp"
-	if dir := filepath.ToSlash(filepath.Dir(rel)); dir != "." {
-		escapedDir, err := escapeIgnorePattern(dir)
+	secrets := secretContextExclusions(absContext)
+	for _, rel := range secrets.paths {
+		if rel == ".azud/secrets" {
+			continue
+		}
+		pattern, err := escapeIgnorePattern(rel)
 		if err != nil {
 			return nil, err
 		}
-		tmpPattern = escapedDir + "/" + tmpPattern
+		excludes = append(excludes, pattern)
 	}
-	if tmpPattern != ".azud/.secrets-*.tmp" {
-		excludes = append(excludes, tmpPattern)
+	for _, dir := range secrets.tempDirs {
+		tmpPattern := secretsfile.TempPattern
+		if dir != "." {
+			escapedDir, err := escapeIgnorePattern(dir)
+			if err != nil {
+				return nil, err
+			}
+			tmpPattern = escapedDir + "/" + tmpPattern
+		}
+		if tmpPattern != ".azud/.secrets-*.tmp" {
+			excludes = append(excludes, tmpPattern)
+		}
 	}
 	return excludes, nil
 }

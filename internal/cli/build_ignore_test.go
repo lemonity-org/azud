@@ -219,3 +219,72 @@ func TestLocalBuildExcludesMatchRemoteForNestedSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalBuildExcludesResolveSymlinks(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	globNames := runtime.GOOS != "windows"
+	files := []string{"app/Dockerfile", "app/prod.env", "app/config/prod.env", "app/.secrets-1.tmp", "app/config/.secrets-2.tmp"}
+	if globNames {
+		files = append(files, "app/p*.env")
+	}
+	for _, name := range files {
+		writeTestFile(t, filepath.Join(project, filepath.FromSlash(name)), name)
+	}
+	writeTestFile(t, filepath.Join(outside, "real.env"), "A=1\n")
+	links := map[string]string{
+		"credentials":     filepath.Join("app", "prod.env"),
+		"conf":            filepath.Join("app", "config"),
+		"linked":          "app",
+		"app/outside.env": filepath.Join(outside, "real.env"),
+	}
+	if globNames {
+		links["glob-link"] = filepath.Join("app", "p*.env")
+	}
+	for link, target := range links {
+		if err := os.Symlink(target, filepath.Join(project, filepath.FromSlash(link))); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		secretsPath string
+		context     string
+		ignored     []string
+		kept        []string
+		glob        bool
+	}{
+		{name: "secrets path links into context", secretsPath: "credentials", context: "app", ignored: []string{"prod.env", ".secrets-1.tmp"}, kept: []string{"Dockerfile"}},
+		{name: "secrets directory links into context", secretsPath: "conf/prod.env", context: "app", ignored: []string{"config/prod.env", "config/.secrets-2.tmp"}, kept: []string{"Dockerfile", "prod.env", ".secrets-1.tmp"}},
+		{name: "missing secrets file in linked directory", secretsPath: "conf/missing.env", context: "app", ignored: []string{"config/missing.env", "config/.secrets-2.tmp"}, kept: []string{"Dockerfile", "config/prod.env"}},
+		{name: "context through symlink", secretsPath: "app/prod.env", context: "linked", ignored: []string{"prod.env", ".secrets-1.tmp"}, kept: []string{"Dockerfile"}},
+		{name: "secrets path in context links outside", secretsPath: "app/outside.env", context: "app", ignored: []string{"outside.env"}, kept: []string{"Dockerfile", "prod.env"}},
+		{name: "resolved name escaped", secretsPath: "glob-link", context: "app", ignored: []string{"p*.env"}, kept: []string{"Dockerfile", "prod.env"}, glob: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.glob && !globNames {
+				t.Skip("path is not valid on Windows")
+			}
+			useSecretsPath(t, project, tt.secretsPath)
+			path, cleanup, err := writeLocalBuildIgnoreFile(tt.context, "Dockerfile")
+			if err != nil {
+				t.Fatalf("writeLocalBuildIgnoreFile: %v", err)
+			}
+			defer cleanup()
+			body := readFileString(t, path)
+			patterns := parseIgnorePatterns(body)
+			for _, name := range tt.ignored {
+				if !shouldIgnore(name, false, patterns) {
+					t.Errorf("%s is not excluded from the build context:\n%s", name, body)
+				}
+			}
+			for _, name := range tt.kept {
+				if shouldIgnore(name, false, patterns) {
+					t.Errorf("%s is excluded from the build context:\n%s", name, body)
+				}
+			}
+		})
+	}
+}

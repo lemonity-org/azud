@@ -308,10 +308,13 @@ ignore file Podman would use for the build (`<Dockerfile>.dockerignore`,
 `<Dockerfile>.containerignore`, `.containerignore`, then `.dockerignore`).
 Azud appends `.azud/secrets` at any depth, the configured `secrets_path` when
 it is inside the build context, and the secrets writer's `.secrets-*.tmp` files
-next to them as the last rules, so a `!` rule cannot put them back. Podman
-matches these rules by path, so unlike remote builds, a hard link to the
-secrets file under another name is not excluded. The flag needs a Podman
-release that supports `--ignorefile` (4.0 or later).
+next to them as the last rules, so a `!` rule cannot put them back. Symlinks
+are resolved as for remote builds: a `secrets_path` that links to a file in the
+context is excluded under the target's path too, as is one reached through a
+symlinked context directory. Podman matches these rules by path, so unlike
+remote builds, a hard link to the secrets file under another name is not
+excluded. The flag needs a Podman release that supports `--ignorefile` (4.0 or
+later).
 
 ## Deployment Settings
 
