@@ -1,6 +1,6 @@
 module github.com/lemonity-org/azud
 
-go 1.26.6
+go 1.26.10
 
 require (
 	github.com/mattn/go-isatty v0.0.24

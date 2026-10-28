@@ -1,5 +1,5 @@
 # Stage 1: Build static binary
-FROM docker.io/library/golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS builder
+FROM docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown
