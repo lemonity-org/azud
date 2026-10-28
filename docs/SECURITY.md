@@ -54,7 +54,9 @@ Practical security recommendations for Azud deployments.
   ignore-file negations cannot re-include them. Remote builds also exclude
   hard links to the secrets file. Local builds pass these rules to `podman
   build --ignorefile`, which matches paths only, so keep hard-linked or
-  renamed copies of secrets out of the build context.
+  renamed copies of secrets out of the build context, and spell
+  `secrets_path` with the same letter case as the build context on
+  case-insensitive filesystems.
 - Store secrets in your CI secret store and reconstruct at runtime
 - Prefer environment variables or secret managers in production
 - `azud env push` and `azud setup` deliver the runtime secrets file only to

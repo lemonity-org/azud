@@ -53,3 +53,26 @@ func TestLoadSecretsFromFileWarnsButLoadsInsecureMode(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadSecretsFromFileRejectsRawDotDot(t *testing.T) {
+	t.Cleanup(func() { SetLoadedSecrets(nil) })
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "app", "x", "y"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app", "x", "prod.env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("x", "y"), filepath.Join(dir, "app", "sub")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Cleaned, this is app/prod.env, but the OS opens app/x/prod.env through
+	// the symlink, which build exclusions computed from the cleaned path miss.
+	path := filepath.Join(dir, "app", "sub") + "/../prod.env"
+	err := (&Loader{}).loadSecretsFromFile(&Config{SecretsPath: path})
+	if err == nil || !strings.Contains(err.Error(), "path traversal") {
+		t.Fatalf("loadSecretsFromFile(%q) error = %v, want path traversal error", path, err)
+	}
+}
