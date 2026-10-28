@@ -6,6 +6,11 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Updated Go to 1.26.10 for standard-library advisories GO-2026-6599,
+  GO-2026-6600, GO-2026-6603, GO-2026-6604, GO-2026-6605, GO-2026-6607 to
+  GO-2026-6613, GO-2026-6617, and GO-2026-6809. None was reachable from
+  Azud's code, but the fixed packages are linked into the binary.
+
 ## 1.3.0 - 2026-10-28
 
 - Fixed the vulnerabilities described in GHSA-ff4m-7w2r-4jf9, most
