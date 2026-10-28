@@ -173,7 +173,12 @@ release notes for the corresponding signed tag.
   with a brief interruption. Routes are kept through Caddy's autosave. The
   old container is kept as `azud-proxy-legacy` until the replacement
   answers; if it does not, Azud restores and restarts the old container
-  and fails with the reason. Quadlet-managed proxies are not recreated
+  and fails with the reason. The migration holds the host-wide Caddy lock,
+  so deploys of different services to one host cannot interleave it, and
+  the old container's autosave and running state are saved to
+  `proxy-migration.json` (mode 0600) in the Azud state directory until it
+  finishes, so a retry after an interrupted migration can still restore
+  them. Quadlet-managed proxies are not recreated
   imperatively: rerun `azud systemd enable`, and until then deploys and
   `azud preflight` fail with that hint.
 - **Breaking:** Changed Azud to strip every Caddy `admin` setting other

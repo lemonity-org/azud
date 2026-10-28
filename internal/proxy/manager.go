@@ -58,6 +58,10 @@ const (
 	// CaddyConfigFileName is the name of the Caddy config file.
 	CaddyConfigFileName = "caddy-config.json"
 
+	// proxyRollbackFileName holds, in the Azud state directory, what a failed
+	// proxy migration restores. See proxyRollback.
+	proxyRollbackFileName = "proxy-migration.json"
+
 	// CaddyLockFileName is the name of the Caddy lock file.
 	CaddyLockFileName = "caddy.lock"
 
@@ -100,6 +104,7 @@ type Manager struct {
 	sshClient   *ssh.Client
 	caddyClient *CaddyClient
 	podman      *podman.ContainerManager
+	images      *podman.ImageManager
 	log         *output.Logger
 	user        string // SSH user for state directory paths
 	rootful     bool
@@ -136,6 +141,7 @@ func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user strin
 		sshClient:   sshClient,
 		caddyClient: NewCaddyClient(sshClient, podmanCmd, log),
 		podman:      podman.NewContainerManager(podmanClient),
+		images:      podman.NewImageManager(podmanClient),
 		log:         log,
 		user:        user,
 		rootful:     rootful,
@@ -262,6 +268,7 @@ func (m *Manager) ensureRootfulAccess(host string) error {
 // proxyContainer holds the inspected fields Azud uses to decide whether an
 // existing proxy container still matches the definition it would create.
 type proxyContainer struct {
+	ID          string
 	Cmd         []string
 	Env         []string
 	Labels      map[string]string
@@ -278,6 +285,7 @@ func (m *Manager) inspectProxyContainer(host string) (*proxyContainer, error) {
 
 func parseProxyContainer(raw []byte) (*proxyContainer, error) {
 	var payload []struct {
+		ID     string `json:"Id"`
 		Config struct {
 			Cmd    []string          `json:"Cmd"`
 			Env    []string          `json:"Env"`
@@ -299,6 +307,7 @@ func parseProxyContainer(raw []byte) (*proxyContainer, error) {
 	inspected := payload[0]
 	_, onHostNetwork := inspected.NetworkSettings.Networks["host"]
 	return &proxyContainer{
+		ID:          inspected.ID,
 		Cmd:         inspected.Config.Cmd,
 		Env:         inspected.Config.Env,
 		Labels:      inspected.Config.Labels,
@@ -513,18 +522,24 @@ func (m *Manager) persistConfig(host string) error {
 	return nil
 }
 
-// persistConfigCommand writes stdin to the protected Caddy config. The temp
-// file comes from mktemp (random name, O_EXCL), so a pre-planted path or
-// symlink is never written through. A symlink left at the final path is
-// removed rather than followed, and mv then renames over it.
+// persistConfigCommand writes stdin to the protected Caddy config.
 func persistConfigCommand(user string) string {
-	configDir := state.DirQuoted(user)
-	configFile := state.ConfigFileQuoted(user, CaddyConfigFileName)
-	script := fmt.Sprintf("set -eu; umask 077; mkdir -p %s; chmod 700 %s; "+ // safe: all values come from state.*Quoted
+	return writeStateFileCommand(user, CaddyConfigFileName)
+}
+
+// writeStateFileCommand writes stdin to a protected file in the Azud state
+// directory. The temp file comes from mktemp (random name, O_EXCL), so a
+// pre-planted path or symlink is never written through. A symlink left at
+// the final path is removed rather than followed, and mv then renames over
+// it. name must be a constant file name.
+func writeStateFileCommand(user, name string) string {
+	stateDir := state.DirQuoted(user)
+	stateFile := state.ConfigFileQuoted(user, name)
+	script := fmt.Sprintf("set -eu; umask 077; mkdir -p %s; chmod 700 %s; "+ // safe: all values come from state.*Quoted and constant names
 		"tmp=$(mktemp %s/.%s.XXXXXX); trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; "+
 		"cat > \"$tmp\"; chmod 600 \"$tmp\"; "+
 		"if [ -L %s ]; then rm -f %s; fi; mv -f \"$tmp\" %s; trap - EXIT",
-		configDir, configDir, configDir, CaddyConfigFileName, configFile, configFile, configFile)
+		stateDir, stateDir, stateDir, name, stateFile, stateFile, stateFile)
 	return "sh -c " + shell.Quote(script)
 }
 
@@ -573,10 +588,16 @@ func (m *Manager) persistedConfigAutosave(host string) ([]byte, bool, error) {
 }
 
 func restoreConfigCommand(user string) string {
-	configDir := state.DirQuoted(user)
-	configFile := state.ConfigFileQuoted(user, CaddyConfigFileName)
+	return readStateFileCommand(user, CaddyConfigFileName)
+}
+
+// readStateFileCommand prints a protected file in the Azud state directory
+// and fails when it is missing. name must be a constant file name.
+func readStateFileCommand(user, name string) string {
+	stateDir := state.DirQuoted(user)
+	stateFile := state.ConfigFileQuoted(user, name)
 	// Refuse a symlink: chmod and cat would otherwise act on its target.
-	return fmt.Sprintf("test -f %s && test ! -L %s && chmod 700 %s && chmod 600 %s && cat %s", configFile, configFile, configDir, configFile, configFile) // safe: all values come from state.*Quoted
+	return fmt.Sprintf("test -f %s && test ! -L %s && chmod 700 %s && chmod 600 %s && cat %s", stateFile, stateFile, stateDir, stateFile, stateFile) // safe: all values come from state.*Quoted and constant names
 }
 
 type ProxyConfig struct {
@@ -636,7 +657,33 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
 	}
+	m.ensureCaddyImage(host)
+	return m.withCaddyLock(host, func() error {
+		return m.bootLocked(host, config)
+	})
+}
 
+// ensureCaddyImage pulls the Caddy image when the host lacks it, before Boot
+// takes the Caddy lock, so a slow pull does not hold other commands on the
+// host past CaddyLockTimeout. A failure is left to the command that needs
+// the image to report.
+func (m *Manager) ensureCaddyImage(host string) {
+	if present, err := m.images.Exists(host, CaddyImage); err != nil || present {
+		return
+	}
+	m.log.Host(host, "Pulling proxy image...")
+	if err := m.images.Pull(host, CaddyImage); err != nil {
+		m.log.Debug("ensureCaddyImage: %v", err)
+	}
+}
+
+// bootLocked starts the proxy while the caller holds the Caddy lock. Every
+// step that inspects, renames, creates or removes the proxy containers runs
+// under that one host-wide lock: commands for different services hold
+// different deployment locks, and a concurrent Boot would otherwise take a
+// running migration's azud-proxy-legacy for an interrupted one. The lock
+// is not re-entrant, so nothing called from here may take it again.
+func (m *Manager) bootLocked(host string, config *ProxyConfig) error {
 	running, err := m.podman.IsRunning(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy status: %w", err)
@@ -672,7 +719,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 		// A normal deploy must fail closed when Azud's configured admin endpoint
 		// is unreachable; only explicit proxy reboot performs autosave recovery.
 		if config != nil {
-			if err := m.withPersistedMutation(host, func() error {
+			if err := m.withPersistedMutationLocked(host, func() error {
 				return m.applyConfigPreservingRoutes(host, config)
 			}); err != nil {
 				return fmt.Errorf("failed to apply proxy config: %w", err)
@@ -741,6 +788,7 @@ func (m *Manager) Boot(host string, config *ProxyConfig) error {
 	}
 	if migration != nil {
 		m.removeLegacyProxy(host)
+		m.clearProxyRollback(host)
 	}
 
 	if err := m.finalizeProxyStartup(host, config, hasAutosave); err != nil {
@@ -772,11 +820,90 @@ type proxyMigration struct {
 	running bool
 }
 
+// proxyRollback is what a failed migration restores: the previous
+// container's running state and autosave. recreateOutdatedProxy saves it to
+// proxyRollbackFileName before it stops that container, and Boot deletes it
+// once the migration has succeeded or been rolled back. A Boot interrupted
+// in between leaves this file as the only copy: the container is stopped,
+// and the volume may already hold the replacement's socket autosave, which
+// the previous container cannot start with.
+type proxyRollback struct {
+	// Container is the previous container's ID, which a rename keeps. State
+	// saved for any other container is stale and ignored.
+	Container string `json:"container"`
+	Running   bool   `json:"running"`
+	// Snapshotted is set once Autosave holds the autosave read after the
+	// stop. Autosave is empty when there was none.
+	Snapshotted bool   `json:"snapshotted"`
+	Autosave    string `json:"autosave,omitempty"`
+}
+
+func (r *proxyRollback) original() caddyAutosave {
+	return caddyAutosave{data: []byte(r.Autosave), present: strings.TrimSpace(r.Autosave) != ""}
+}
+
+// loadProxyRollback returns the rollback state an interrupted migration of
+// container left on the host, or nil when there is none. State found while
+// the container runs is stale too: its rollback already restarted it.
+func (m *Manager) loadProxyRollback(host, container string, running bool) (*proxyRollback, error) {
+	result, err := m.sshClient.Execute(host, readStateFileCommand(m.user, proxyRollbackFileName))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read proxy migration state: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return nil, nil
+	}
+	var rollback proxyRollback
+	if err := json.Unmarshal([]byte(result.Stdout), &rollback); err != nil {
+		m.log.Warn("Ignoring unreadable proxy migration state on %s: %v", host, err)
+		return nil, nil
+	}
+	if running || container == "" || rollback.Container != container {
+		return nil, nil
+	}
+	return &rollback, nil
+}
+
+// saveProxyRollback writes rollback to the Azud state directory with the
+// protections of the persisted Caddy config: the autosave may hold private
+// keys.
+func (m *Manager) saveProxyRollback(host string, rollback *proxyRollback) error {
+	data, err := json.Marshal(rollback)
+	if err != nil {
+		return fmt.Errorf("failed to encode proxy migration state: %w", err)
+	}
+	result, err := m.sshClient.ExecuteWithStdin(host, writeStateFileCommand(m.user, proxyRollbackFileName), bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to save proxy migration state: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to save proxy migration state: %s", strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+// clearProxyRollback deletes the rollback state once the migration no longer
+// needs it. State left behind names a container that is running or gone and
+// is ignored, so a failure is a warning.
+func (m *Manager) clearProxyRollback(host string) {
+	result, err := m.sshClient.Execute(host, fmt.Sprintf("rm -f %s", state.ConfigFileQuoted(m.user, proxyRollbackFileName)))
+	if err == nil && result.ExitCode != 0 {
+		err = errors.New(strings.TrimSpace(result.Stderr))
+	}
+	if err != nil {
+		m.log.Warn("Failed to remove proxy migration state on %s: %v", host, err)
+	}
+}
+
 // recreateOutdatedProxy moves aside an existing proxy container that does
-// not match the current definition. It follows the order stop, snapshot and
-// normalize the autosave, rename: Caddy has finished writing its autosave
-// before the snapshot, and a failed snapshot restarts the previous container
-// in place. The caller creates the replacement with the returned autosave.
+// not match the current definition. It follows the order save the rollback
+// state, stop, snapshot and normalize the autosave, save the snapshot,
+// rename: the rollback state is on the host before anything changes, Caddy
+// has finished writing its autosave before the snapshot, and a failed
+// snapshot restarts the previous container in place. A retry after an
+// interrupted migration starts from the saved state instead of the stopped
+// container and the volume. The caller creates the replacement with the
+// returned autosave.
 func (m *Manager) recreateOutdatedProxy(host string, running bool) (*proxyMigration, error) {
 	container, err := m.inspectProxyContainer(host)
 	if err != nil {
@@ -791,43 +918,74 @@ func (m *Manager) recreateOutdatedProxy(host string, running bool) (*proxyMigrat
 	}
 
 	m.log.Host(host, "Recreating proxy container (%s)...", strings.Join(reasons, ", "))
+	rollback, err := m.loadProxyRollback(host, container.ID, running)
+	if err != nil {
+		return nil, fmt.Errorf("proxy container on %s was not recreated: %w", host, err)
+	}
+	if rollback == nil {
+		rollback = &proxyRollback{Container: container.ID, Running: running}
+		if err := m.saveProxyRollback(host, rollback); err != nil {
+			return nil, fmt.Errorf("proxy container on %s was not recreated: %w", host, err)
+		}
+	} else {
+		m.log.Host(host, "Resuming an interrupted proxy migration...")
+		if rollback.Snapshotted {
+			// The interrupted Boot may have installed the replacement's
+			// autosave; put back the previous container's, as its rollback
+			// would have.
+			if err := m.restoreCaddyAutosave(host, rollback.original()); err != nil {
+				return nil, fmt.Errorf("proxy container on %s was not recreated and remains stopped: %w", host, err)
+			}
+		}
+	}
 	if running {
 		_ = m.podman.Stop(host, CaddyContainerName, 30)
 	}
-	raw, err := m.readCaddyAutosave(host)
-	if err != nil {
-		return nil, m.restartPreviousProxy(host, running, err)
+	if !rollback.Snapshotted {
+		raw, err := m.readCaddyAutosave(host)
+		if err != nil {
+			return nil, m.restartPreviousProxy(host, rollback.Running, err)
+		}
+		rollback.Autosave, rollback.Snapshotted = raw, true
+		if err := m.saveProxyRollback(host, rollback); err != nil {
+			return nil, m.restartPreviousProxy(host, rollback.Running, err)
+		}
 	}
-	data, present, err := m.normalizeCaddyAutosave(host, raw)
+	data, present, err := m.normalizeCaddyAutosave(host, rollback.Autosave)
 	if err != nil {
-		return nil, m.restartPreviousProxy(host, running, err)
+		return nil, m.restartPreviousProxy(host, rollback.Running, err)
 	}
 	if err := m.podman.Rename(host, CaddyContainerName, legacyProxyContainerName); err != nil {
-		return nil, m.restartPreviousProxy(host, running, err)
+		return nil, m.restartPreviousProxy(host, rollback.Running, err)
 	}
 	return &proxyMigration{
 		autosave: caddyAutosave{data: data, present: present},
-		original: caddyAutosave{data: []byte(raw), present: strings.TrimSpace(raw) != ""},
-		running:  running,
+		original: rollback.original(),
+		running:  rollback.Running,
 	}, nil
 }
 
 // restartPreviousProxy starts the outdated container recreateOutdatedProxy
-// stopped when the migration fails before its replacement is created.
+// stopped when the migration fails before its replacement is created. The
+// rollback state is kept only when the container could not be restarted.
 func (m *Manager) restartPreviousProxy(host string, running bool, cause error) error {
 	if !running {
+		m.clearProxyRollback(host)
 		return fmt.Errorf("proxy container on %s was not recreated: %w", host, cause)
 	}
 	if err := m.podman.Start(host, CaddyContainerName); err != nil {
 		return fmt.Errorf("proxy container on %s was stopped but not recreated: %v (restarting it also failed: %v)", host, cause, err)
 	}
+	m.clearProxyRollback(host)
 	return fmt.Errorf("proxy container on %s was not recreated; restarted the previous container: %w", host, cause)
 }
 
 // abortProxyMigration restores the previous proxy container when its
 // replacement does not start, so a failed migration leaves the old proxy
 // serving instead of none. The failed replacement is removed: left in place
-// it carries the current spec, and the next Boot would only restart it. It
+// it carries the current spec, and the next Boot would only restart it. The
+// rollback state stays on the host until the previous container is back in
+// its original state, so the next Boot can finish an incomplete rollback. It
 // returns cause unchanged when Boot is not migrating.
 func (m *Manager) abortProxyMigration(host string, migration *proxyMigration, cause error) error {
 	if migration == nil {
@@ -854,6 +1012,7 @@ func (m *Manager) abortProxyMigration(host string, migration *proxyMigration, ca
 			return fmt.Errorf("%v (rollback incomplete: the previous proxy container was restored but did not start: %v)", cause, err)
 		}
 	}
+	m.clearProxyRollback(host)
 	return fmt.Errorf("proxy on %s was rolled back to its previous, outdated container because the replacement failed: %w", host, cause)
 }
 
@@ -868,9 +1027,9 @@ func (m *Manager) removeLegacyProxy(host string) {
 
 // recoverInterruptedMigration settles a container that an interrupted Boot
 // left under legacyProxyContainerName. Without a running replacement it is
-// renamed back, so this Boot migrates it again with a working rollback;
-// otherwise it is no longer needed. It returns the updated existence and
-// running state of the proxy container.
+// renamed back, so this Boot migrates it again from the saved rollback
+// state; otherwise it is no longer needed. It returns the updated existence
+// and running state of the proxy container.
 func (m *Manager) recoverInterruptedMigration(host string, exists, running bool) (bool, bool, error) {
 	legacy, err := m.podman.Exists(host, legacyProxyContainerName)
 	if err != nil {
@@ -881,6 +1040,7 @@ func (m *Manager) recoverInterruptedMigration(host string, exists, running bool)
 	}
 	if running {
 		m.removeLegacyProxy(host)
+		m.clearProxyRollback(host)
 		return exists, running, nil
 	}
 	m.log.Host(host, "Restoring proxy container left by an interrupted migration...")
@@ -988,19 +1148,21 @@ func (m *Manager) PrepareQuadletStart(host string, replaceContainer bool) error 
 	return m.installCaddyAutosave(host, autosave)
 }
 
+// finalizeProxyStartup applies Azud's configuration to a freshly started
+// proxy. The caller holds the Caddy lock.
 func (m *Manager) finalizeProxyStartup(host string, config *ProxyConfig, hasAutosave bool) error {
 	if hasAutosave {
 		// --resume selected the authoritative autosave. Never overwrite it with
 		// Azud's potentially older protected bootstrap copy.
 		if config != nil {
-			if err := m.withPersistedMutation(host, func() error {
+			if err := m.withPersistedMutationLocked(host, func() error {
 				return m.applyConfigPreservingRoutes(host, config)
 			}); err != nil {
 				return fmt.Errorf("failed to apply proxy config after resume: %w", err)
 			}
 			return nil
 		}
-		if err := m.withCaddyLock(host, func() error { return m.persistConfig(host) }); err != nil {
+		if err := m.persistConfig(host); err != nil {
 			return fmt.Errorf("failed to persist resumed proxy config: %w", err)
 		}
 		return nil
@@ -1008,7 +1170,7 @@ func (m *Manager) finalizeProxyStartup(host string, config *ProxyConfig, hasAuto
 
 	// No autosave existed before startup, so Caddy used the stock fallback.
 	// Restore Azud's protected bootstrap copy or initialize a minimal config.
-	if err := m.withPersistedMutation(host, func() error {
+	if err := m.withPersistedMutationLocked(host, func() error {
 		if err := m.restoreConfig(host); err != nil {
 			return m.loadInitialConfig(host, config)
 		}
@@ -1406,7 +1568,16 @@ func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return err
 	}
+	m.ensureCaddyImage(host)
+	return m.withCaddyLock(host, func() error {
+		return m.rebootLocked(host, config)
+	})
+}
 
+// rebootLocked restarts the proxy while the caller holds the Caddy lock, so
+// a reboot cannot stop or restart the container in the middle of another
+// command's migration.
+func (m *Manager) rebootLocked(host string, config *ProxyConfig) error {
 	exists, err := m.podman.Exists(host, CaddyContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check proxy container: %w", err)
@@ -1426,7 +1597,8 @@ func (m *Manager) Reboot(host string, config *ProxyConfig) error {
 		// order, restores the previous container if the replacement fails,
 		// and then restores Azud's configuration.
 		m.log.Host(host, "Migrating proxy container before reboot...")
-		return m.Boot(host, config)
+		m.proxyConfig = config
+		return m.bootLocked(host, config)
 	}
 
 	running, err := m.podman.IsRunning(host, CaddyContainerName)
@@ -1474,10 +1646,11 @@ func (m *Manager) Remove(host string) error {
 		return fmt.Errorf("failed to remove proxy: %w", err)
 	}
 
-	// The persisted JSON may contain private key material. Treat failure to
-	// remove it as a command failure instead of claiming the proxy was fully
-	// removed while sensitive state remains behind.
-	rmCmd := fmt.Sprintf("rm -f %s", state.ConfigFileQuoted(m.user, CaddyConfigFileName))
+	// The persisted JSON and any migration rollback state may contain private
+	// key material. Treat failure to remove them as a command failure instead
+	// of claiming the proxy was fully removed while sensitive state remains
+	// behind.
+	rmCmd := fmt.Sprintf("rm -f %s %s", state.ConfigFileQuoted(m.user, CaddyConfigFileName), state.ConfigFileQuoted(m.user, proxyRollbackFileName))
 	result, err := m.sshClient.Execute(host, rmCmd)
 	if err != nil {
 		return fmt.Errorf("proxy container removed but persisted config cleanup failed: %w", err)

@@ -112,6 +112,56 @@ func TestRestoreConfigCommandRefusesSymlink(t *testing.T) {
 	}
 }
 
+// The migration rollback state holds a raw Caddy autosave, which may carry
+// private keys, so it gets the persisted config's protections.
+func TestProxyRollbackStateIsAProtectedStateFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	home := t.TempDir()
+	outside := t.TempDir()
+	stateDir := filepath.Join(home, ".local", "share", "azud")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(stateDir, proxyRollbackFileName)
+	if err := os.Symlink(victim, stateFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStateCommand(t, home, readStateFileCommand("deploy", proxyRollbackFileName), ""); err == nil {
+		t.Fatal("read accepted a symlinked rollback state file")
+	}
+
+	saved := `{"container":"abc","running":true,"snapshotted":true,"autosave":"{\"admin\":{\"listen\":\"0.0.0.0:2019\"}}"}`
+	if err := runStateCommand(t, home, writeStateFileCommand("deploy", proxyRollbackFileName), saved); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if data, _ := os.ReadFile(victim); string(data) != "original" {
+		t.Fatalf("write followed a symlink: victim = %q", data)
+	}
+	info, err := os.Lstat(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirInfo, err := os.Stat(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("rollback state mode = %v in a %v directory, want a regular 0600 file in 0700", info.Mode(), dirInfo.Mode().Perm())
+	}
+	cmd := exec.Command("sh", "-c", readStateFileCommand("deploy", proxyRollbackFileName))
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil || string(out) != saved {
+		t.Fatalf("read = %q, %v; want %q", out, err, saved)
+	}
+}
+
 func TestCopyManagedProxySettingsRemovesLogCredentials(t *testing.T) {
 	newConfig := func(server map[string]interface{}) map[string]interface{} {
 		return map[string]interface{}{
