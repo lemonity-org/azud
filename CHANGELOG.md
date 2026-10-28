@@ -98,6 +98,42 @@ release notes for the corresponding signed tag.
   registry password reference, with a warning naming them; a bare `AZUD_`
   prefix also warns. Use a dedicated prefix such as `AZUD_SECRET_`. Custom
   TLS references must name the secret without the prefix.
+- Added one hardened local secrets writer used by `azud init`, `env set`,
+  `env delete`, `env pull`, and `env edit`. It writes an fsynced 0600
+  temporary file in the same directory and renames it into place, so it
+  never writes through symlinks or hard links and repairs a group- or
+  other-readable file, with a warning. `.azud` is created with mode 0700.
+- **Breaking:** Changed `azud env set/delete/pull/edit` and `azud init` to
+  refuse a secrets path that is a symbolic link or not a regular file; set
+  `secrets_path` to the real file instead.
+- **Breaking:** Changed `azud env set` to reject keys that do not match
+  `[A-Za-z_][A-Za-z0-9_]*` and values containing CR, LF, or NUL or longer
+  than 60 KiB, and `azud env push` and `azud setup` to reject such values
+  from every secrets provider before contacting a host, since an embedded
+  newline could add or override entries in the remote env file. Encode
+  multi-line application secrets, for example as base64.
+- Changed `azud env set KEY` to read the value from stdin (a prompt without
+  echo on a terminal, or one line from a pipe). Passing the value as an
+  argument still works but is deprecated and prints a warning.
+- Fixed `azud env set` rewriting the secrets file with only the new key
+  when the existing file could not be read, and `azud init` overwriting an
+  existing `.azud/secrets` and hook scripts.
+- **Breaking:** Changed `azud preflight` to fail when the file-provider
+  secrets file is readable by group or others; run `chmod 600` on it. Other
+  commands still only warn, now with the fix in the message, and no longer
+  warn on Windows.
+- Fixed `azud init` skipping the `.azud/secrets` `.gitignore` rule when the
+  file only mentioned the path in a comment, a near-miss pattern, a
+  directory-only rule, or a negation. Only exact active rules count, a
+  symlinked `.gitignore` is refused, and init also ignores the writer's
+  `.azud/.secrets-*.tmp` files.
+- Changed local `azud build` to always pass `podman build --ignorefile`
+  with the effective ignore file plus `.azud/secrets` at any depth, an
+  in-context `secrets_path` and the writer's temporary files appended last,
+  so local images can no longer contain local secrets. This needs Podman 4
+  or later. `azud init` now creates or extends `.dockerignore` with
+  `.azud/`, `.git/`, and `.azud/secrets`, and leaves a symlinked container
+  ignore file unchanged with a warning.
 
 ## 1.2.1 - 2026-09-28
 
