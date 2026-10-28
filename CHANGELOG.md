@@ -6,6 +6,15 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.3.0 - 2026-10-28
+
+- Fixed the vulnerabilities described in GHSA-ff4m-7w2r-4jf9, most
+  importantly workload containers being able to read and replace the Caddy
+  proxy configuration through its unauthenticated admin API. Read the
+  **Breaking** entries below before upgrading: the first deploy or
+  `azud proxy boot` recreates the proxy once, Quadlet-managed proxies need
+  `azud systemd enable`, and cron jobs with `lock: true` need
+  `azud cron boot`.
 - Changed the release workflow to wait for the required test and live
   integration checks on the tagged commit to finish instead of failing when a
   tag is pushed while they are still running.
