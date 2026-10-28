@@ -37,6 +37,37 @@ release notes for the corresponding signed tag.
   Authorization, Cookie, Proxy-Authorization and Set-Cookie in access logs
   stays on. Documented that other credential headers need
   `redact_request_headers` and that query strings are logged in clear.
+- **Breaking:** Changed config environment expansion to substitute
+  `${VAR}`/`$VAR` only inside YAML values after parsing, so an environment
+  value can no longer add keys, list items, or comments (for example
+  `hosts: [${HOSTS}]` with `HOSTS="a, b"` is now one invalid host). Values
+  containing newlines or control characters, or longer than 64 KiB, are
+  rejected with an error that names the variable; references in mapping
+  keys are rejected and references in comments are ignored. `$$` now writes
+  a literal `$` (for example `robot$$ci`), and destination files follow
+  the same rules.
+- Changed configuration loading to validate the configuration before
+  loading secrets, so an invalid configuration never runs
+  `secrets_command`.
+- Fixed a failing `secrets_command` printing its output, often the secrets
+  themselves, in the error. Only stdout is parsed as `KEY=VALUE` secrets,
+  stderr is passed through to the terminal, stdout is limited to 1 MiB, and
+  a background process that keeps the output open no longer defeats the
+  30s timeout.
+- **Breaking:** Fixed `-d/--destination` accepting path separators and
+  `..`, which could merge a YAML file outside the config directory.
+  Destination names must start with a letter or digit and contain only
+  letters, digits, dots, underscores, and hyphens (at most 63), and an
+  override file that exists but cannot be read is now an error.
+- **Breaking:** Changed image reference validation (`image`,
+  `accessories.*.image`, `proxy.healthcheck.helper_image`) to follow the
+  OCI reference grammar, so values such as `--privileged`, `foo;bar`,
+  uppercase repository paths, or surrounding whitespace are rejected when
+  the config loads.
+- **Breaking:** Changed `azud config`, `azud completion <shell>` and shell
+  tab completion to stop running `secrets_command`. `azud config` validates
+  without loading secrets (use `azud env list` to check that secrets load),
+  and completion no longer loads the configuration.
 
 ## 1.2.1 - 2026-09-28
 
