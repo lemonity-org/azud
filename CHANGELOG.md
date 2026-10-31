@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.4.0 - 2026-10-31
+
 - Added pull-mode deploys. `azud agent run` runs on the server, follows the
   registry tag in `agent.track`, and deploys each new digest it points to on
   that server, after `agent.verify_command` (for example `cosign verify`)
