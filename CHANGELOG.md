@@ -6,13 +6,15 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
-- Added `agent.deploy_command` and `agent.deploy_timeout`. The agent follows
-  its tag and verifies each image as before, then hands the verified image to
-  this command on the server instead of running Azud's deploy, for services
-  whose releases need their own steps. The command runs under the host's
-  deploy lock with `AZUD_AGENT_IMAGE` set, streams its output to the agent's
-  log, and gets `SIGTERM` (then a kill a minute later) after the timeout
-  (default 30m). It is not supported with `source: bundle`. See
+- Added `agent.deploy_command`, `agent.deploy_timeout` and
+  `agent.deploy_stop_grace`. The agent follows its tag and verifies each image
+  as before, then hands the verified image to this command on the server
+  instead of running Azud's deploy, for services whose releases need their
+  own steps. The command runs under the host's deploy lock with
+  `AZUD_AGENT_IMAGE` set and streams its output to the agent's log. After the
+  timeout (default 30m), the command and every process it started get
+  `SIGTERM`, and whatever still runs after the grace period (default 1m) is
+  killed. It is not supported with `source: bundle`. See
   `docs/PULL_MODE.md`.
 
 ## 1.5.0 - 2026-10-31

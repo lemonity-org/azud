@@ -183,6 +183,7 @@ agent:
   deploy_command: >-
     exec /srv/app/bin/release "$$AZUD_AGENT_IMAGE"
   deploy_timeout: 30m    # default 30m
+  deploy_stop_grace: 1m  # default 1m
 ```
 
 The command runs through `/bin/sh` on the server, as `ssh.user`, after
@@ -199,9 +200,12 @@ verification passed, with the variables `verify_command` gets plus
   it as failed, with the last 40 output lines, and it is not retried until the
   tag moves (or `--once --retry-failed`). Output streams to the agent's log as
   it is written.
-- **Time.** After `deploy_timeout` the command gets `SIGTERM`, so a deploy
-  script can roll back, and is killed a minute later. A stop request does not
-  interrupt it: the unit gives a deploy up to 30 minutes to finish.
+- **Time.** After `deploy_timeout`, the command and every process it started
+  (it runs in its own process group) get `SIGTERM`, so a deploy script can
+  roll back. Whatever is still running `deploy_stop_grace` later is killed;
+  raise it when your rollback takes longer than a minute. A stop request does
+  not interrupt the command: the unit gives a deploy up to 30 minutes to
+  finish.
 - **Adoption.** As with Azud's deploy, a digest that every role already runs
   is recorded as deployed without running the command.
 
