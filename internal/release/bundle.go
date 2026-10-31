@@ -10,10 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/registry"
 )
 
@@ -38,13 +39,11 @@ const (
 	formatVersion  = 1
 )
 
-// configNameRegex matches the configuration file names a bundle carries:
-// deploy.yml and deploy.<destination>.yml.
-var configNameRegex = regexp.MustCompile(`^deploy(\.[a-zA-Z0-9][a-zA-Z0-9_-]{0,62})?\.yml$`)
-
-// destinationRegex matches a destination name, the middle of
-// deploy.<destination>.yml.
-var destinationRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
+// configFileName reports whether name is a configuration file a release
+// with this destination carries: deploy.yml, or deploy.<destination>.yml.
+func configFileName(name, destination string) bool {
+	return name == "deploy.yml" || destination != "" && name == "deploy."+destination+".yml"
+}
 
 // Info is release.json, the bundle's config blob.
 type Info struct {
@@ -128,6 +127,9 @@ func Build(info Info, image Descriptor, files []File, secrets []byte) (*Bundle, 
 	if err != nil {
 		return nil, err
 	}
+	if len(infoJSON) > maxInfoBytes {
+		return nil, fmt.Errorf("release.json would be %d bytes; a release allows %d", len(infoJSON), maxInfoBytes)
+	}
 	b := &Bundle{blobs: [][]byte{infoJSON}}
 	m := manifest{
 		SchemaVersion: 2,
@@ -142,11 +144,11 @@ func Build(info Info, image Descriptor, files []File, secrets []byte) (*Bundle, 
 	}
 	seen := map[string]bool{}
 	for _, f := range files {
-		if f.Name != "deploy.yml" && f.Name != "deploy."+info.Destination+".yml" {
+		if !configFileName(f.Name, info.Destination) {
 			return nil, fmt.Errorf("%s is not deploy.yml or the destination file deploy.%s.yml", f.Name, info.Destination)
 		}
-		if !configNameRegex.MatchString(f.Name) || seen[f.Name] {
-			return nil, fmt.Errorf("invalid or repeated configuration file name %q", f.Name)
+		if seen[f.Name] {
+			return nil, fmt.Errorf("repeated configuration file %q", f.Name)
 		}
 		if len(f.Data) > MaxConfigBytes {
 			return nil, fmt.Errorf("%s exceeds %d bytes", f.Name, MaxConfigBytes)
@@ -183,27 +185,20 @@ func Publish(ctx context.Context, repo *registry.Repository, b *Bundle) error {
 	return err
 }
 
-// Promote points tag at the bundle with the given digest, after checking that
-// the digest names a release bundle of service.
+// Promote points tag at the bundle with the given digest, after reading it
+// with every check Fetch makes and checking it is a release of service, so a
+// tag never points at a bundle a server would refuse to read.
 func Promote(ctx context.Context, repo *registry.Repository, digest, tag, service string) error {
+	rel, err := Fetch(ctx, repo, digest)
+	if err != nil {
+		return err
+	}
+	if rel.Info.Service != service {
+		return fmt.Errorf("%s is a release of %q, not %q", digest, rel.Info.Service, service)
+	}
 	m, err := repo.Manifest(ctx, digest)
 	if err != nil {
 		return err
-	}
-	parsed, err := parseManifest(m)
-	if err != nil {
-		return err
-	}
-	infoJSON, err := repo.Blob(ctx, parsed.Config.Digest, maxInfoBytes)
-	if err != nil {
-		return err
-	}
-	info, err := parseInfo(infoJSON)
-	if err != nil {
-		return err
-	}
-	if info.Service != service {
-		return fmt.Errorf("%s is a release of %q, not %q", digest, info.Service, service)
 	}
 	_, err = repo.PutManifest(ctx, tag, manifestMediaType, m.Body)
 	return err
@@ -230,6 +225,9 @@ func Fetch(ctx context.Context, repo *registry.Repository, digest string) (*Rele
 	infoJSON, err := repo.Blob(ctx, parsed.Config.Digest, parsed.Config.Size)
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(infoJSON)) != parsed.Config.Size {
+		return nil, fmt.Errorf("release %s: release.json is %d bytes, not the declared %d", digest, len(infoJSON), parsed.Config.Size)
 	}
 	info, err := parseInfo(infoJSON)
 	if err != nil {
@@ -267,7 +265,7 @@ func Fetch(ctx context.Context, repo *registry.Repository, digest string) (*Rele
 		if layer.MediaType == SecretsMediaType {
 			rel.Secrets = data
 		} else {
-			if title != "deploy.yml" && title != "deploy."+info.Destination+".yml" {
+			if !configFileName(title, info.Destination) {
 				return nil, fmt.Errorf("release %s: %s is not deploy.yml or the destination file of %q", digest, title, info.Destination)
 			}
 			rel.Files = append(rel.Files, File{Name: title, Data: data})
@@ -302,7 +300,7 @@ func parseManifest(m registry.Manifest) (*manifest, error) {
 		switch {
 		case !registry.ValidDigest(layer.Digest) || layer.Size < 0:
 			return nil, fmt.Errorf("%s has a malformed layer descriptor", m.Digest)
-		case layer.MediaType == ConfigMediaType && configNameRegex.MatchString(title):
+		case layer.MediaType == ConfigMediaType && strings.HasPrefix(title, "deploy.") && strings.HasSuffix(title, ".yml"):
 		case layer.MediaType == SecretsMediaType && title == SecretsFile:
 		default:
 			return nil, fmt.Errorf("%s has an unexpected layer %q (%s)", m.Digest, title, layer.MediaType)
@@ -334,7 +332,7 @@ func validateInfo(info Info) error {
 		return fmt.Errorf("release.json has an invalid image digest %q", info.Image)
 	case info.Created.IsZero():
 		return fmt.Errorf("release.json has no creation time")
-	case info.Destination != "" && !destinationRegex.MatchString(info.Destination):
+	case info.Destination != "" && config.ValidateDestination(info.Destination) != nil:
 		return fmt.Errorf("release.json has an invalid destination %q", info.Destination)
 	case !slices.IsSorted(info.Secrets):
 		return fmt.Errorf("release.json lists secrets out of order")
