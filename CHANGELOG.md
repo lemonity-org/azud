@@ -6,6 +6,11 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Fixed rollback after a digest-pinned deploy. History records such a deploy's
+  version as its digest, and automatic fleet rollback, `azud rollback`,
+  `azud deploy --version`, `azud canary deploy --version` and
+  `azud systemd enable` built the invalid reference `image:sha256:...` from
+  it. They now use `image@sha256:...`.
 - Updated Go to 1.26.10 for standard-library advisories GO-2026-6599,
   GO-2026-6600, GO-2026-6603, GO-2026-6604, GO-2026-6605, GO-2026-6607 to
   GO-2026-6613, GO-2026-6617, and GO-2026-6809. None was reachable from

@@ -269,7 +269,7 @@ func resolveSystemdImage(log *output.Logger) string {
 
 	history := deploy.NewDurableHistoryStore(cfg.Deploy.RetainHistory, log)
 	if last, err := history.GetLastSuccessful(cfg.Service); err == nil && last.Version != "" {
-		return fmt.Sprintf("%s:%s", image, last.Version)
+		return deploy.ImageAtVersion(image, last.Version)
 	}
 
 	return fmt.Sprintf("%s:latest", image)
