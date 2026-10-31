@@ -908,11 +908,71 @@ func Validate(cfg *Config) error {
 		errs = append(errs, ValidationError{Field: "aliases", Message: "command aliases are not supported"})
 	}
 
+	errs = append(errs, validateAgent(cfg)...)
+
 	if len(errs) > 0 {
 		return errs
 	}
 
 	return nil
+}
+
+// validateAgent checks the pull-mode settings. A missing agent section is
+// valid: push deploys do not use it.
+func validateAgent(cfg *Config) ValidationErrors {
+	agent := cfg.Agent
+	if !agent.Configured() {
+		return nil
+	}
+
+	var errs ValidationErrors
+	switch {
+	case agent.Track == "":
+		errs = append(errs, ValidationError{Field: "agent.track", Message: "the registry tag to follow is required"})
+	case !imageTagRegex.MatchString(agent.Track):
+		errs = append(errs, ValidationError{Field: "agent.track", Message: fmt.Sprintf("invalid tag: %q", agent.Track)})
+	}
+
+	if agent.Interval != 0 && agent.Interval < AgentMinInterval {
+		errs = append(errs, ValidationError{Field: "agent.interval", Message: fmt.Sprintf("must be at least %s", AgentMinInterval)})
+	}
+	if agent.VerifyTimeout < 0 {
+		errs = append(errs, ValidationError{Field: "agent.verify_timeout", Message: "must be non-negative"})
+	}
+
+	switch {
+	case agent.VerifyCommand == "" && !agent.InsecureSkipVerify:
+		errs = append(errs, ValidationError{
+			Field:   "agent.verify_command",
+			Message: "required: the agent must verify an image before deploying it (set insecure_skip_verify: true to deploy unverified images)",
+		})
+	case agent.VerifyCommand != "" && agent.InsecureSkipVerify:
+		errs = append(errs, ValidationError{
+			Field:   "agent.insecure_skip_verify",
+			Message: "set verify_command or insecure_skip_verify, not both",
+		})
+	case agent.VerifyCommand != "" &&
+		!strings.Contains(agent.VerifyCommand, "AZUD_AGENT_IMAGE") &&
+		!strings.Contains(agent.VerifyCommand, "AZUD_AGENT_DIGEST"):
+		// The loader expands $VARS from the environment, so a plain
+		// "$AZUD_AGENT_IMAGE" is already gone by now.
+		errs = append(errs, ValidationError{
+			Field:   "agent.verify_command",
+			Message: `must name the image it verifies: write "$$AZUD_AGENT_IMAGE" (Azud expands $VARS when it loads the configuration; $$ keeps a literal $)`,
+		})
+	}
+
+	// The agent deploys the server it runs on. Fleet-wide steps such as the
+	// pre-deploy command and cross-host rollback need one coordinator, so
+	// pull mode is limited to services that run on a single server.
+	if hosts := cfg.GetAllHosts(); len(hosts) > 1 {
+		errs = append(errs, ValidationError{
+			Field:   "agent",
+			Message: fmt.Sprintf("pull mode deploys services that run on one server; servers lists %d hosts", len(hosts)),
+		})
+	}
+
+	return errs
 }
 
 func validateRoleTmpfs(mount RoleTmpfsConfig) error {

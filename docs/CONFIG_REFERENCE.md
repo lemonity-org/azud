@@ -532,7 +532,28 @@ azud hooks list          Show all hooks with status (ready/missing/not executabl
 azud hooks run <name>    Run a hook with test AZUD_* context
 ```
 
+## Pull-Mode Agent
+
+`azud agent` runs on the server, follows a registry tag, and deploys each new
+digest it points to. See `docs/PULL_MODE.md`.
+
+```yaml
+agent:
+  track: production        # Registry tag to follow (required)
+  interval: 1m             # Check interval (default: 1m, minimum: 10s)
+  verify_command: >-       # Must exit 0 before an image is deployed
+    cosign verify --certificate-identity ... "$$AZUD_AGENT_IMAGE"
+  verify_timeout: 2m       # Limit for verify_command (default: 2m)
+  # insecure_skip_verify: true  # Deploy unverified images instead
+```
+
+One of `verify_command` and `insecure_skip_verify` is required. Write
+`$$AZUD_AGENT_IMAGE`: `$$` keeps the variable for the agent to set instead of
+expanding it when the configuration loads. Pull mode is limited to services
+whose `servers` list a single host.
+
 ## Related docs
 
 - `docs/GETTING_STARTED.md`
 - `docs/CLI_REFERENCE.md`
+- `docs/PULL_MODE.md`

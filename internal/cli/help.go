@@ -129,7 +129,7 @@ func writeCommandIndex(writer io.Writer, command *cobra.Command, widthLimit int)
 
 func rootCommandGroup(name string) string {
 	switch name {
-	case "build", "deploy", "history", "preflight", "redeploy", "rollback", "setup":
+	case "agent", "build", "deploy", "history", "preflight", "redeploy", "rollback", "setup":
 		return "DEPLOY"
 	case "accessory", "app", "canary", "cron", "proxy", "scale":
 		return "OPERATE"

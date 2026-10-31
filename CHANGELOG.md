@@ -6,6 +6,13 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added pull-mode deploys. `azud agent run` runs on the server, follows the
+  registry tag in `agent.track`, and deploys each new digest it points to on
+  that server, after `agent.verify_command` (for example `cosign verify`)
+  passes. CI then needs no SSH access or deploy secrets. `azud agent status`
+  shows what the agent saw and deployed, and `azud agent unit` prints a
+  systemd user unit. Pull mode supports services that run on one server; see
+  `docs/PULL_MODE.md`.
 - Fixed rollback after a digest-pinned deploy. History records such a deploy's
   version as its digest, and automatic fleet rollback, `azud rollback`,
   `azud deploy --version`, `azud canary deploy --version` and

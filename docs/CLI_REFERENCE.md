@@ -148,6 +148,45 @@ azud deploy --version v1.2.3   # Deploy specific tag
 azud deploy --skip-build       # Deploy existing image without building
 ```
 
+#### `azud agent run`
+
+Run on the server in pull mode: follow `agent.track` and deploy each new
+image on this server after `agent.verify_command` passes. See
+`docs/PULL_MODE.md`.
+
+**Usage:**
+```bash
+azud agent run [flags]
+```
+
+**Flags:**
+*   `--once`: Check the tag once and exit. Exits non-zero if the deploy fails
+    or the tag points to a release that failed before.
+*   `--retry-failed`: With `--once`, retry a release that failed before.
+
+**Examples:**
+```bash
+azud agent run                        # Run until stopped (systemd)
+azud agent run --once                 # Check the tag once
+azud agent run --once --retry-failed  # Retry a release that failed
+```
+
+#### `azud agent status`
+
+Show the tag the agent follows, the digest it last saw, the digest it
+deployed, and the last failure.
+
+#### `azud agent unit`
+
+Print a systemd user unit that runs `azud agent run` with the current
+configuration, destination, and working directory.
+
+```bash
+azud agent unit > ~/.config/systemd/user/azud-agent-myapp.service
+systemctl --user daemon-reload
+systemctl --user enable --now azud-agent-myapp.service
+```
+
 ### Build
 
 #### `azud build`
