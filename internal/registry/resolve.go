@@ -66,6 +66,20 @@ func (r Reference) apiHost() string {
 	return r.Registry
 }
 
+// ParseRepository parses an image name without a tag or digest, such as
+// ghcr.io/org/app, into a Reference with an empty Tag.
+func ParseRepository(name string) (Reference, error) {
+	if strings.ContainsAny(name, "@") || strings.LastIndexByte(name, ':') > strings.LastIndexByte(name, '/') {
+		return Reference{}, fmt.Errorf("%q names a tag or digest; a repository is required", name)
+	}
+	ref, err := ParseReference(name + ":latest")
+	if err != nil {
+		return Reference{}, err
+	}
+	ref.Tag = ""
+	return ref, nil
+}
+
 // ParseReference parses an image reference that names a tag. Digest
 // references are rejected: there is nothing to resolve.
 func ParseReference(ref string) (Reference, error) {
