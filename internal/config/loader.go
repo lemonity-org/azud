@@ -716,6 +716,12 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("agent", "insecure_skip_verify") || destNode == nil && dest.Agent.InsecureSkipVerify {
 		merged.Agent.InsecureSkipVerify = dest.Agent.InsecureSkipVerify
 	}
+	if dest.Agent.DeployCommand != "" {
+		merged.Agent.DeployCommand = dest.Agent.DeployCommand
+	}
+	if has("agent", "deploy_timeout") || destNode == nil && dest.Agent.DeployTimeout != 0 {
+		merged.Agent.DeployTimeout = dest.Agent.DeployTimeout
+	}
 	if dest.Agent.Source != "" {
 		merged.Agent.Source = dest.Agent.Source
 	}
@@ -974,6 +980,9 @@ func applyDefaults(cfg *Config) {
 		}
 		if cfg.Agent.VerifyTimeout == 0 {
 			cfg.Agent.VerifyTimeout = 2 * time.Minute
+		}
+		if cfg.Agent.DeployCommand != "" && cfg.Agent.DeployTimeout == 0 {
+			cfg.Agent.DeployTimeout = AgentDefaultDeployTimeout
 		}
 	}
 }

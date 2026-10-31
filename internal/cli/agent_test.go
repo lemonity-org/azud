@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/registry"
 	"github.com/lemonity-org/azud/internal/ssh"
@@ -174,5 +178,58 @@ func TestRunAgentRunPreconditions(t *testing.T) {
 	agentOnce, agentRetryFailed = true, false
 	if err := runAgentRun(agentRunCmd, nil); err == nil || !strings.Contains(err.Error(), "agent.track") {
 		t.Fatalf("missing agent.track = %v", err)
+	}
+}
+
+type recordingLocker struct {
+	host, lockFile string
+	timeout        time.Duration
+}
+
+func (l *recordingLocker) WithRemoteLock(host, lockFile string, timeout time.Duration, fn func() error) error {
+	l.host, l.lockFile, l.timeout = host, lockFile, timeout
+	return fn()
+}
+
+func TestCommandDeployRunsUnderTheDeployLock(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env")
+	cfg := &config.Config{
+		Service: "app",
+		SSH:     config.SSHConfig{User: "deploy"},
+		Deploy:  config.DeployConfig{DeployTimeout: time.Minute},
+		Agent: config.AgentConfig{
+			DeployCommand: `printf '%s\n' "$AZUD_AGENT_IMAGE" "$AZUD_SERVICE" "$AZUD_AGENT_REF" "$AZUD_DEPLOY_LOCK" > ` + envFile,
+			DeployTimeout: time.Minute,
+		},
+	}
+	locker := &recordingLocker{}
+	image := "ghcr.io/acme/app@sha256:" + strings.Repeat("a", 64)
+	deployFn := commandDeploy(cfg, locker, "203.0.113.10", "ghcr.io/acme/app:production", io.Discard)
+	if err := deployFn(context.Background(), image); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	wantLock, wantTimeout := deploy.DeployLock(cfg)
+	if locker.host != "203.0.113.10" || locker.lockFile != wantLock || locker.timeout != wantTimeout {
+		t.Fatalf("lock = %+v; want %s on the agent host", locker, wantLock)
+	}
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{image, "app", "ghcr.io/acme/app:production", wantLock}, "\n") + "\n"
+	if string(got) != want {
+		t.Fatalf("command environment = %q, want %q", got, want)
+	}
+}
+
+func TestCommandDeployReportsTheCommandFailure(t *testing.T) {
+	cfg := &config.Config{
+		Service: "app",
+		SSH:     config.SSHConfig{User: "deploy"},
+		Agent:   config.AgentConfig{DeployCommand: `echo "contract preflight failed" >&2; exit 1`},
+	}
+	err := commandDeploy(cfg, &recordingLocker{}, "h", "r", io.Discard)(context.Background(), "ghcr.io/acme/app@sha256:"+strings.Repeat("b", 64))
+	if err == nil || !strings.Contains(err.Error(), "contract preflight failed") {
+		t.Fatalf("deploy = %v; want the command output", err)
 	}
 }

@@ -960,6 +960,22 @@ func validateAgent(cfg *Config) ValidationErrors {
 	if agent.VerifyTimeout < 0 {
 		errs = append(errs, ValidationError{Field: "agent.verify_timeout", Message: "must be non-negative"})
 	}
+	if agent.DeployTimeout < 0 {
+		errs = append(errs, ValidationError{Field: "agent.deploy_timeout", Message: "must be non-negative"})
+	}
+	switch {
+	case agent.DeployCommand == "" && agent.DeployTimeout != 0:
+		errs = append(errs, ValidationError{Field: "agent.deploy_timeout", Message: "applies to deploy_command"})
+	case agent.DeployCommand != "" &&
+		!strings.Contains(agent.DeployCommand, "AZUD_AGENT_IMAGE") &&
+		!strings.Contains(agent.DeployCommand, "AZUD_AGENT_DIGEST"):
+		// Without the variable the command would deploy something other
+		// than the image that was just verified.
+		errs = append(errs, ValidationError{
+			Field:   "agent.deploy_command",
+			Message: `must name the image it deploys: write "$$AZUD_AGENT_IMAGE" (Azud expands $VARS when it loads the configuration; $$ keeps a literal $)`,
+		})
+	}
 
 	switch {
 	case agent.VerifyCommand == "" && !agent.InsecureSkipVerify:
@@ -989,6 +1005,12 @@ func validateAgent(cfg *Config) ValidationErrors {
 			errs = append(errs, ValidationError{Field: "agent.source", Message: "identity and allow_downgrade apply to source: bundle"})
 		}
 	case AgentSourceBundle:
+		// A bundle swaps secrets and configuration as part of Azud's own
+		// deploy and restores them if it fails; a custom command would run
+		// outside that transaction.
+		if agent.DeployCommand != "" {
+			errs = append(errs, ValidationError{Field: "agent.deploy_command", Message: "not supported with source: bundle"})
+		}
 		// The recipients are public keys, so anyone who can move the tag
 		// could build a bundle with secrets this server decrypts. Only a
 		// signature proves who built it.
