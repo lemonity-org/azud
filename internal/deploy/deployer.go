@@ -137,6 +137,14 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 	}
 }
 
+// WithoutHooks makes the deployer skip every hook. A pull-mode agent applying
+// a release bundle uses it: hooks would be host commands chosen by whoever
+// controls the working directory, outside what the bundle's signature covers.
+func (d *Deployer) WithoutHooks() *Deployer {
+	d.hooks = &HookRunner{disabled: true, log: d.log}
+	return d
+}
+
 func (d *Deployer) hookContext(opts *DeployOptions, image, version string) *HookContext {
 	return &HookContext{
 		Service:     d.cfg.Service,

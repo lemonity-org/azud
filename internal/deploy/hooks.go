@@ -71,6 +71,7 @@ type HookRunner struct {
 	hooksPath string
 	timeout   time.Duration
 	log       *output.Logger
+	disabled  bool
 }
 
 // NewHookRunner creates a new hook runner
@@ -206,6 +207,9 @@ func (h *HookRunner) wrapError(name string, hc *hookCmd, err error) error {
 // Run executes a hook by name with the given context. The parent context
 // allows callers to cancel hook execution externally.
 func (h *HookRunner) Run(parent context.Context, name string, ctx *HookContext) error {
+	if h.disabled {
+		return nil
+	}
 	hookPath, err := h.resolveHook(name)
 	if hookPath == "" || err != nil {
 		return err
@@ -230,6 +234,9 @@ func (h *HookRunner) Run(parent context.Context, name string, ctx *HookContext) 
 // RunWithOutput executes a hook and returns its output. The parent context
 // allows callers to cancel hook execution externally.
 func (h *HookRunner) RunWithOutput(parent context.Context, name string, ctx *HookContext) (string, error) {
+	if h.disabled {
+		return "", nil
+	}
 	hookPath, err := h.resolveHook(name)
 	if hookPath == "" || err != nil {
 		return "", err

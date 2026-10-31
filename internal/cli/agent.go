@@ -80,15 +80,35 @@ Example:
 	RunE: runAgentUnit,
 }
 
+var agentInitCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Create this server's key for release bundles",
+	Long: `Create the age identity that decrypts release bundles' secrets on this
+server, at agent.identity (default ~/.config/azud/agent/<service>.age, mode
+0600), and print its public recipient. Add the recipient to
+release.recipients in the repository's config/deploy.yml, publish a release,
+and set agent.source: bundle on this server.
+
+The private key never leaves this server. An existing identity is never
+replaced.`,
+	Annotations: map[string]string{
+		skipSecretsAnnotation: "true",
+	},
+	RunE: runAgentInit,
+}
+
 var (
-	agentOnce        bool
-	agentRetryFailed bool
+	agentOnce           bool
+	agentRetryFailed    bool
+	agentAllowDowngrade bool
 )
 
 func init() {
 	agentRunCmd.Flags().BoolVar(&agentOnce, "once", false, "Check the tag once and exit")
 	agentRunCmd.Flags().BoolVar(&agentRetryFailed, "retry-failed", false, "With --once, retry a release that failed before")
+	agentRunCmd.Flags().BoolVar(&agentAllowDowngrade, "allow-downgrade", false, "With --once, deploy a release bundle older than the deployed one (a rollback)")
 
+	agentCmd.AddCommand(agentInitCmd)
 	agentCmd.AddCommand(agentRunCmd)
 	agentCmd.AddCommand(agentStatusCmd)
 	agentCmd.AddCommand(agentUnitCmd)
@@ -101,6 +121,12 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 
 	if agentRetryFailed && !agentOnce {
 		return fmt.Errorf("--retry-failed requires --once")
+	}
+	if agentAllowDowngrade && !agentOnce {
+		return fmt.Errorf("--allow-downgrade requires --once")
+	}
+	if agentAllowDowngrade && !cfg.Agent.Bundles() {
+		return fmt.Errorf("--allow-downgrade applies to agent.source: bundle")
 	}
 	if cfg.Agent.Track == "" {
 		return fmt.Errorf("agent.track is not configured")
@@ -141,6 +167,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	store := agent.NewStore(stateDir, cfg.Service)
 	a := &agent.Agent{
 		Ref:        repository + ":" + cfg.Agent.Track,
 		Repository: repository,
@@ -157,8 +184,41 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 				Destination: GetDestination(),
 			})
 		},
-		State: agent.NewStore(stateDir, cfg.Service),
+		State: store,
 		Log:   log,
+	}
+	if cfg.Agent.Bundles() {
+		identity, err := agentIdentityPath(cfg)
+		if err != nil {
+			return err
+		}
+		applier := &bundleApplier{
+			server:         cfg,
+			repo:           resolver.Repository(ref.Registry, ref.Repository, creds),
+			dir:            agentReleasesDir(stateDir, cfg.Service),
+			identity:       identity,
+			allowDowngrade: cfg.Agent.AllowDowngrade || agentAllowDowngrade,
+			deployed: func() (string, error) {
+				st, err := store.Load()
+				return st.DeployedDigest, err
+			},
+			deploy: func(ctx context.Context, release *config.Config, image string) error {
+				pinned := *release
+				pinned.Image = image
+				// Hooks never run for a bundle: they are host commands outside
+				// what its signature covers.
+				deployer := deploy.NewDeployer(&pinned, sshClient, log).WithoutHooks()
+				return deployer.Deploy(ctx, &deploy.DeployOptions{
+					Hosts:       []string{host},
+					Destination: GetDestination(),
+				})
+			},
+			log: log,
+		}
+		// A bundle carries configuration and secrets as well as the image,
+		// so a matching running image proves nothing: never adopt.
+		a.Running = nil
+		a.Deploy = applier.Deploy
 	}
 	if cfg.Agent.InsecureSkipVerify {
 		log.Warn("agent.insecure_skip_verify is set: images are deployed without verification")
@@ -179,7 +239,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		return a.Run(cmd.Context(), cfg.Agent.Interval)
 	}
 
-	outcome, digest, err := a.Reconcile(cmd.Context(), agentRetryFailed)
+	outcome, digest, err := a.Reconcile(cmd.Context(), agentRetryFailed || agentAllowDowngrade)
 	switch outcome {
 	case agent.Unchanged:
 		log.Success("%s is deployed (%s)", a.Ref, digest)
@@ -225,7 +285,7 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		}
 		return s
 	}
-	log.Table([]string{"Field", "Value"}, [][]string{
+	rows := [][]string{
 		{"Following", st.Ref},
 		{"Last check", formatTime(st.LastCheckAt)},
 		{"Tag points to", orDash(st.LastSeenDigest)},
@@ -234,7 +294,11 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		{"Failed", orDash(st.FailedDigest)},
 		{"Failed at", formatTime(st.FailedAt)},
 		{"Last error", orDash(firstLine(st.LastError))},
-	})
+	}
+	if cfg.Agent.Bundles() {
+		rows = append(rows, bundleStatusRows(stateDir, cfg, st.DeployedDigest)...)
+	}
+	log.Table([]string{"Field", "Value"}, rows)
 	return nil
 }
 

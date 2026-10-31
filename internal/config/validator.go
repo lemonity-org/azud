@@ -983,6 +983,25 @@ func validateAgent(cfg *Config) ValidationErrors {
 		})
 	}
 
+	switch agent.Source {
+	case "", AgentSourceImage:
+		if agent.Identity != "" || agent.AllowDowngrade {
+			errs = append(errs, ValidationError{Field: "agent.source", Message: "identity and allow_downgrade apply to source: bundle"})
+		}
+	case AgentSourceBundle:
+		// The recipients are public keys, so anyone who can move the tag
+		// could build a bundle with secrets this server decrypts. Only a
+		// signature proves who built it.
+		if agent.InsecureSkipVerify {
+			errs = append(errs, ValidationError{
+				Field:   "agent.insecure_skip_verify",
+				Message: "not allowed with source: bundle; a bundle carries configuration and secrets, so it must be verified",
+			})
+		}
+	default:
+		errs = append(errs, ValidationError{Field: "agent.source", Message: fmt.Sprintf("must be %q or %q, not %q", AgentSourceImage, AgentSourceBundle, agent.Source)})
+	}
+
 	// The agent deploys the server it runs on. Fleet-wide steps such as the
 	// pre-deploy command and cross-host rollback need one coordinator, so
 	// pull mode is limited to services that run on a single server.
