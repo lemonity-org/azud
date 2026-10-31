@@ -142,11 +142,10 @@ CI pushes the image, signs it, and only then moves the tag:
 - name: Sign
   run: cosign sign --yes ghcr.io/acme/app@${{ steps.build.outputs.digest }}
 
+- uses: imjasonh/setup-crane@v0.4
+
 - name: Release to production
-  run: |
-    docker buildx imagetools create \
-      --tag ghcr.io/acme/app:production \
-      ghcr.io/acme/app@${{ steps.build.outputs.digest }}
+  run: crane tag ghcr.io/acme/app@${{ steps.build.outputs.digest }} production
 
 - name: Wait for the release to go live
   run: |
@@ -157,6 +156,10 @@ CI pushes the image, signs it, and only then moves the tag:
     echo "production did not report ${{ github.sha }}" >&2
     exit 1
 ```
+
+Move the tag with a command that points it at the signed manifest itself, such
+as `crane tag`. `docker buildx imagetools create --tag` wraps a single-platform
+image in a new index whose digest has no signature, so verification fails.
 
 The job needs `packages: write` and `id-token: write`, and nothing that reaches
 the server. The last step gives CI a pass or fail without any server access;
