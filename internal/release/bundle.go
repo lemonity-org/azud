@@ -42,6 +42,10 @@ const (
 // deploy.yml and deploy.<destination>.yml.
 var configNameRegex = regexp.MustCompile(`^deploy(\.[a-zA-Z0-9][a-zA-Z0-9_-]{0,62})?\.yml$`)
 
+// destinationRegex matches a destination name, the middle of
+// deploy.<destination>.yml.
+var destinationRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
+
 // Info is release.json, the bundle's config blob.
 type Info struct {
 	Format int `json:"format"`
@@ -138,6 +142,9 @@ func Build(info Info, image Descriptor, files []File, secrets []byte) (*Bundle, 
 	}
 	seen := map[string]bool{}
 	for _, f := range files {
+		if f.Name != "deploy.yml" && f.Name != "deploy."+info.Destination+".yml" {
+			return nil, fmt.Errorf("%s is not deploy.yml or the destination file deploy.%s.yml", f.Name, info.Destination)
+		}
 		if !configNameRegex.MatchString(f.Name) || seen[f.Name] {
 			return nil, fmt.Errorf("invalid or repeated configuration file name %q", f.Name)
 		}
@@ -260,6 +267,9 @@ func Fetch(ctx context.Context, repo *registry.Repository, digest string) (*Rele
 		if layer.MediaType == SecretsMediaType {
 			rel.Secrets = data
 		} else {
+			if title != "deploy.yml" && title != "deploy."+info.Destination+".yml" {
+				return nil, fmt.Errorf("release %s: %s is not deploy.yml or the destination file of %q", digest, title, info.Destination)
+			}
 			rel.Files = append(rel.Files, File{Name: title, Data: data})
 		}
 	}
@@ -324,6 +334,8 @@ func validateInfo(info Info) error {
 		return fmt.Errorf("release.json has an invalid image digest %q", info.Image)
 	case info.Created.IsZero():
 		return fmt.Errorf("release.json has no creation time")
+	case info.Destination != "" && !destinationRegex.MatchString(info.Destination):
+		return fmt.Errorf("release.json has an invalid destination %q", info.Destination)
 	case !slices.IsSorted(info.Secrets):
 		return fmt.Errorf("release.json lists secrets out of order")
 	}
