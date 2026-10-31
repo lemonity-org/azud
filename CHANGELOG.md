@@ -6,8 +6,10 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.6.0 - 2026-10-31
+
 - Added `agent.deploy_command`, `agent.deploy_timeout` and
-  `agent.deploy_stop_grace`. The agent follows its tag and verifies each image
+  `agent.deploy_stop_grace` (#57). The agent follows its tag and verifies each image
   as before, then hands the verified image to this command on the server
   instead of running Azud's deploy, for services whose releases need their
   own steps. The command runs under the host's deploy lock with
