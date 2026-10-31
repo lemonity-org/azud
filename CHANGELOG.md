@@ -6,6 +6,13 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added release bundles (preview, #52). `azud release publish` pushes one OCI
+  artifact per release with the image digest, the configuration files as
+  written, and the runtime secrets encrypted with age to `release.recipients`;
+  `azud release promote` moves a tag to it after signing, and
+  `azud release inspect` shows what it contains without decrypting secrets.
+  The agent does not apply bundles yet.
+
 ## 1.4.0 - 2026-10-31
 
 - Added pull-mode deploys. `azud agent run` runs on the server, follows the

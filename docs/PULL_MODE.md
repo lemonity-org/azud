@@ -180,6 +180,27 @@ State lives in `~/.local/share/azud/agent/<service>.json` for non-root users
 (`/var/lib/azud/agent/` for root). Deployment history is recorded on the
 server, as for any deploy run there.
 
+## Release bundles (preview)
+
+A release bundle is one OCI artifact per release, in the image's repository,
+that carries the image digest, `config/deploy.yml` and the destination file as
+written, and the runtime secrets encrypted with [age](https://age-encryption.org)
+to the keys in `release.recipients`. CI publishes, signs and promotes it:
+
+```bash
+azud release publish --image "$IMAGE_DIGEST" -d production --digest-file bundle.digest
+cosign sign --yes "ghcr.io/acme/app@$(cat bundle.digest)"
+azud release promote "$(cat bundle.digest)" --track production
+azud release inspect production      # image, commit, secret names; never values
+```
+
+`publish` loads the secrets with `secrets_provider`, as `azud env push` does,
+and refuses to publish when a secret named in `env.secret` or an accessory is
+missing. It never tags, so a tag only ever points at a signed bundle.
+
+The agent does not apply bundles yet: that is the next step (issue #52). Until
+then, keep following image tags as described above.
+
 ## Limitations
 
 - One server per service.

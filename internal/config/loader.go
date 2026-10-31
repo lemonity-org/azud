@@ -152,11 +152,17 @@ func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 
 // getDestinationPath returns the path for destination-specific config
 func (l *Loader) getDestinationPath() (string, error) {
-	dir := filepath.Dir(l.basePath)
-	ext := filepath.Ext(l.basePath)
-	base := strings.TrimSuffix(filepath.Base(l.basePath), ext)
+	return DestinationPath(l.basePath, l.destination)
+}
 
-	path := filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, l.destination, ext))
+// DestinationPath returns the destination file that belongs to basePath, such
+// as config/deploy.production.yml for config/deploy.yml.
+func DestinationPath(basePath, destination string) (string, error) {
+	dir := filepath.Dir(basePath)
+	ext := filepath.Ext(basePath)
+	base := strings.TrimSuffix(filepath.Base(basePath), ext)
+
+	path := filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, destination, ext))
 	if filepath.Dir(path) != dir {
 		return "", fmt.Errorf("destination config path %s escapes the config directory", path)
 	}
@@ -704,6 +710,11 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	}
 	if has("agent", "insecure_skip_verify") || destNode == nil && dest.Agent.InsecureSkipVerify {
 		merged.Agent.InsecureSkipVerify = dest.Agent.InsecureSkipVerify
+	}
+
+	// Merge release
+	if has("release", "recipients") || destNode == nil && len(dest.Release.Recipients) > 0 {
+		merged.Release.Recipients = dest.Release.Recipients // replace (empty list clears)
 	}
 
 	// Merge cron

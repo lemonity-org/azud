@@ -19,7 +19,6 @@ import (
 	"github.com/lemonity-org/azud/internal/registry"
 	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
-	"github.com/lemonity-org/azud/pkg/version"
 )
 
 var agentCmd = &cobra.Command{
@@ -136,8 +135,8 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	})
 	defer func() { _ = sshClient.Close() }()
 
-	resolver := &registry.Resolver{UserAgent: "azud/" + version.Version}
-	creds, err := agentRegistryCredentials(cfg, ref)
+	resolver := newRegistryResolver()
+	creds, err := registryCredentials(cfg, ref)
 	if err != nil {
 		return err
 	}
@@ -348,12 +347,12 @@ func imageRepository(image string) string {
 	return image
 }
 
-// agentRegistryCredentials returns the configured registry credentials when
+// registryCredentials returns the configured registry credentials when
 // they belong to the registry the followed image lives in, and nil otherwise,
 // so credentials are never sent to a different registry. A configured password
 // that cannot be found is an error, as it is for a pushed deploy: resolving
 // anonymously instead would only fail later with a less useful message.
-func agentRegistryCredentials(cfg *config.Config, ref registry.Reference) (*registry.Credentials, error) {
+func registryCredentials(cfg *config.Config, ref registry.Reference) (*registry.Credentials, error) {
 	if cfg.Registry.Username == "" || len(cfg.Registry.Password) == 0 {
 		return nil, nil
 	}

@@ -552,6 +552,22 @@ One of `verify_command` and `insecure_skip_verify` is required. Write
 expanding it when the configuration loads. Pull mode is limited to services
 whose `servers` list a single host.
 
+## Release Bundles
+
+`azud release publish` builds a release bundle: the image digest, the
+configuration files as written, and the runtime secrets encrypted to these
+recipients. See `docs/PULL_MODE.md`.
+
+```yaml
+release:
+  recipients:              # age X25519 public keys (age1...)
+    - age1qx...            # each pull-mode server
+    - age1zz...            # optional break-glass key
+```
+
+Every listed key can decrypt every release's secrets. A destination file's
+list replaces the base list; an empty list clears it.
+
 ## Related docs
 
 - `docs/GETTING_STARTED.md`

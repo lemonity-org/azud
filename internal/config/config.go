@@ -74,6 +74,9 @@ type Config struct {
 	// Pull-mode agent configuration
 	Agent AgentConfig `yaml:"agent"`
 
+	// Release bundle configuration, used by `azud release publish`
+	Release ReleaseConfig `yaml:"release"`
+
 	// Cron jobs configuration
 	Cron map[string]CronConfig `yaml:"cron"`
 
@@ -801,6 +804,15 @@ func (a AgentConfig) Configured() bool {
 
 // AgentMinInterval is the shortest allowed agent.interval.
 const AgentMinInterval = 10 * time.Second
+
+// ReleaseConfig holds the settings `azud release publish` uses to build a
+// release bundle for pull-mode servers.
+type ReleaseConfig struct {
+	// age X25519 recipients (age1...) the runtime secrets are encrypted to:
+	// each pull-mode server's key from `azud agent init`, plus any
+	// break-glass key. Every listed key can decrypt every release.
+	Recipients []string `yaml:"recipients"`
+}
 
 // CronConfig holds cron job settings
 type CronConfig struct {

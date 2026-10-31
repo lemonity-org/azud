@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"filippo.io/age"
 )
 
 // ValidationError represents a configuration validation error
@@ -909,6 +911,7 @@ func Validate(cfg *Config) error {
 	}
 
 	errs = append(errs, validateAgent(cfg)...)
+	errs = append(errs, validateRelease(cfg)...)
 
 	if len(errs) > 0 {
 		return errs
@@ -919,6 +922,24 @@ func Validate(cfg *Config) error {
 
 // validateAgent checks the pull-mode settings. A missing agent section is
 // valid: push deploys do not use it.
+func validateRelease(cfg *Config) ValidationErrors {
+	var errs ValidationErrors
+	seen := make(map[string]bool)
+	for i, recipient := range cfg.Release.Recipients {
+		field := fmt.Sprintf("release.recipients[%d]", i)
+		recipient = strings.TrimSpace(recipient)
+		if _, err := age.ParseX25519Recipient(recipient); err != nil {
+			errs = append(errs, ValidationError{Field: field, Message: "must be an age X25519 recipient (age1...), as printed by azud agent init"})
+			continue
+		}
+		if seen[recipient] {
+			errs = append(errs, ValidationError{Field: field, Message: "is listed twice"})
+		}
+		seen[recipient] = true
+	}
+	return errs
+}
+
 func validateAgent(cfg *Config) ValidationErrors {
 	agent := cfg.Agent
 	if !agent.Configured() {

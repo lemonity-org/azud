@@ -188,6 +188,41 @@ systemctl --user daemon-reload
 systemctl --user enable --now azud-agent-myapp.service
 ```
 
+#### `azud release publish`
+
+Build a release bundle for an image and push it to the image's repository,
+by digest only. The bundle carries `config/deploy.yml` and the destination
+file as written, and the runtime secrets `azud env push` would write,
+encrypted to `release.recipients`. It never tags.
+
+```bash
+azud release publish --image sha256:... -d production --digest-file bundle.digest
+```
+
+| Flag | Meaning |
+|---|---|
+| `--image` | Digest of the image to release (required) |
+| `--commit` | Commit to record (default: `$GITHUB_SHA`, then `git rev-parse HEAD`) |
+| `--digest-file` | Also write the bundle digest to this file |
+
+#### `azud release promote`
+
+Point a tag at a published bundle of this service, after signing it. The
+registry password is read from the environment.
+
+```bash
+azud release promote sha256:... --track production
+```
+
+#### `azud release inspect`
+
+Show a bundle's image, commit, secret names, recipients and configuration
+files. Secret values are never decrypted. `--config` prints the files.
+
+```bash
+azud release inspect production
+```
+
 ### Build
 
 #### `azud build`
