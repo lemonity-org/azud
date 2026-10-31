@@ -19,6 +19,7 @@ import (
 	"github.com/lemonity-org/azud/internal/registry"
 	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
+	"github.com/lemonity-org/azud/pkg/version"
 )
 
 var agentCmd = &cobra.Command{
@@ -225,13 +226,18 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 					LockHeld:    true,
 				})
 			},
+			stopRoles: func(release *config.Config, roles []string) error {
+				return deploy.NewDeployer(release, sshClient, log).StopRoles([]string{host}, roles)
+			},
 			accessoryEnv: accessoryEnvironment(podman.NewClient(sshClient), cfg.Service, host),
+			version:      version.Version,
 			log:          log,
 		}
 		// A bundle carries configuration and secrets as well as the image,
 		// so a matching running image proves nothing: never adopt.
 		a.Running = nil
 		a.Deploy = applier.Deploy
+		a.Interrupted = applier.Interrupted
 	}
 	if cfg.Agent.InsecureSkipVerify {
 		log.Warn("agent.insecure_skip_verify is set: images are deployed without verification")
