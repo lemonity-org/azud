@@ -77,6 +77,20 @@ func TestValidateAgent(t *testing.T) {
 			wantErr: "agent.deploy_timeout",
 		},
 		{
+			name:  "deploy stop grace",
+			agent: AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`, DeployStopGrace: 10 * time.Minute},
+		},
+		{
+			name:    "deploy stop grace needs a deploy command",
+			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployStopGrace: time.Minute},
+			wantErr: "agent.deploy_stop_grace",
+		},
+		{
+			name:    "negative deploy stop grace",
+			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`, DeployStopGrace: -time.Second},
+			wantErr: "agent.deploy_stop_grace",
+		},
+		{
 			name:    "no deploy command for bundles",
 			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, Source: AgentSourceBundle, DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`},
 			wantErr: "not supported with source: bundle",
@@ -165,13 +179,16 @@ func TestAgentDefaultsApplyOnlyWhenTracking(t *testing.T) {
 func TestDeployTimeoutDefaultsOnlyForADeployCommand(t *testing.T) {
 	cfg := agentTestConfig(AgentConfig{Track: "production"})
 	applyDefaults(cfg)
-	if cfg.Agent.DeployTimeout != 0 {
-		t.Fatalf("deploy_timeout = %s without deploy_command", cfg.Agent.DeployTimeout)
+	if cfg.Agent.DeployTimeout != 0 || cfg.Agent.DeployStopGrace != 0 {
+		t.Fatalf("deploy_timeout = %s, deploy_stop_grace = %s without deploy_command", cfg.Agent.DeployTimeout, cfg.Agent.DeployStopGrace)
 	}
 	cfg = agentTestConfig(AgentConfig{Track: "production", DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`})
 	applyDefaults(cfg)
 	if cfg.Agent.DeployTimeout != AgentDefaultDeployTimeout {
 		t.Fatalf("deploy_timeout = %s, want %s", cfg.Agent.DeployTimeout, AgentDefaultDeployTimeout)
+	}
+	if cfg.Agent.DeployStopGrace != AgentDefaultDeployStopGrace {
+		t.Fatalf("deploy_stop_grace = %s, want %s", cfg.Agent.DeployStopGrace, AgentDefaultDeployStopGrace)
 	}
 }
 
@@ -193,6 +210,7 @@ proxy:
   verify_command: cosign verify "$$AZUD_AGENT_IMAGE"
   deploy_command: scripts/release "$$AZUD_AGENT_IMAGE"
   deploy_timeout: 45m
+  deploy_stop_grace: 10m
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -200,8 +218,9 @@ proxy:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Agent.DeployCommand != `scripts/release "$AZUD_AGENT_IMAGE"` || cfg.Agent.DeployTimeout != 45*time.Minute {
-		t.Fatalf("agent = %+v; want the destination's deploy_command and deploy_timeout", cfg.Agent)
+	if cfg.Agent.DeployCommand != `scripts/release "$AZUD_AGENT_IMAGE"` || cfg.Agent.DeployTimeout != 45*time.Minute ||
+		cfg.Agent.DeployStopGrace != 10*time.Minute {
+		t.Fatalf("agent = %+v; want the destination's deploy_command, deploy_timeout and deploy_stop_grace", cfg.Agent)
 	}
 }
 

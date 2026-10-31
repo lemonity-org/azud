@@ -551,12 +551,13 @@ agent:
   deploy_command: >-       # Deploy verified images with your own script
     exec bin/release "$$AZUD_AGENT_IMAGE"
   deploy_timeout: 30m      # Limit for deploy_command (default: 30m)
+  deploy_stop_grace: 1m    # SIGTERM to kill after the limit (default: 1m)
 ```
 
 `deploy_command` replaces Azud's deploy with your own, run on the server under
 the host's deploy lock; it must name `$$AZUD_AGENT_IMAGE` (or
 `$$AZUD_AGENT_DIGEST`) and is not supported with `source: bundle`.
-`deploy_timeout` applies only to it.
+`deploy_timeout` and `deploy_stop_grace` apply only to it.
 
 With `source: bundle`, `verify_command` is required and `insecure_skip_verify`
 is not allowed; `identity` and `allow_downgrade` apply only to bundles.

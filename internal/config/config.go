@@ -815,9 +815,14 @@ type AgentConfig struct {
 	// release as deployed. Write the variable as $$AZUD_AGENT_IMAGE.
 	DeployCommand string `yaml:"deploy_command"`
 
-	// Maximum time deploy_command may run (default 30m). It is stopped with
-	// SIGTERM when the time runs out, then killed a minute later.
+	// Maximum time deploy_command may run (default 30m). When the time runs
+	// out, the command and every process it started get SIGTERM, then are
+	// killed deploy_stop_grace later.
 	DeployTimeout time.Duration `yaml:"deploy_timeout"`
+
+	// Time a timed-out deploy_command gets to exit after SIGTERM, so a
+	// rollback it traps can finish (default 1m).
+	DeployStopGrace time.Duration `yaml:"deploy_stop_grace"`
 }
 
 // Agent sources.
@@ -831,7 +836,7 @@ func (a AgentConfig) Configured() bool {
 	return a.Track != "" || a.Interval != 0 || a.VerifyCommand != "" ||
 		a.VerifyTimeout != 0 || a.InsecureSkipVerify || a.Source != "" ||
 		a.Identity != "" || a.AllowDowngrade || a.DeployCommand != "" ||
-		a.DeployTimeout != 0
+		a.DeployTimeout != 0 || a.DeployStopGrace != 0
 }
 
 // Bundles reports whether the agent follows release bundles.
@@ -844,6 +849,9 @@ const AgentMinInterval = 10 * time.Second
 
 // AgentDefaultDeployTimeout is the default agent.deploy_timeout.
 const AgentDefaultDeployTimeout = 30 * time.Minute
+
+// AgentDefaultDeployStopGrace is the default agent.deploy_stop_grace.
+const AgentDefaultDeployStopGrace = time.Minute
 
 // ReleaseConfig holds the settings `azud release publish` uses to build a
 // release bundle for pull-mode servers.

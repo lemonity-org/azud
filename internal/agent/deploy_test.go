@@ -58,6 +58,61 @@ func TestCommandDeployerAsksATimedOutDeployToStop(t *testing.T) {
 	}
 }
 
+func TestCommandDeployerStopsEveryProcessTheCommandStarted(t *testing.T) {
+	// The shell forks the script instead of exec'ing it, as it does for any
+	// compound command. SIGTERM must reach the script, where the rollback
+	// lives, not only the shell.
+	var live bytes.Buffer
+	d := &CommandDeployer{
+		Command:   `bash -c 'trap "echo script rolled back; exit 3" TERM; sleep 30 & wait'; echo shell continued`,
+		Timeout:   300 * time.Millisecond,
+		StopGrace: 10 * time.Second,
+		Output:    &live,
+	}
+	if err := d.Deploy(context.Background(), "ghcr.io/o/a@"+digestA); err == nil {
+		t.Fatal("Deploy succeeded; want a timeout")
+	}
+	if !strings.Contains(live.String(), "script rolled back") {
+		t.Fatalf("output = %q; the script the shell started did not get SIGTERM", live.String())
+	}
+}
+
+func TestCommandDeployerGivesARollbackItsStopGrace(t *testing.T) {
+	var live bytes.Buffer
+	d := &CommandDeployer{
+		Command:   `bash -c 'trap "sleep 1; echo rollback finished; exit 3" TERM; sleep 30 & wait'; true`,
+		Timeout:   200 * time.Millisecond,
+		StopGrace: 20 * time.Second,
+		Output:    &live,
+	}
+	if err := d.Deploy(context.Background(), "ghcr.io/o/a@"+digestA); err == nil {
+		t.Fatal("Deploy succeeded; want a timeout")
+	}
+	if !strings.Contains(live.String(), "rollback finished") {
+		t.Fatalf("output = %q; the rollback was cut short", live.String())
+	}
+}
+
+func TestCommandDeployerKillsARollbackThatOutlivesItsGrace(t *testing.T) {
+	var live bytes.Buffer
+	d := &CommandDeployer{
+		Command:   `bash -c 'trap "sleep 20; echo rollback finished; exit 3" TERM; sleep 30 & wait'; true`,
+		Timeout:   200 * time.Millisecond,
+		StopGrace: 300 * time.Millisecond,
+		Output:    &live,
+	}
+	start := time.Now()
+	if err := d.Deploy(context.Background(), "ghcr.io/o/a@"+digestA); err == nil {
+		t.Fatal("Deploy succeeded; want a timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Deploy returned after %s; the grace period was not enforced", elapsed)
+	}
+	if strings.Contains(live.String(), "rollback finished") {
+		t.Fatalf("output = %q; the rollback outlived its grace", live.String())
+	}
+}
+
 func TestCommandDeployerFinishesWhenTheAgentIsStopped(t *testing.T) {
 	// Reconcile hands Deploy an uncancelable context; only the timeout ends it.
 	ctx, cancel := context.WithCancel(context.Background())

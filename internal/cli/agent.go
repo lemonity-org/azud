@@ -413,8 +413,9 @@ func systemdQuote(value string) string {
 func commandDeploy(cfg *config.Config, locker remoteLocker, host, ref string, out io.Writer) func(context.Context, string) error {
 	lockFile, lockTimeout := deploy.DeployLock(cfg)
 	deployer := &agent.CommandDeployer{
-		Command: cfg.Agent.DeployCommand,
-		Timeout: cfg.Agent.DeployTimeout,
+		Command:   cfg.Agent.DeployCommand,
+		Timeout:   cfg.Agent.DeployTimeout,
+		StopGrace: cfg.Agent.DeployStopGrace,
 		Env: []string{
 			"AZUD_SERVICE=" + cfg.Service,
 			"AZUD_AGENT_REF=" + ref,

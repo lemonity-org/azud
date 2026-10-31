@@ -722,6 +722,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("agent", "deploy_timeout") || destNode == nil && dest.Agent.DeployTimeout != 0 {
 		merged.Agent.DeployTimeout = dest.Agent.DeployTimeout
 	}
+	if has("agent", "deploy_stop_grace") || destNode == nil && dest.Agent.DeployStopGrace != 0 {
+		merged.Agent.DeployStopGrace = dest.Agent.DeployStopGrace
+	}
 	if dest.Agent.Source != "" {
 		merged.Agent.Source = dest.Agent.Source
 	}
@@ -983,6 +986,9 @@ func applyDefaults(cfg *Config) {
 		}
 		if cfg.Agent.DeployCommand != "" && cfg.Agent.DeployTimeout == 0 {
 			cfg.Agent.DeployTimeout = AgentDefaultDeployTimeout
+		}
+		if cfg.Agent.DeployCommand != "" && cfg.Agent.DeployStopGrace == 0 {
+			cfg.Agent.DeployStopGrace = AgentDefaultDeployStopGrace
 		}
 	}
 }

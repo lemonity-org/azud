@@ -963,6 +963,11 @@ func validateAgent(cfg *Config) ValidationErrors {
 	if agent.DeployTimeout < 0 {
 		errs = append(errs, ValidationError{Field: "agent.deploy_timeout", Message: "must be non-negative"})
 	}
+	if agent.DeployStopGrace < 0 {
+		errs = append(errs, ValidationError{Field: "agent.deploy_stop_grace", Message: "must be non-negative"})
+	} else if agent.DeployCommand == "" && agent.DeployStopGrace != 0 {
+		errs = append(errs, ValidationError{Field: "agent.deploy_stop_grace", Message: "applies to deploy_command"})
+	}
 	switch {
 	case agent.DeployCommand == "" && agent.DeployTimeout != 0:
 		errs = append(errs, ValidationError{Field: "agent.deploy_timeout", Message: "applies to deploy_command"})

@@ -9,13 +9,12 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
-// deployStopGrace is how long a deploy_command gets to exit after SIGTERM
-// before it is killed, so its own cleanup and rollback can run.
-const deployStopGrace = time.Minute
+// DefaultStopGrace is how long a deploy_command gets to exit after SIGTERM
+// when CommandDeployer.StopGrace is zero.
+const DefaultStopGrace = time.Minute
 
 // maxDeployOutputLines bounds how much deploy_command output an error repeats.
 const maxDeployOutputLines = 40
@@ -28,6 +27,10 @@ type CommandDeployer struct {
 	Command string
 	// Timeout bounds one run. Zero means no limit.
 	Timeout time.Duration
+	// StopGrace is how long the command, and every process it started, gets
+	// to exit after SIGTERM before they are killed, so a rollback the
+	// command traps can finish. Zero means DefaultStopGrace.
+	StopGrace time.Duration
 	// Env adds variables to the agent's environment, such as AZUD_SERVICE.
 	Env []string
 	// Output receives the command's stdout and stderr as they are written,
@@ -50,15 +53,23 @@ func (d *CommandDeployer) Deploy(ctx context.Context, image string) error {
 		digest = image[at+1:]
 	}
 
+	grace := d.StopGrace
+	if grace <= 0 {
+		grace = DefaultStopGrace
+	}
+
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", d.Command)
 	cmd.Env = append(append(os.Environ(), d.Env...),
 		"AZUD_AGENT_IMAGE="+image,
 		"AZUD_AGENT_DIGEST="+digest,
 	)
 	// A deploy that runs out of time is asked to stop first: killing it
-	// outright would skip the rollback a deploy script usually traps.
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = deployStopGrace
+	// outright would skip the rollback a deploy script usually traps. The
+	// request goes to the command's whole process group, because the
+	// rollback often lives in a script the shell started rather than in the
+	// shell itself.
+	configureDeployProcess(cmd)
+	cmd.WaitDelay = grace
 
 	tail := &tailBuffer{max: 64 << 10}
 	var out io.Writer = tail
@@ -69,10 +80,17 @@ func (d *CommandDeployer) Deploy(ctx context.Context, image string) error {
 	cmd.Stderr = out
 
 	err := cmd.Run()
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	if timedOut {
+		// The grace period is over: kill whatever the command started
+		// that is still running. Only after a timeout, since a command that
+		// finished on its own may have meant to leave a process behind.
+		killDeployProcessGroup(cmd)
+	}
 	if err == nil {
 		return nil
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if timedOut {
 		err = fmt.Errorf("timed out after %s", d.Timeout)
 	}
 	if lines := lastLines(tail.String(), maxDeployOutputLines); lines != "" {
