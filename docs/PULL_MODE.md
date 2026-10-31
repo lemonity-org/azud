@@ -96,6 +96,17 @@ password secret named in `registry.password` in the server's secrets file
 these credentials only to `registry.server`. `cosign` reads its own
 credentials: run `cosign login` once as `ssh.user`.
 
+The agent loads secrets with `secrets_provider` like any other command. When
+`config/deploy.yml` reads them with a tool the server does not have, such as
+`secrets_command: op inject ...`, override the provider in the agent's
+destination file. The secrets file then needs only the registry password:
+
+```yaml
+# config/deploy.agent.yml
+secrets_provider: file
+secrets_path: .azud/agent-secrets   # AZUD_REGISTRY_PASSWORD=..., mode 0600
+```
+
 ### Application secrets
 
 The agent deploys with the runtime secrets file already on the server, as a
