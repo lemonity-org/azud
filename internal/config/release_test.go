@@ -199,3 +199,37 @@ func TestValidateAgentBundleSource(t *testing.T) {
 		})
 	}
 }
+
+func TestFromReleaseKeepsTheSharedProxySettings(t *testing.T) {
+	server := releaseServer(t)
+	base := []byte(`service: app
+image: ghcr.io/acme/app
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: new.example.com
+  app_port: 4000
+  ssl: true
+  acme_email: other@example.com
+  http_port: 8080
+  max_header_bytes: 1
+`)
+	cfg, ignored, err := FromRelease(base, nil, server)
+	if err != nil {
+		t.Fatalf("FromRelease: %v", err)
+	}
+	if cfg.Proxy.Host != "new.example.com" || cfg.Proxy.AppPort != 4000 {
+		t.Fatalf("the app's own route was not applied: %+v", cfg.Proxy)
+	}
+	if cfg.Proxy.SSL != server.Proxy.SSL || cfg.Proxy.HTTPPort != server.Proxy.HTTPPort || cfg.Proxy.MaxHeaderBytes != server.Proxy.MaxHeaderBytes || cfg.Proxy.ACMEEmail != server.Proxy.ACMEEmail {
+		t.Fatalf("shared proxy settings from the release reached the deploy: %+v", cfg.Proxy)
+	}
+	found := false
+	for _, key := range ignored {
+		found = found || strings.HasPrefix(key, "proxy")
+	}
+	if !found {
+		t.Fatalf("ignored = %v, want the shared proxy settings reported", ignored)
+	}
+}

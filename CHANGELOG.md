@@ -16,10 +16,12 @@ release notes for the corresponding signed tag.
   configuration, so changing secrets or configuration needs no SSH. The
   server's own configuration keeps every trust setting; bundles for another
   service, repository or host, and bundles older than the deployed one
-  (unless `--allow-downgrade`), are refused; a failed deploy restores the
-  previous secrets; hooks never run for a bundle. Changes the agent does not
-  apply (accessories, cron, Podman, shared proxy settings) are reported by
-  `azud agent status`.
+  (unless `--allow-downgrade`), are refused; secrets are swapped under the
+  deploy lock, and a failed deploy restores the previous secrets and
+  redeploys the previous release; hooks never run for a bundle. What the
+  agent does not apply (accessories, cron and Podman settings that differ
+  from the server's configuration, accessories running with old secrets) is
+  reported by `azud agent status` until it matches.
 
 ## 1.4.0 - 2026-10-31
 
