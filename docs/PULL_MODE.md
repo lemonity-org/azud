@@ -118,6 +118,7 @@ On the server, as `ssh.user`, from the directory that holds `config/`:
 
 ```bash
 azud agent run --once -d agent      # check the tag once and deploy it
+mkdir -p ~/.config/systemd/user
 azud agent unit -d agent > ~/.config/systemd/user/azud-agent-app.service
 systemctl --user daemon-reload
 systemctl --user enable --now azud-agent-app.service

@@ -71,6 +71,7 @@ var agentUnitCmd = &cobra.Command{
 configuration, destination, and working directory.
 
 Example:
+  mkdir -p ~/.config/systemd/user
   azud agent unit > ~/.config/systemd/user/azud-agent-myapp.service
   systemctl --user daemon-reload
   systemctl --user enable --now azud-agent-myapp.service`,
