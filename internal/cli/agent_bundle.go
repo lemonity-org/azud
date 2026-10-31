@@ -42,10 +42,16 @@ type bundleApplier struct {
 	// deploy deploys image (pinned by digest) with cfg on this server. The
 	// deploy lock is already held.
 	deploy func(ctx context.Context, cfg *config.Config, image string) error
+	// stopRoles stops role containers on this server, for roles a failed
+	// release added and its rollback does not replace.
+	stopRoles func(cfg *config.Config, roles []string) error
 	// accessoryEnv returns the environment an accessory container runs
 	// with, or nil when it is not running. Optional.
 	accessoryEnv func(name string) (map[string]string, error)
-	log          *output.Logger
+	// version is the running azud version, checked against a release's
+	// minimum_version.
+	version string
+	log     *output.Logger
 }
 
 // bundleNotes records what the agent did not apply from a release.
@@ -83,6 +89,9 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 	if err != nil {
 		return err
 	}
+	if err := config.ValidateMinimumVersion(cfg, b.version); err != nil {
+		return fmt.Errorf("release %s: %w", short(rel.Digest), err)
+	}
 	var secrets []byte
 	if rel.Secrets != nil {
 		if secrets, err = b.decrypt(rel.Secrets); err != nil {
@@ -112,13 +121,19 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 	b.log.Info("Release %s: commit %s, image %s", short(rel.Digest), orDash(rel.Info.Commit), short(rel.Info.Image))
 
 	err = b.withLock(func() error {
+		// Recorded before anything changes and cleared only once the server
+		// runs one whole release again, so an agent that dies in between
+		// redeploys instead of trusting the recorded release (Interrupted).
+		if err := b.markPending(rel.Digest); err != nil {
+			return err
+		}
 		restore, err := b.swapEnv(envPath, secrets, prev)
 		if err != nil {
 			return err
 		}
 		deployErr := b.deploy(ctx, &deployCfg, image)
 		if deployErr == nil {
-			return nil
+			return b.clearPending()
 		}
 		if err := restore(); err != nil {
 			return errors.Join(deployErr, fmt.Errorf("restoring the previous secrets file: %w", err))
@@ -137,6 +152,20 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 		if err := b.deploy(ctx, &prevDeploy, imageRepository(prevCfg.Image)+"@"+prev.Info.Image); err != nil {
 			return errors.Join(deployErr, fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err))
 		}
+		var added []string
+		for _, role := range deployCfg.GetRoles() {
+			if !prevCfg.HasRole(role) {
+				added = append(added, role)
+			}
+		}
+		if len(added) > 0 {
+			if err := b.stopRoles(&deployCfg, added); err != nil {
+				return errors.Join(deployErr, fmt.Errorf("stopping roles the failed release added (%s): %w", strings.Join(added, ", "), err))
+			}
+		}
+		if err := b.clearPending(); err != nil {
+			return errors.Join(deployErr, err)
+		}
 		return deployErr
 	})
 	if err != nil {
@@ -150,6 +179,32 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 		b.log.Warn("Not applied: %s", change)
 	}
 	return nil
+}
+
+func (b *bundleApplier) pendingPath() string {
+	return filepath.Join(b.dir, "pending")
+}
+
+func (b *bundleApplier) markPending(digest string) error {
+	if err := os.MkdirAll(b.dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(b.pendingPath(), []byte(digest+"\n"), 0o600)
+}
+
+func (b *bundleApplier) clearPending() error {
+	if err := os.Remove(b.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// Interrupted reports whether a deploy started and neither finished nor
+// rolled back, so the server may run parts of two releases. The agent then
+// redeploys even when the tag points to the recorded release.
+func (b *bundleApplier) Interrupted() bool {
+	_, err := os.Stat(b.pendingPath())
+	return err == nil
 }
 
 // config builds the configuration the release deploys with.
@@ -525,7 +580,10 @@ func bundleStatusRows(stateDir string, cfg *config.Config, deployed string) [][]
 		rows = append(rows, []string{"Server settings kept", strings.Join(notes.Ignored, ", ")})
 	}
 	for _, change := range notes.NotApplied {
-		rows = append(rows, []string{"Not applied", change})
+		rows = append(rows, []string{"Not applied (at deploy)", change})
+	}
+	if _, err := os.Stat(applier.pendingPath()); err == nil {
+		rows = append(rows, []string{"Interrupted", "a deploy did not finish; the agent redeploys on its next check"})
 	}
 	return rows
 }

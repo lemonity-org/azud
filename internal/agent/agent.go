@@ -66,6 +66,10 @@ type Agent struct {
 	Verify func(ctx context.Context, image string) error
 	// Deploy deploys image, which is pinned by digest.
 	Deploy func(ctx context.Context, image string) error
+	// Interrupted reports that a deploy started and did not finish, so the
+	// recorded digest may not be what runs. The agent then deploys even an
+	// unchanged digest. Optional.
+	Interrupted func() bool
 
 	State *Store
 	Log   *output.Logger
@@ -116,7 +120,8 @@ func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, strin
 	st.LastSeenDigest = digest
 	st.LastCheckAt = a.now()
 
-	if st.DeployedDigest == digest {
+	interrupted := a.Interrupted != nil && a.Interrupted()
+	if st.DeployedDigest == digest && !interrupted {
 		return Unchanged, digest, a.State.Save(st)
 	}
 

@@ -30,6 +30,9 @@ type bundleEnv struct {
 	envPath   string
 	locked    bool
 	accessory map[string]string
+	fails     []error
+	stopped   []string
+	pending   []bool // Interrupted() as each deploy started
 }
 
 type deployCall struct {
@@ -106,12 +109,23 @@ agent:
 		deploy: func(_ context.Context, cfg *config.Config, image string) error {
 			env, _ := os.ReadFile(e.envPath)
 			e.deploys = append(e.deploys, deployCall{cfg: cfg, image: image, env: string(env), locked: e.locked})
+			e.pending = append(e.pending, e.applier.Interrupted())
 			if err := e.failNext; err != nil {
 				e.failNext = nil
 				return err
 			}
+			if len(e.fails) > 0 {
+				err := e.fails[0]
+				e.fails = e.fails[1:]
+				return err
+			}
 			return nil
 		},
+		stopRoles: func(_ *config.Config, roles []string) error {
+			e.stopped = append(e.stopped, roles...)
+			return nil
+		},
+		version: "1.4.0",
 		accessoryEnv: func(name string) (map[string]string, error) {
 			if name != "db" {
 				return nil, nil
@@ -470,5 +484,58 @@ func TestLocalSecretsPathExpandsHome(t *testing.T) {
 		if got, err := localSecretsPath(in); err != nil || got != want {
 			t.Errorf("localSecretsPath(%q) = %q, %v; want %q", in, got, err, want)
 		}
+	}
+}
+
+func TestRollbackStopsRolesTheFailedReleaseAdded(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=a\n", day)); err != nil {
+		t.Fatal(err)
+	}
+	withWorker := strings.Replace(webOnApp1, "servers:\n  web:\n    hosts: [app-1]\n", "servers:\n  web:\n    hosts: [app-1]\n  worker:\n    hosts: [app-1]\n    cmd: bin/worker\n", 1)
+	e.failNext = errors.New("web failed after the worker started")
+	if err := e.apply(e.publish(withWorker, "DATABASE_URL=b\n", day.Add(time.Hour))); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if strings.Join(e.stopped, ",") != "worker" {
+		t.Fatalf("stopped roles = %v; the worker the failed release added must not keep running it", e.stopped)
+	}
+	if e.applier.Interrupted() {
+		t.Fatal("a completed rollback left the deploy marked interrupted")
+	}
+}
+
+func TestDeployIsMarkedInterruptedUntilItFinishes(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=a\n", day)); err != nil {
+		t.Fatal(err)
+	}
+	if !e.pending[0] {
+		t.Fatal("the deploy ran without the interrupted marker; a crash would go unnoticed")
+	}
+	if e.applier.Interrupted() {
+		t.Fatal("the marker survived a finished deploy")
+	}
+
+	e.fails = []error{errors.New("release 2 failed"), errors.New("rollback failed too")}
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=b\n", day.Add(time.Hour))); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if !e.applier.Interrupted() {
+		t.Fatal("a failed rollback must leave the deploy marked interrupted, so the next check redeploys")
+	}
+}
+
+func TestBundleRequiringANewerAzudIsRefused(t *testing.T) {
+	e := newBundleEnv(t)
+	cfg := webOnApp1 + "minimum_version: \"9.0.0\"\n"
+	if err := e.apply(e.publish(cfg, "DATABASE_URL=a\n", day)); err == nil || !strings.Contains(err.Error(), "9.0.0") {
+		t.Fatalf("Deploy = %v, want the minimum version refused", err)
+	}
+	if len(e.deploys) != 0 {
+		t.Fatal("deployed a release this azud is too old for")
+	}
+	if _, err := os.Stat(e.envPath); !os.IsNotExist(err) {
+		t.Fatal("touched the secrets file for a refused release")
 	}
 }

@@ -307,3 +307,30 @@ func TestCommandVerifierTimesOut(t *testing.T) {
 		t.Fatal("verify timeout was not enforced")
 	}
 }
+
+func TestInterruptedDeployIsRedoneEvenIfTheTagDidNotMove(t *testing.T) {
+	store := NewStore(t.TempDir(), "app")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	if err := store.Save(State{DeployedDigest: digest}); err != nil {
+		t.Fatal(err)
+	}
+	deployed := 0
+	interrupted := true
+	a := &Agent{
+		Ref:         "ghcr.io/acme/app:production",
+		Repository:  "ghcr.io/acme/app",
+		Resolve:     func(context.Context) (string, error) { return digest, nil },
+		Deploy:      func(context.Context, string) error { deployed++; return nil },
+		Interrupted: func() bool { return interrupted },
+		State:       store,
+	}
+
+	outcome, _, err := a.Reconcile(context.Background(), false)
+	if err != nil || outcome != Deployed || deployed != 1 {
+		t.Fatalf("Reconcile = %v, %v, deploys %d; an interrupted deploy must be redone", outcome, err, deployed)
+	}
+	interrupted = false
+	if outcome, _, _ := a.Reconcile(context.Background(), false); outcome != Unchanged || deployed != 1 {
+		t.Fatalf("Reconcile = %v, deploys %d; nothing to redo once it finished", outcome, deployed)
+	}
+}

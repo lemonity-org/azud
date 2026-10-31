@@ -249,6 +249,11 @@ What the agent does for each bundle:
   decrypted again; before the first bundle, the file as it was, kept once in
   `<file>.pre-bundle`, or no file) and redeploys the previous release as a
   whole, so no role runs one release's image with another's configuration.
+  Roles the failed release added are stopped. If the agent dies in the middle,
+  its next check redeploys, even when the tag still names the recorded
+  release.
+- **Version:** a bundle whose `minimum_version` is newer than the agent's
+  azud is refused before anything changes.
 - **Downgrades:** a bundle older than the deployed one is refused, so access to
   the registry alone cannot bring back an old release. To roll back, move the
   tag to the older bundle and run `azud agent run --once --allow-downgrade -d agent`
