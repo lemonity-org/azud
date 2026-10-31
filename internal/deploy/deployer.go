@@ -190,7 +190,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	switch {
 	case version != "":
 		// Explicit version: replace any existing tag or digest.
-		image = fmt.Sprintf("%s:%s", stripImageTag(image), version)
+		image = ImageAtVersion(image, version)
 	case strings.Contains(image, "@"):
 		// Digest-pinned image (no explicit version): use the digest as version.
 		version = image[strings.Index(image, "@")+1:]
@@ -1427,6 +1427,17 @@ func hasImageTag(image string) bool {
 	return idx > 0 && !strings.Contains(image[idx:], "/")
 }
 
+// ImageAtVersion pins image to a version taken from deployment history or the
+// command line. A digest-pinned deploy records its digest (sha256:...) as the
+// version, and a tag can never contain ":", so such a version is joined with
+// "@" rather than ":".
+func ImageAtVersion(image, version string) string {
+	if strings.Contains(version, ":") {
+		return stripImageTag(image) + "@" + version
+	}
+	return stripImageTag(image) + ":" + version
+}
+
 // Rollback re-deploys a previous version.
 func (d *Deployer) Rollback(ctx context.Context, version, destination string, hosts []string) error {
 	d.log.Header("Rolling back to %s", version)
@@ -1482,7 +1493,7 @@ func (d *Deployer) rollbackTargets(ctx context.Context, targets []deploymentTarg
 		return fmt.Errorf("no previous version recorded")
 	}
 
-	prevImage := fmt.Sprintf("%s:%s", stripImageTag(d.cfg.Image), previousVersion)
+	prevImage := ImageAtVersion(d.cfg.Image, previousVersion)
 	var rollbackErrors []string
 
 	for _, target := range targets {
