@@ -36,17 +36,34 @@ func TestAgentRegistryCredentialsStayWithTheirRegistry(t *testing.T) {
 		Password: []string{"AGENT_TEST_REGISTRY_TOKEN"},
 	}}
 
-	creds := agentRegistryCredentials(cfg, registry.Reference{Registry: "ghcr.io", Repository: "o/app", Tag: "production"})
-	if creds == nil || creds.Username != "deploy" || creds.Password != "read-only" {
-		t.Fatalf("credentials for the configured registry = %+v", creds)
+	creds, err := agentRegistryCredentials(cfg, registry.Reference{Registry: "ghcr.io", Repository: "o/app", Tag: "production"})
+	if err != nil || creds == nil || creds.Username != "deploy" || creds.Password != "read-only" {
+		t.Fatalf("credentials for the configured registry = %+v, %v", creds, err)
 	}
-	if creds := agentRegistryCredentials(cfg, registry.Reference{Registry: "docker.io", Repository: "library/nginx", Tag: "1"}); creds != nil {
-		t.Fatalf("credentials sent to another registry: %+v", creds)
+	if creds, err := agentRegistryCredentials(cfg, registry.Reference{Registry: "docker.io", Repository: "library/nginx", Tag: "1"}); creds != nil || err != nil {
+		t.Fatalf("credentials sent to another registry: %+v, %v", creds, err)
 	}
 
 	cfg.Registry.Server = ""
-	if creds := agentRegistryCredentials(cfg, registry.Reference{Registry: "docker.io", Repository: "acme/app", Tag: "prod"}); creds == nil {
-		t.Fatal("an empty registry.server should mean Docker Hub")
+	if creds, err := agentRegistryCredentials(cfg, registry.Reference{Registry: "docker.io", Repository: "acme/app", Tag: "prod"}); creds == nil || err != nil {
+		t.Fatalf("an empty registry.server should mean Docker Hub: %+v, %v", creds, err)
+	}
+}
+
+func TestAgentRegistryCredentialsMissingPassword(t *testing.T) {
+	cfg := &config.Config{
+		SecretsProvider: "file",
+		SecretsPath:     ".azud/agent-secrets",
+		Registry: config.RegistryConfig{
+			Server:   "ghcr.io",
+			Username: "deploy",
+			Password: []string{"AGENT_TEST_MISSING_REGISTRY_TOKEN"},
+		},
+	}
+
+	_, err := agentRegistryCredentials(cfg, registry.Reference{Registry: "ghcr.io", Repository: "o/app", Tag: "production"})
+	if err == nil || !strings.Contains(err.Error(), "AGENT_TEST_MISSING_REGISTRY_TOKEN") || !strings.Contains(err.Error(), ".azud/agent-secrets") {
+		t.Fatalf("missing password error = %v, want the key and where to put it", err)
 	}
 }
 
