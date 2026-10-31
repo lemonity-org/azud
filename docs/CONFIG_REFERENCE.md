@@ -548,7 +548,15 @@ agent:
   source: bundle           # What the tag points to: image (default) or bundle
   identity: ~/.config/azud/agent/app.age  # Bundle key (default shown; azud agent init)
   allow_downgrade: false   # Deploy bundles older than the deployed one
+  deploy_command: >-       # Deploy verified images with your own script
+    exec bin/release "$$AZUD_AGENT_IMAGE"
+  deploy_timeout: 30m      # Limit for deploy_command (default: 30m)
 ```
+
+`deploy_command` replaces Azud's deploy with your own, run on the server under
+the host's deploy lock; it must name `$$AZUD_AGENT_IMAGE` (or
+`$$AZUD_AGENT_DIGEST`) and is not supported with `source: bundle`.
+`deploy_timeout` applies only to it.
 
 With `source: bundle`, `verify_command` is required and `insecure_skip_verify`
 is not allowed; `identity` and `allow_downgrade` apply only to bundles.

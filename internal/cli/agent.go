@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -239,6 +240,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		a.Deploy = applier.Deploy
 		a.Interrupted = applier.Interrupted
 	}
+	if cfg.Agent.DeployCommand != "" {
+		a.Deploy = commandDeploy(cfg, sshClient, host, a.Ref, os.Stdout)
+		log.Info("Releases deploy through agent.deploy_command")
+	}
 	if cfg.Agent.InsecureSkipVerify {
 		log.Warn("agent.insecure_skip_verify is set: images are deployed without verification")
 	} else {
@@ -316,6 +321,9 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 	}
 	if cfg.Agent.Bundles() {
 		rows = append(rows, bundleStatusRows(stateDir, cfg, st.DeployedDigest)...)
+	}
+	if cfg.Agent.DeployCommand != "" {
+		rows = append(rows, []string{"Deploys with", "agent.deploy_command"})
 	}
 	log.Table([]string{"Field", "Value"}, rows)
 	return nil
@@ -398,6 +406,40 @@ func systemdQuote(value string) string {
 
 // checkAgentUser requires the agent to run as ssh.user, so state paths,
 // rootless Podman, and the deploy lock match what pushed deploys use.
+// commandDeploy runs agent.deploy_command under the host's deploy lock, the
+// lock a pushed `azud deploy` takes, so the two never overlap. The command
+// learns the lock's path from AZUD_DEPLOY_LOCK and must not start an
+// `azud deploy` or `azud rollback` of its own, which would wait for it.
+func commandDeploy(cfg *config.Config, locker remoteLocker, host, ref string, out io.Writer) func(context.Context, string) error {
+	lockFile, lockTimeout := deploy.DeployLock(cfg)
+	deployer := &agent.CommandDeployer{
+		Command: cfg.Agent.DeployCommand,
+		Timeout: cfg.Agent.DeployTimeout,
+		Env: []string{
+			"AZUD_SERVICE=" + cfg.Service,
+			"AZUD_AGENT_REF=" + ref,
+			"AZUD_DESTINATION=" + GetDestination(),
+			"AZUD_DEPLOY_LOCK=" + lockFile,
+		},
+		Output: out,
+	}
+	return func(ctx context.Context, image string) error {
+		var deployErr error
+		if err := locker.WithRemoteLock(host, lockFile, lockTimeout, func() error {
+			deployErr = deployer.Deploy(ctx, image)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("failed to acquire deployment lock: %w", err)
+		}
+		return deployErr
+	}
+}
+
+// remoteLocker is the part of the SSH client commandDeploy needs.
+type remoteLocker interface {
+	WithRemoteLock(host, lockFile string, timeout time.Duration, fn func() error) error
+}
+
 func checkAgentUser(cfg *config.Config) error {
 	current, err := user.Current()
 	if err != nil {

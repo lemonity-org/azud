@@ -166,6 +166,48 @@ The job needs `packages: write` and `id-token: write`, and nothing that reaches
 the server. The last step gives CI a pass or fail without any server access;
 it relies on the health endpoint reporting the deployed commit.
 
+## Custom deploy command
+
+Some services need release steps Azud does not run: migrations in a separate
+container, a lock shared with other tooling, a recovery journal, a proxy
+retry window around the restart. `agent.deploy_command` keeps the agent's tag
+following and verification and hands the verified image to your own deploy
+script on the server instead of Azud's deploy:
+
+```yaml
+# config/deploy.agent.yml
+agent:
+  track: production
+  verify_command: >-
+    cosign verify --key /etc/azud/cosign.pub "$$AZUD_AGENT_IMAGE"
+  deploy_command: >-
+    exec /srv/app/bin/release "$$AZUD_AGENT_IMAGE"
+  deploy_timeout: 30m    # default 30m
+```
+
+The command runs through `/bin/sh` on the server, as `ssh.user`, after
+verification passed, with the variables `verify_command` gets plus
+`AZUD_DEPLOY_LOCK`. It must name `AZUD_AGENT_IMAGE` or `AZUD_AGENT_DIGEST`
+(written `$$`, as above), so it deploys the image that was verified.
+
+- **Lock.** It runs while the agent holds the host's deploy lock, the one a
+  pushed `azud deploy` takes, so the two never overlap. `AZUD_DEPLOY_LOCK`
+  names that lock; the command must not run `azud deploy` or `azud rollback`
+  itself, which would wait for it. Other `azud` commands, such as `azud systemd enable` or
+  `azud proxy reconcile`, do not take it.
+- **Result.** Exit 0 records the release as deployed. Any other exit records
+  it as failed, with the last 40 output lines, and it is not retried until the
+  tag moves (or `--once --retry-failed`). Output streams to the agent's log as
+  it is written.
+- **Time.** After `deploy_timeout` the command gets `SIGTERM`, so a deploy
+  script can roll back, and is killed a minute later. A stop request does not
+  interrupt it: the unit gives a deploy up to 30 minutes to finish.
+- **Adoption.** As with Azud's deploy, a digest that every role already runs
+  is recorded as deployed without running the command.
+
+`deploy_command` is not supported with `source: bundle`, whose deploy swaps
+secrets and configuration in one transaction with Azud's own deploy.
+
 ## Operate
 
 | Task | Command |

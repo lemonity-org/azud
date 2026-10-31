@@ -57,6 +57,30 @@ func TestValidateAgent(t *testing.T) {
 			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, Interval: time.Second},
 			wantErr: "agent.interval",
 		},
+		{
+			name:  "custom deploy command",
+			agent: AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`, DeployTimeout: time.Hour},
+		},
+		{
+			name:    "deploy command must name the image",
+			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployCommand: `./deploy ""`},
+			wantErr: "agent.deploy_command",
+		},
+		{
+			name:    "deploy timeout needs a deploy command",
+			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployTimeout: time.Hour},
+			wantErr: "agent.deploy_timeout",
+		},
+		{
+			name:    "negative deploy timeout",
+			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`, DeployTimeout: -time.Second},
+			wantErr: "agent.deploy_timeout",
+		},
+		{
+			name:    "no deploy command for bundles",
+			agent:   AgentConfig{Track: "production", VerifyCommand: verifyImage, Source: AgentSourceBundle, DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`},
+			wantErr: "not supported with source: bundle",
+		},
 	}
 
 	for _, tt := range tests {
@@ -135,6 +159,49 @@ func TestAgentDefaultsApplyOnlyWhenTracking(t *testing.T) {
 	applyDefaults(cfg)
 	if cfg.Agent.Interval != time.Minute || cfg.Agent.VerifyTimeout != 2*time.Minute {
 		t.Fatalf("agent defaults = %+v, want 1m interval and 2m verify timeout", cfg.Agent)
+	}
+}
+
+func TestDeployTimeoutDefaultsOnlyForADeployCommand(t *testing.T) {
+	cfg := agentTestConfig(AgentConfig{Track: "production"})
+	applyDefaults(cfg)
+	if cfg.Agent.DeployTimeout != 0 {
+		t.Fatalf("deploy_timeout = %s without deploy_command", cfg.Agent.DeployTimeout)
+	}
+	cfg = agentTestConfig(AgentConfig{Track: "production", DeployCommand: `./deploy "$AZUD_AGENT_IMAGE"`})
+	applyDefaults(cfg)
+	if cfg.Agent.DeployTimeout != AgentDefaultDeployTimeout {
+		t.Fatalf("deploy_timeout = %s, want %s", cfg.Agent.DeployTimeout, AgentDefaultDeployTimeout)
+	}
+}
+
+func TestMergeConfigs_AgentDeployCommand(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "deploy.yml")
+	if err := os.WriteFile(base, []byte(`service: app
+image: ghcr.io/lemonity-org/app
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: app.example.com
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deploy.agent.yml"), []byte(`agent:
+  track: production
+  verify_command: cosign verify "$$AZUD_AGENT_IMAGE"
+  deploy_command: scripts/release "$$AZUD_AGENT_IMAGE"
+  deploy_timeout: 45m
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := NewLoader(base, "agent").Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.DeployCommand != `scripts/release "$AZUD_AGENT_IMAGE"` || cfg.Agent.DeployTimeout != 45*time.Minute {
+		t.Fatalf("agent = %+v; want the destination's deploy_command and deploy_timeout", cfg.Agent)
 	}
 }
 

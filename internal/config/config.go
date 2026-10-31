@@ -807,6 +807,17 @@ type AgentConfig struct {
 	// Deploy a bundle older than the deployed one. Without it, rolling back
 	// takes `azud agent run --once --allow-downgrade`.
 	AllowDowngrade bool `yaml:"allow_downgrade"`
+
+	// Command that deploys a verified image instead of Azud's own deploy,
+	// for services whose release needs steps Azud does not run. It runs
+	// through /bin/sh on the server, under the host's deploy lock, with
+	// AZUD_AGENT_IMAGE set to the image pinned by digest; exit 0 records the
+	// release as deployed. Write the variable as $$AZUD_AGENT_IMAGE.
+	DeployCommand string `yaml:"deploy_command"`
+
+	// Maximum time deploy_command may run (default 30m). It is stopped with
+	// SIGTERM when the time runs out, then killed a minute later.
+	DeployTimeout time.Duration `yaml:"deploy_timeout"`
 }
 
 // Agent sources.
@@ -819,7 +830,8 @@ const (
 func (a AgentConfig) Configured() bool {
 	return a.Track != "" || a.Interval != 0 || a.VerifyCommand != "" ||
 		a.VerifyTimeout != 0 || a.InsecureSkipVerify || a.Source != "" ||
-		a.Identity != "" || a.AllowDowngrade
+		a.Identity != "" || a.AllowDowngrade || a.DeployCommand != "" ||
+		a.DeployTimeout != 0
 }
 
 // Bundles reports whether the agent follows release bundles.
@@ -829,6 +841,9 @@ func (a AgentConfig) Bundles() bool {
 
 // AgentMinInterval is the shortest allowed agent.interval.
 const AgentMinInterval = 10 * time.Second
+
+// AgentDefaultDeployTimeout is the default agent.deploy_timeout.
+const AgentDefaultDeployTimeout = 30 * time.Minute
 
 // ReleaseConfig holds the settings `azud release publish` uses to build a
 // release bundle for pull-mode servers.
