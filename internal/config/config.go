@@ -794,12 +794,37 @@ type AgentConfig struct {
 	// Deploy without verify_command. Anyone who can move the tag then decides
 	// what runs on the server.
 	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
+
+	// What the tag points to: "image" (default) or "bundle", a release
+	// bundle from `azud release publish` carrying the configuration and
+	// encrypted secrets. Set on the server, so the registry cannot choose.
+	Source string `yaml:"source"`
+
+	// age identity that decrypts bundles' secrets (bundle source; default
+	// ~/.config/azud/agent/<service>.age, created by `azud agent init`).
+	Identity string `yaml:"identity"`
+
+	// Deploy a bundle older than the deployed one. Without it, rolling back
+	// takes `azud agent run --once --allow-downgrade`.
+	AllowDowngrade bool `yaml:"allow_downgrade"`
 }
+
+// Agent sources.
+const (
+	AgentSourceImage  = "image"
+	AgentSourceBundle = "bundle"
+)
 
 // Configured reports whether the configuration enables pull mode.
 func (a AgentConfig) Configured() bool {
 	return a.Track != "" || a.Interval != 0 || a.VerifyCommand != "" ||
-		a.VerifyTimeout != 0 || a.InsecureSkipVerify
+		a.VerifyTimeout != 0 || a.InsecureSkipVerify || a.Source != "" ||
+		a.Identity != "" || a.AllowDowngrade
+}
+
+// Bundles reports whether the agent follows release bundles.
+func (a AgentConfig) Bundles() bool {
+	return a.Source == AgentSourceBundle
 }
 
 // AgentMinInterval is the shortest allowed agent.interval.

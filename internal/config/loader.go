@@ -117,7 +117,12 @@ func (l *Loader) loadFileWithNode(path string) (*Config, *yaml.Node, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return parseConfigBytes(data)
+}
 
+// parseConfigBytes parses one configuration document, as loadFileWithNode
+// does for a file.
+func parseConfigBytes(data []byte) (*Config, *yaml.Node, error) {
 	if len(data) > maxConfigFileSize {
 		return nil, nil, fmt.Errorf("config file exceeds maximum size (%d bytes)", maxConfigFileSize)
 	}
@@ -710,6 +715,15 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	}
 	if has("agent", "insecure_skip_verify") || destNode == nil && dest.Agent.InsecureSkipVerify {
 		merged.Agent.InsecureSkipVerify = dest.Agent.InsecureSkipVerify
+	}
+	if dest.Agent.Source != "" {
+		merged.Agent.Source = dest.Agent.Source
+	}
+	if dest.Agent.Identity != "" {
+		merged.Agent.Identity = dest.Agent.Identity
+	}
+	if has("agent", "allow_downgrade") || destNode == nil && dest.Agent.AllowDowngrade {
+		merged.Agent.AllowDowngrade = dest.Agent.AllowDowngrade
 	}
 
 	// Merge release
