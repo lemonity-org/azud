@@ -26,6 +26,8 @@ type Connection struct {
 	context        context.Context
 	mu             sync.Mutex
 	sessions       chan struct{}
+	// local runs commands on this machine instead of over SSH (see local.go).
+	local bool
 }
 
 func (c *Connection) beginSession() func() {
@@ -67,6 +69,9 @@ func (r *Result) Output() string {
 
 // Execute runs a command on the remote host
 func (c *Connection) Execute(cmd string) (*Result, error) {
+	if c.local {
+		return c.localExecute(cmd, nil)
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -105,6 +110,9 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 
 // ExecuteWithStdin runs a command on the remote host with provided stdin.
 func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, error) {
+	if c.local {
+		return c.localExecute(cmd, stdin)
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -144,6 +152,9 @@ func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, err
 
 // ExecuteWithPty runs a command with a pseudo-terminal
 func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if c.local {
+		return errLocalPTY
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -178,6 +189,9 @@ func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr 
 
 // ExecuteStream runs a command and streams output to the provided writers
 func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
+	if c.local {
+		return c.runLocal(cmd, nil, stdout, stderr)
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -198,6 +212,9 @@ func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 func (c *Connection) ExecuteIO(cmd string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
 	if tty {
 		return c.ExecuteWithPty(cmd, stdin, stdout, stderr)
+	}
+	if c.local {
+		return c.runLocal(cmd, stdin, stdout, stderr)
 	}
 	release := c.beginSession()
 	defer release()
@@ -248,6 +265,9 @@ func (c *Connection) runWithTimeout(session *ssh.Session, cmd string) error {
 
 // Upload copies a local file to the remote host using SCP
 func (c *Connection) Upload(localPath, remotePath string) error {
+	if c.local {
+		return c.localUpload(localPath, remotePath)
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -301,6 +321,9 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 
 // UploadContent uploads content directly to a remote file
 func (c *Connection) UploadContent(content []byte, remotePath string, mode os.FileMode) error {
+	if c.local {
+		return c.localWriteFile(remotePath, bytes.NewReader(content), mode)
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -334,6 +357,9 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 
 // Download copies a remote file to the local host
 func (c *Connection) Download(remotePath, localPath string) error {
+	if c.local {
+		return c.localDownload(remotePath, localPath)
+	}
 	release := c.beginSession()
 	defer release()
 
@@ -375,6 +401,9 @@ func (c *Connection) Download(remotePath, localPath string) error {
 // calls fn (which may use c.Execute() etc. through separate sessions). When
 // fn returns, closing stdin causes cat to exit, which releases the flock.
 func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn func() error) error {
+	if c.local {
+		return c.localLock(lockFile, timeout, fn)
+	}
 	release := c.beginSession()
 	defer release()
 	// Create a dedicated session — bypass c.mu so the lock session can
@@ -395,20 +424,7 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 		return fmt.Errorf("failed to get lock session stdout: %w", err)
 	}
 
-	dir := filepath.Dir(lockFile)
-	secs := int(timeout.Seconds())
-	if secs < 1 {
-		secs = 1
-	}
-	// Quote paths safely. A leading ${HOME}/ (non-root users) is preserved
-	// unquoted so the shell expands it, while the remainder is single-quoted
-	// and thus immune to injection. All other paths are fully single-quoted.
-	quotedDir := quoteRemotePath(dir)
-	quotedLockFile := quoteRemotePath(lockFile)
-	cmd := fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'", // safe: paths are quoteRemotePath output and timeout is numeric
-		quotedDir, secs, quotedLockFile)
-
-	if err := session.Start(cmd); err != nil {
+	if err := session.Start(lockCommand(lockFile, timeout)); err != nil {
 		return fmt.Errorf("failed to start lock command: %w", err)
 	}
 
@@ -456,6 +472,23 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	return fnErr
 }
 
+// lockCommand builds the shell command WithRemoteLock runs: it prints LOCKED
+// once flock holds lockFile and keeps holding it until stdin closes.
+func lockCommand(lockFile string, timeout time.Duration) string {
+	dir := filepath.Dir(lockFile)
+	secs := int(timeout.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	// Quote paths safely. A leading ${HOME}/ (non-root users) is preserved
+	// unquoted so the shell expands it, while the remainder is single-quoted
+	// and thus immune to injection. All other paths are fully single-quoted.
+	quotedDir := quoteRemotePath(dir)
+	quotedLockFile := quoteRemotePath(lockFile)
+	return fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'", // safe: paths are quoteRemotePath output and timeout is numeric
+		quotedDir, secs, quotedLockFile)
+}
+
 // quoteRemotePath quotes a remote path for safe use in a shell command. A
 // leading ${HOME}/ is preserved unquoted so the shell expands it (non-root
 // users), while the rest of the path is single-quoted and therefore immune to
@@ -498,6 +531,9 @@ func (c *Connection) LastUsed() time.Time {
 
 // IsAlive checks if the connection is still alive
 func (c *Connection) IsAlive() bool {
+	if c.local {
+		return true
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

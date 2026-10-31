@@ -71,6 +71,9 @@ type Config struct {
 	// Hooks configuration
 	Hooks HooksConfig `yaml:"hooks"`
 
+	// Pull-mode agent configuration
+	Agent AgentConfig `yaml:"agent"`
+
 	// Cron jobs configuration
 	Cron map[string]CronConfig `yaml:"cron"`
 
@@ -764,6 +767,40 @@ type HooksConfig struct {
 	// Maximum time a hook is allowed to run before being killed.
 	Timeout time.Duration `yaml:"timeout"`
 }
+
+// AgentConfig holds pull-mode settings. `azud agent` runs on the server,
+// follows a registry tag, and deploys each new digest it points to locally,
+// so CI needs no access to the server.
+type AgentConfig struct {
+	// Registry tag the agent follows, such as "production". CI moves it to a
+	// new image after a successful build.
+	Track string `yaml:"track"`
+
+	// How often the agent checks the tag (default 1m, minimum 10s).
+	Interval time.Duration `yaml:"interval"`
+
+	// Command that must exit 0 before an image is deployed. It runs through
+	// /bin/sh with AZUD_AGENT_IMAGE set to the image pinned by digest. In
+	// YAML, write the variable as $$AZUD_AGENT_IMAGE so loading keeps it:
+	// cosign verify --certificate-identity ... "$$AZUD_AGENT_IMAGE"
+	VerifyCommand string `yaml:"verify_command"`
+
+	// Maximum time verify_command may run (default 2m).
+	VerifyTimeout time.Duration `yaml:"verify_timeout"`
+
+	// Deploy without verify_command. Anyone who can move the tag then decides
+	// what runs on the server.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
+}
+
+// Configured reports whether the configuration enables pull mode.
+func (a AgentConfig) Configured() bool {
+	return a.Track != "" || a.Interval != 0 || a.VerifyCommand != "" ||
+		a.VerifyTimeout != 0 || a.InsecureSkipVerify
+}
+
+// AgentMinInterval is the shortest allowed agent.interval.
+const AgentMinInterval = 10 * time.Second
 
 // CronConfig holds cron job settings
 type CronConfig struct {

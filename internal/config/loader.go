@@ -689,6 +689,23 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 		merged.Hooks.Timeout = dest.Hooks.Timeout
 	}
 
+	// Merge agent
+	if dest.Agent.Track != "" {
+		merged.Agent.Track = dest.Agent.Track
+	}
+	if has("agent", "interval") || destNode == nil && dest.Agent.Interval != 0 {
+		merged.Agent.Interval = dest.Agent.Interval
+	}
+	if dest.Agent.VerifyCommand != "" {
+		merged.Agent.VerifyCommand = dest.Agent.VerifyCommand
+	}
+	if has("agent", "verify_timeout") || destNode == nil && dest.Agent.VerifyTimeout != 0 {
+		merged.Agent.VerifyTimeout = dest.Agent.VerifyTimeout
+	}
+	if has("agent", "insecure_skip_verify") || destNode == nil && dest.Agent.InsecureSkipVerify {
+		merged.Agent.InsecureSkipVerify = dest.Agent.InsecureSkipVerify
+	}
+
 	// Merge cron
 	if len(dest.Cron) > 0 {
 		if merged.Cron == nil {
@@ -923,6 +940,16 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Hooks.Timeout == 0 {
 		cfg.Hooks.Timeout = 5 * time.Minute
+	}
+
+	// Agent defaults (only apply when pull mode is configured)
+	if cfg.Agent.Track != "" {
+		if cfg.Agent.Interval == 0 {
+			cfg.Agent.Interval = time.Minute
+		}
+		if cfg.Agent.VerifyTimeout == 0 {
+			cfg.Agent.VerifyTimeout = 2 * time.Minute
+		}
 	}
 }
 

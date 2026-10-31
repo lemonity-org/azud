@@ -69,6 +69,12 @@ type Config struct {
 
 	// Skip host key verification (not recommended for production)
 	InsecureIgnoreHostKey bool
+
+	// LocalHost, when set, runs commands addressed to that host on this
+	// machine through /bin/sh instead of over SSH. Every other host is
+	// refused, so a local run can never act on a different server. Used by
+	// `azud agent`, which deploys the server it runs on.
+	LocalHost string
 }
 
 // ProxyConfig holds SSH proxy/bastion configuration
@@ -138,6 +144,15 @@ func (c *Client) connect(host string) (*Connection, error) {
 	// Another completed connection may have entered the pool before this call
 	// was registered.
 	if conn := c.pool.Get(host); conn != nil {
+		return conn, nil
+	}
+
+	if c.config.LocalHost != "" {
+		conn, err := newLocalConnection(c.config.LocalHost, host, c.config.Context, c.config.CommandTimeout)
+		if err != nil {
+			return nil, err
+		}
+		c.pool.Put(host, conn)
 		return conn, nil
 	}
 

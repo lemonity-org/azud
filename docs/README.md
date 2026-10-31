@@ -10,6 +10,7 @@ Start here if you are new:
 ## By Task
 
 - Deploy and roll back: `docs/GETTING_STARTED.md`
+- Deploy from the server, without CI access: `docs/PULL_MODE.md`
 - Operate in production: `docs/OPERATIONS.md`
 - Production readiness: `docs/PRODUCTION_CHECKLIST.md`
 - Troubleshoot issues: `docs/TROUBLESHOOTING.md`
