@@ -28,11 +28,15 @@ type bundleEnv struct {
 	deploys   []deployCall
 	failNext  error
 	envPath   string
+	locked    bool
+	accessory map[string]string
 }
 
 type deployCall struct {
-	cfg   *config.Config
-	image string
+	cfg    *config.Config
+	image  string
+	env    string // the secrets file when the deploy ran
+	locked bool
 }
 
 func newBundleEnv(t *testing.T) *bundleEnv {
@@ -94,13 +98,25 @@ agent:
 		dir:      filepath.Join(home, "state", "releases"),
 		identity: identity,
 		deployed: func() (string, error) { return e.deployed, nil },
+		withLock: func(fn func() error) error {
+			e.locked = true
+			defer func() { e.locked = false }()
+			return fn()
+		},
 		deploy: func(_ context.Context, cfg *config.Config, image string) error {
-			e.deploys = append(e.deploys, deployCall{cfg: cfg, image: image})
+			env, _ := os.ReadFile(e.envPath)
+			e.deploys = append(e.deploys, deployCall{cfg: cfg, image: image, env: string(env), locked: e.locked})
 			if err := e.failNext; err != nil {
 				e.failNext = nil
 				return err
 			}
 			return nil
+		},
+		accessoryEnv: func(name string) (map[string]string, error) {
+			if name != "db" {
+				return nil, nil
+			}
+			return e.accessory, nil
 		},
 		log: output.DefaultLogger,
 	}
@@ -116,9 +132,12 @@ func (e *bundleEnv) publish(deployYAML, secrets string, created time.Time) strin
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	encrypted, err := release.Encrypt([]byte(secrets), []string{e.recipient})
-	if err != nil {
-		e.t.Fatal(err)
+	var encrypted []byte
+	if secrets != "" {
+		var err error
+		if encrypted, err = release.Encrypt([]byte(secrets), []string{e.recipient}); err != nil {
+			e.t.Fatal(err)
+		}
 	}
 	info := release.Info{Service: "app", Repository: e.repo.Name(), Image: e.image, Commit: "c-" + created.Format("150405"), Created: created, Secrets: names}
 	b, err := release.Build(info, release.Descriptor{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: e.image, Size: int64(len(releaseTestImage))},
@@ -272,33 +291,132 @@ func TestBundleForAnotherHostIsRefused(t *testing.T) {
 	}
 }
 
-func TestChangesTheAgentDoesNotApplyAreReported(t *testing.T) {
+func TestChangesTheAgentDoesNotApplyStayReported(t *testing.T) {
 	e := newBundleEnv(t)
-	withDB := func(dbImage string) string {
-		return webOnApp1 + "accessories:\n  db:\n    image: " + dbImage + "\n    host: app-1\n    env:\n      secret: [POSTGRES_PASSWORD]\n"
+	withDB := webOnApp1 + "accessories:\n  db:\n    image: postgres:17.9\n    host: app-1\n    env:\n      secret: [POSTGRES_PASSWORD]\n"
+	e.accessory = map[string]string{"POSTGRES_PASSWORD": "one"}
+	notes := func(digest string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(e.applier.releaseDir(digest), "notes.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
 	}
-	if err := e.apply(e.publish(withDB("postgres:17.8"), "DATABASE_URL=a\nPOSTGRES_PASSWORD=one\n", day)); err != nil {
+
+	first := e.publish(withDB, "DATABASE_URL=a\nPOSTGRES_PASSWORD=one\n", day)
+	if err := e.apply(first); err != nil {
 		t.Fatal(err)
 	}
-	second := e.publish(withDB("postgres:17.9"), "DATABASE_URL=a\nPOSTGRES_PASSWORD=one\n", day.Add(time.Hour))
+	if !strings.Contains(notes(first), "accessory db differs from this server's configuration") {
+		t.Fatalf("first release notes = %s; the server's configuration has no db", notes(first))
+	}
+	if strings.Contains(notes(first), "another value") {
+		t.Fatalf("first release notes = %s; db runs with the release's secret", notes(first))
+	}
+
+	second := e.publish(withDB, "DATABASE_URL=a\nPOSTGRES_PASSWORD=two\n", day.Add(time.Hour))
 	if err := e.apply(second); err != nil {
 		t.Fatal(err)
 	}
-	third := e.publish(withDB("postgres:17.9"), "DATABASE_URL=a\nPOSTGRES_PASSWORD=two\n", day.Add(2*time.Hour))
+	third := e.publish(withDB, "DATABASE_URL=b\nPOSTGRES_PASSWORD=two\n", day.Add(2*time.Hour))
 	if err := e.apply(third); err != nil {
 		t.Fatal(err)
 	}
-
-	notes, err := os.ReadFile(filepath.Join(e.applier.releaseDir(second), "notes.json"))
-	if err != nil || !strings.Contains(string(notes), "accessory db changed") {
-		t.Fatalf("notes for the accessory image change = %s, %v", notes, err)
+	for _, digest := range []string{second, third} {
+		if !strings.Contains(notes(digest), "accessory db runs with another value of secret POSTGRES_PASSWORD") ||
+			!strings.Contains(notes(digest), "accessory db differs") {
+			t.Fatalf("notes = %s; outstanding changes must stay reported until they match", notes(digest))
+		}
 	}
-	notes, _ = os.ReadFile(filepath.Join(e.applier.releaseDir(third), "notes.json"))
-	if !strings.Contains(string(notes), "secret POSTGRES_PASSWORD of accessory db changed") {
-		t.Fatalf("notes for the accessory secret change = %s", notes)
+
+	e.accessory["POSTGRES_PASSWORD"] = "two" // rebooted from a workstation
+	fourth := e.publish(withDB, "DATABASE_URL=c\nPOSTGRES_PASSWORD=two\n", day.Add(3*time.Hour))
+	if err := e.apply(fourth); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(notes(fourth), "another value") {
+		t.Fatalf("notes = %s; db now runs with the release's secret", notes(fourth))
+	}
+	if len(e.deploys) != 4 {
+		t.Fatalf("deploys = %d; unapplied changes must not block the app's deploy", len(e.deploys))
+	}
+}
+
+func TestSecretsSwapAndDeployHoldTheDeployLock(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=locked\n", day)); err != nil {
+		t.Fatal(err)
+	}
+	call := e.deploys[0]
+	if !call.locked || call.env != "DATABASE_URL=locked\n" {
+		t.Fatalf("deploy ran locked=%v with secrets %q; the swap and the deploy must both hold the lock", call.locked, call.env)
+	}
+	if call.cfg.Deploy.RollbackOnFailure {
+		t.Fatal("the deployer's fleet rollback is on; it would restart old roles with this release's secrets")
+	}
+}
+
+func TestFailedReleaseRollsBackToThePreviousRelease(t *testing.T) {
+	e := newBundleEnv(t)
+	first := e.publish(webOnApp1, "DATABASE_URL=release-1\n", day)
+	if err := e.apply(first); err != nil {
+		t.Fatal(err)
+	}
+	second := strings.Replace(webOnApp1, "MODE: v1", "MODE: v2", 1)
+	e.failNext = errors.New("worker failed to start")
+	if err := e.apply(e.publish(second, "DATABASE_URL=release-2\n", day.Add(time.Hour))); err == nil {
+		t.Fatal("Deploy succeeded")
 	}
 	if len(e.deploys) != 3 {
-		t.Fatalf("deploys = %d; changes the agent does not apply must not block the app's deploy", len(e.deploys))
+		t.Fatalf("deploys = %d, want release 1, release 2, then release 1 again", len(e.deploys))
+	}
+	rollback := e.deploys[2]
+	if rollback.cfg.Env.Clear["MODE"] != "v1" || rollback.env != "DATABASE_URL=release-1\n" || !rollback.locked {
+		t.Fatalf("rollback deploy: MODE=%q secrets=%q locked=%v", rollback.cfg.Env.Clear["MODE"], rollback.env, rollback.locked)
+	}
+}
+
+func TestReleaseWithoutSecretsEmptiesTheFile(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=old\n", day)); err != nil {
+		t.Fatal(err)
+	}
+	none := "servers:\n  web:\n    hosts: [app-1]\n"
+	if err := e.apply(e.publish(none, "", day.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if e.env() != "" {
+		t.Fatalf("secrets file = %q; a release without secrets leaves none behind", e.env())
+	}
+
+	e.failNext = errors.New("boom")
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=new\n", day.Add(2*time.Hour))); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if e.env() != "" {
+		t.Fatalf("secrets file = %q, want the previous release's empty file back", e.env())
+	}
+}
+
+func TestFailedFirstReleaseRemovesASecretsFileThatDidNotExist(t *testing.T) {
+	e := newBundleEnv(t)
+	e.failNext = errors.New("boom")
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=new\n", day)); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if _, err := os.Stat(e.envPath); !os.IsNotExist(err) {
+		t.Fatalf("secrets file after a failed first release = %v, want it gone as before", err)
+	}
+
+	// A retry after an interrupted first attempt still restores "no file".
+	_ = os.WriteFile(e.envPath, []byte("DATABASE_URL=left-by-the-crash\n"), 0o600)
+	e.failNext = errors.New("boom again")
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=new\n", day.Add(time.Minute))); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if _, err := os.Stat(e.envPath); !os.IsNotExist(err) {
+		t.Fatal("the retry kept the file an interrupted attempt wrote")
 	}
 }
 

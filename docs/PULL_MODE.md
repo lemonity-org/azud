@@ -231,27 +231,33 @@ signature proves who built a bundle. `AZUD_AGENT_IMAGE` names the bundle by
 digest; sign the bundle digest that `azud release publish` prints.
 
 **The server's configuration is the trust anchor.** From it the agent takes
-`agent`, `ssh`, `security`, `registry`, `builder`, `hooks`, `hooks_path` and
-the `secrets_*` settings, and the bundle's values for them are ignored (the
-repository's `deploy.yml` sets several of them for push mode). Everything else
-comes from the bundle. A bundle for another service, another image
+`agent`, `ssh`, `security`, `registry`, `builder`, `hooks`, `hooks_path`, the
+`secrets_*` settings, and the proxy settings shared by every app on the host
+(TLS, ACME, listener ports, header limits, logging, `rootful`). The bundle's
+values for them are ignored (the repository's `deploy.yml` sets several of
+them for push mode). Everything else, including the app's own route, comes
+from the bundle. A bundle for another service, another image
 repository, or a host other than this server is refused. Hooks never run for
 a bundle.
 
 What the agent does for each bundle:
 
-- **Secrets:** it writes them atomically to the runtime secrets file (0600).
-  If the deploy fails, it puts the previous release's secrets back by
-  decrypting that release again; before the first bundle, the file is copied
-  once to `<file>.pre-bundle`. Decrypted secrets are never stored elsewhere.
+- **Secrets:** holding the same deploy lock as pushed deploys, it writes them
+  atomically to the runtime secrets file (0600); a release without secrets
+  leaves the file empty. Decrypted secrets are never stored elsewhere.
+- **Failure:** it puts the previous secrets back (the previous release's,
+  decrypted again; before the first bundle, the file as it was, kept once in
+  `<file>.pre-bundle`, or no file) and redeploys the previous release as a
+  whole, so no role runs one release's image with another's configuration.
 - **Downgrades:** a bundle older than the deployed one is refused, so access to
   the registry alone cannot bring back an old release. To roll back, move the
   tag to the older bundle and run `azud agent run --once --allow-downgrade -d agent`
   (or set `agent.allow_downgrade: true`).
-- **What it does not apply:** changes to accessories, cron, Podman, and the
-  proxy settings shared by every app on the host. It deploys the app, and
-  `azud agent status` lists those changes with the command to run from a
-  workstation. A changed secret used only by an accessory is listed too.
+- **What it does not apply:** accessories, cron jobs and Podman settings that
+  differ from this server's configuration, and accessories running with secret
+  values other than the release's. It deploys the app, and `azud agent status`
+  lists them with the command to run from a workstation, with every release
+  until they match.
 - **Storage:** each applied release (configuration, `release.json`, encrypted
   secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`.
 

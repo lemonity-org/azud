@@ -80,8 +80,14 @@ const skipSecretsAnnotation = "azud.skip-secrets"
 func commandSkipsConfig(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c.Name() {
-		case "init", "version", "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+		case "version", "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
 			return true
+		case "init":
+			// `azud init` creates the configuration; a subcommand named init,
+			// such as `azud agent init`, needs it.
+			if c.Parent() != nil && !c.Parent().HasParent() {
+				return true
+			}
 		}
 	}
 	return false
