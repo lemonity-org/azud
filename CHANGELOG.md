@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.5.0 - 2026-10-31
+
 - Added release bundles (#52). `azud release publish` pushes one OCI artifact
   per release with the image digest, the configuration files as written, and
   the runtime secrets encrypted with age to `release.recipients`;
@@ -22,6 +24,8 @@ release notes for the corresponding signed tag.
   agent does not apply (accessories, cron and Podman settings that differ
   from the server's configuration, accessories running with old secrets) is
   reported by `azud agent status` until it matches.
+- Added the dependency `filippo.io/age` v1.3.2, the reference Go
+  implementation of age, for the secrets in release bundles.
 
 ## 1.4.0 - 2026-10-31
 
