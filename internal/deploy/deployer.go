@@ -176,6 +176,21 @@ type DeployOptions struct {
 
 	// Destination environment (for history tracking)
 	Destination string
+
+	// LockHeld reports that the caller already holds the host's deploy lock
+	// (DeployLock), so the deployer must not take it again. The pull agent
+	// holds it while it swaps a release's secrets and deploys.
+	LockHeld bool
+}
+
+// DeployLock returns the lock file and timeout that serialize deploys of a
+// service on a host.
+func DeployLock(cfg *config.Config) (string, time.Duration) {
+	timeout := cfg.Deploy.DeployTimeout * 2
+	if timeout < 5*time.Minute {
+		timeout = 5 * time.Minute
+	}
+	return state.LockFile(cfg.SSH.User, cfg.Service+".deploy"), timeout
 }
 
 // deploymentTarget identifies one role instance on one host. A host may
@@ -292,7 +307,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 			return d.deployToTarget(ctx, target, image, version, opts)
 		},
 		func(succeeded []deploymentTarget) error {
-			return d.rollbackTargets(ctx, succeeded, record.PreviousVersion)
+			return d.rollbackTargets(ctx, succeeded, record.PreviousVersion, opts.LockHeld)
 		},
 	)
 
@@ -405,12 +420,11 @@ func (d *Deployer) loginToRegistry(hosts []string) error {
 }
 
 func (d *Deployer) deployToTarget(ctx context.Context, target deploymentTarget, image, version string, opts *DeployOptions) error {
-	// Acquire deployment lock to prevent concurrent deployments to the same host/service
-	lockFile := state.LockFile(d.cfg.SSH.User, d.cfg.Service+".deploy")
-	lockTimeout := d.cfg.Deploy.DeployTimeout * 2
-	if lockTimeout < 5*time.Minute {
-		lockTimeout = 5 * time.Minute
+	if opts.LockHeld {
+		return d.deployToTargetLocked(ctx, target, image, version, opts)
 	}
+	// Acquire deployment lock to prevent concurrent deployments to the same host/service
+	lockFile, lockTimeout := DeployLock(d.cfg)
 
 	var deployErr error
 	lockErr := d.sshClient.WithRemoteLock(target.Host, lockFile, lockTimeout, func() error {
@@ -1496,7 +1510,7 @@ func (d *Deployer) RestartRoles(hosts, roles []string) error {
 
 // rollbackTargets reverts role/host pairs that succeeded, restoring the
 // previous version. Every target is attempted and failures are aggregated.
-func (d *Deployer) rollbackTargets(ctx context.Context, targets []deploymentTarget, previousVersion string) error {
+func (d *Deployer) rollbackTargets(ctx context.Context, targets []deploymentTarget, previousVersion string, lockHeld bool) error {
 	if previousVersion == "" {
 		return fmt.Errorf("no previous version recorded")
 	}
@@ -1521,6 +1535,7 @@ func (d *Deployer) rollbackTargets(ctx context.Context, targets []deploymentTarg
 			Hosts:       []string{target.Host},
 			Roles:       []string{target.Role},
 			Destination: "rollback",
+			LockHeld:    lockHeld,
 		}
 
 		// Use deployToTarget directly to avoid recursion into the full Deploy

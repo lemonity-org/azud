@@ -12,6 +12,8 @@ func TestCommandSkipsConfig(t *testing.T) {
 	completion.AddCommand(&cobra.Command{Use: "bash"})
 	env := &cobra.Command{Use: "env"}
 	env.AddCommand(&cobra.Command{Use: "list"})
+	agentGroup := &cobra.Command{Use: "agent"}
+	agentGroup.AddCommand(&cobra.Command{Use: "init"})
 	root.AddCommand(
 		&cobra.Command{Use: "init"},
 		&cobra.Command{Use: "version"},
@@ -22,6 +24,7 @@ func TestCommandSkipsConfig(t *testing.T) {
 		&cobra.Command{Use: "config"},
 		&cobra.Command{Use: "deploy"},
 		env,
+		agentGroup,
 	)
 
 	tests := []struct {
@@ -38,6 +41,7 @@ func TestCommandSkipsConfig(t *testing.T) {
 		{args: []string{"config"}, want: false},
 		{args: []string{"deploy"}, want: false},
 		{args: []string{"env", "list"}, want: false},
+		{args: []string{"agent", "init"}, want: false},
 	}
 	for _, tt := range tests {
 		cmd, _, err := root.Find(tt.args)

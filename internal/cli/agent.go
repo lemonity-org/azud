@@ -202,6 +202,17 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 				st, err := store.Load()
 				return st.DeployedDigest, err
 			},
+			withLock: func(fn func() error) error {
+				lockFile, timeout := deploy.DeployLock(cfg)
+				var fnErr error
+				if err := sshClient.WithRemoteLock(host, lockFile, timeout, func() error {
+					fnErr = fn()
+					return nil
+				}); err != nil {
+					return fmt.Errorf("failed to acquire deployment lock: %w", err)
+				}
+				return fnErr
+			},
 			deploy: func(ctx context.Context, release *config.Config, image string) error {
 				pinned := *release
 				pinned.Image = image
@@ -211,9 +222,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 				return deployer.Deploy(ctx, &deploy.DeployOptions{
 					Hosts:       []string{host},
 					Destination: GetDestination(),
+					LockHeld:    true,
 				})
 			},
-			log: log,
+			accessoryEnv: accessoryEnvironment(podman.NewClient(sshClient), cfg.Service, host),
+			log:          log,
 		}
 		// A bundle carries configuration and secrets as well as the image,
 		// so a matching running image proves nothing: never adopt.

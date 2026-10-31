@@ -53,6 +53,13 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 	trust("secrets_remote_path", &cfg.SecretsRemotePath, &server.SecretsRemotePath)
 	trust("hooks_path", &cfg.HooksPath, &server.HooksPath)
 	trust("hooks", &cfg.Hooks, &server.Hooks)
+	// The proxy is shared by every app on the host: its listeners, TLS,
+	// request limits and logging stay as the server configures them. The
+	// app's own route (hosts, port, health check, timeouts) comes from the
+	// release.
+	bundleShared, ownShared := sharedProxy(cfg.Proxy), sharedProxy(server.Proxy)
+	trust("proxy (settings shared by every app on the host)", &bundleShared, &ownShared)
+	applySharedProxy(&cfg.Proxy, server.Proxy)
 
 	if cfg.Service != server.Service {
 		return nil, nil, fmt.Errorf("release is for service %q, not %q", cfg.Service, server.Service)
@@ -71,6 +78,35 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 		return nil, nil, fmt.Errorf("release configuration is invalid: %w", err)
 	}
 	return cfg, ignored, nil
+}
+
+// sharedProxy returns the proxy settings that configure Caddy for every app
+// on the host rather than this app's route.
+func sharedProxy(p ProxyConfig) ProxyConfig {
+	return ProxyConfig{
+		SSL:              p.SSL,
+		SSLRedirect:      p.SSLRedirect,
+		ACMEEmail:        p.ACMEEmail,
+		ACMEStaging:      p.ACMEStaging,
+		SSLCertificate:   p.SSLCertificate,
+		SSLPrivateKey:    p.SSLPrivateKey,
+		HTTPPort:         p.HTTPPort,
+		HTTPSPort:        p.HTTPSPort,
+		Rootful:          p.Rootful,
+		MaxHeaderBytes:   p.MaxHeaderBytes,
+		EnableFullDuplex: p.EnableFullDuplex,
+		Logging:          p.Logging,
+	}
+}
+
+func applySharedProxy(dst *ProxyConfig, src ProxyConfig) {
+	dst.SSL, dst.SSLRedirect = src.SSL, src.SSLRedirect
+	dst.ACMEEmail, dst.ACMEStaging = src.ACMEEmail, src.ACMEStaging
+	dst.SSLCertificate, dst.SSLPrivateKey = src.SSLCertificate, src.SSLPrivateKey
+	dst.HTTPPort, dst.HTTPSPort = src.HTTPPort, src.HTTPSPort
+	dst.Rootful = src.Rootful
+	dst.MaxHeaderBytes, dst.EnableFullDuplex = src.MaxHeaderBytes, src.EnableFullDuplex
+	dst.Logging = src.Logging
 }
 
 // repositoryOf returns an image name without its tag or digest.
