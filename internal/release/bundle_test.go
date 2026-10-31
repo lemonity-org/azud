@@ -222,3 +222,17 @@ func TestBuildChecksItsInput(t *testing.T) {
 		}
 	}
 }
+
+func TestDestinationNamesItsFile(t *testing.T) {
+	f := newFixture(t)
+	info := f.info()
+	info.Destination = "../../etc"
+	if _, err := Build(info, f.image, files[:1], nil); err == nil || !strings.Contains(err.Error(), "invalid destination") {
+		t.Fatalf("Build with a path as destination = %v", err)
+	}
+	info = f.info()
+	info.Destination = "staging"
+	if _, err := Build(info, f.image, files, nil); err == nil || !strings.Contains(err.Error(), "deploy.staging.yml") {
+		t.Fatalf("Build with another destination's file = %v", err)
+	}
+}
