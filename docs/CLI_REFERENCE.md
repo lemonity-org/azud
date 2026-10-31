@@ -182,6 +182,7 @@ Print a systemd user unit that runs `azud agent run` with the current
 configuration, destination, and working directory.
 
 ```bash
+mkdir -p ~/.config/systemd/user
 azud agent unit > ~/.config/systemd/user/azud-agent-myapp.service
 systemctl --user daemon-reload
 systemctl --user enable --now azud-agent-myapp.service
