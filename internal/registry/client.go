@@ -121,6 +121,9 @@ func (repo *Repository) PushBlob(ctx context.Context, data []byte) (string, erro
 	if err != nil || resp.Header.Get("Location") == "" {
 		return "", fmt.Errorf("registry %s started a blob upload without a usable location", repo.ref.Registry)
 	}
+	if location.Scheme != "https" {
+		return "", fmt.Errorf("registry %s sent a blob upload location that is not HTTPS", repo.ref.Registry)
+	}
 	query := location.Query()
 	query.Set("digest", digest)
 	location.RawQuery = query.Encode()
@@ -175,10 +178,18 @@ func (repo *Repository) url(path string) string {
 	return fmt.Sprintf("https://%s/v2/%s/%s", repo.ref.apiHost(), repo.ref.Repository, path)
 }
 
-// send performs a request, answering one authentication challenge. The
-// Authorization header is attached only to the registry's own host, so an
-// upload location or redirect elsewhere never receives credentials.
+// send performs a request, answering one authentication challenge. Only an
+// HTTPS request to the registry's own host gets the Authorization header or
+// has its challenge answered, so an upload location or redirect elsewhere
+// never receives a token, and cannot make Azud send the registry password to
+// a token service of its choosing.
 func (repo *Repository) send(ctx context.Context, method, target string, header map[string]string, body []byte) (*http.Response, error) {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	trusted := parsed.Scheme == "https" && parsed.Host == repo.ref.apiHost()
+
 	attempt := func() (*http.Response, error) {
 		var reader io.Reader
 		if body != nil {
@@ -194,14 +205,14 @@ func (repo *Repository) send(ctx context.Context, method, target string, header 
 		if body != nil {
 			req.ContentLength = int64(len(body))
 		}
-		if repo.auth != "" && req.URL.Host == repo.ref.apiHost() {
+		if repo.auth != "" && trusted {
 			req.Header.Set("Authorization", repo.auth)
 		}
 		return repo.resolver.do(req)
 	}
 
 	resp, err := attempt()
-	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || !trusted {
 		return resp, err
 	}
 	challenge := resp.Header.Get("WWW-Authenticate")

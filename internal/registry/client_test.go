@@ -2,7 +2,11 @@ package registry
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -149,5 +153,75 @@ func TestRepositoryRejectsWrongCredentials(t *testing.T) {
 
 	if _, err := repo.PushBlob(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("PushBlob = %v, want the token service's refusal", err)
+	}
+}
+
+// trustAll returns a client that trusts every given TLS test server.
+func trustAll(servers ...*httptest.Server) *http.Client {
+	pool := x509.NewCertPool()
+	for _, s := range servers {
+		pool.AddCert(s.Certificate())
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+}
+
+func TestUploadLocationMustBeHTTPS(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Location", "http://"+server.Listener.Addr().String()+"/upload")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	resolver := &Resolver{Client: trustAll(server)}
+	repo := resolver.Repository(server.Listener.Addr().String(), "acme/app", &Credentials{Username: "ci", Password: "s3cret"})
+
+	if _, err := repo.PushBlob(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "not HTTPS") {
+		t.Fatalf("PushBlob = %v, want a plain-HTTP upload location refused", err)
+	}
+}
+
+func TestUploadHostElsewhereNeverGetsCredentials(t *testing.T) {
+	var tokenRequests, uploadAuth []string
+	tokens := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, _ := r.BasicAuth()
+		tokenRequests = append(tokenRequests, user+":"+pass)
+		_, _ = w.Write([]byte(`{"token":"stolen"}`))
+	}))
+	defer tokens.Close()
+	upload := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploadAuth = append(uploadAuth, r.Header.Get("Authorization"))
+		w.Header().Set("WWW-Authenticate", `Bearer realm="`+tokens.URL+`/token"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upload.Close()
+	// The registry hands out an upload location on another host.
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Location", upload.URL+"/upload")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer redirector.Close()
+
+	resolver := &Resolver{Client: trustAll(redirector, upload, tokens)}
+	repo := resolver.Repository(redirector.Listener.Addr().String(), "acme/app", &Credentials{Username: "ci", Password: "s3cret"})
+	repo.auth = "Bearer registry-token"
+
+	if _, err := repo.PushBlob(context.Background(), []byte("x")); err == nil {
+		t.Fatal("PushBlob succeeded")
+	}
+	if len(tokenRequests) != 0 {
+		t.Fatalf("the upload host's token service received %v; credentials must only answer the registry's own challenges", tokenRequests)
+	}
+	for _, auth := range uploadAuth {
+		if auth != "" {
+			t.Fatalf("the upload host received Authorization %q", auth)
+		}
 	}
 }

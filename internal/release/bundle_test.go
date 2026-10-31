@@ -90,7 +90,9 @@ func TestPublishedBundleReadsBackUntagged(t *testing.T) {
 func TestPromoteTagsOnlyAReleaseOfTheService(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	b, err := Build(f.info(), f.image, files[:1], nil)
+	info := f.info()
+	info.Secrets = nil
+	b, err := Build(info, f.image, files[:1], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,5 +236,75 @@ func TestDestinationNamesItsFile(t *testing.T) {
 	info.Destination = "staging"
 	if _, err := Build(info, f.image, files, nil); err == nil || !strings.Contains(err.Error(), "deploy.staging.yml") {
 		t.Fatalf("Build with another destination's file = %v", err)
+	}
+}
+
+func TestDottedDestinationPublishesAndReads(t *testing.T) {
+	f := newFixture(t)
+	info := f.info()
+	info.Destination = "eu.production"
+	info.Secrets = nil
+	b, err := Build(info, f.image, []File{files[0], {Name: "deploy.eu.production.yml", Data: files[1].Data}}, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := Publish(context.Background(), f.repo, b); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := Fetch(context.Background(), f.repo, b.Digest)
+	if err != nil || len(rel.Files) != 2 || rel.Files[1].Name != "deploy.eu.production.yml" {
+		t.Fatalf("Fetch = %+v, %v", rel, err)
+	}
+}
+
+func TestBuildRefusesOversizedReleaseJSON(t *testing.T) {
+	f := newFixture(t)
+	info := f.info()
+	for i := 0; i < 2000; i++ {
+		info.Recipients = append(info.Recipients, "age1"+strings.Repeat("q", 58))
+	}
+	if _, err := Build(info, f.image, files, nil); err == nil || !strings.Contains(err.Error(), "release.json would be") {
+		t.Fatalf("Build = %v, want an oversized release.json refused", err)
+	}
+}
+
+func TestFetchRequiresTheDeclaredConfigSize(t *testing.T) {
+	f := newFixture(t)
+	info := f.info()
+	info.Secrets = nil
+	b, err := Build(info, f.image, files[:1], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Publish(context.Background(), f.repo, b); err != nil {
+		t.Fatal(err)
+	}
+	var m manifest
+	_ = json.Unmarshal(b.Manifest, &m)
+	m.Config.Size += 10
+	body, _ := json.Marshal(m)
+	digest := f.reg.PutManifest("acme/app", "", manifestMediaType, body)
+	if _, err := Fetch(context.Background(), f.repo, digest); err == nil || !strings.Contains(err.Error(), "not the declared") {
+		t.Fatalf("Fetch = %v, want a config size mismatch refused", err)
+	}
+}
+
+func TestPromoteRefusesABundleServersCannotRead(t *testing.T) {
+	f := newFixture(t)
+	info := f.info()
+	info.Repository = "ghcr.io/other/app"
+	info.Secrets = nil
+	b, err := Build(info, f.image, files[:1], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Publish(context.Background(), f.repo, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := Promote(context.Background(), f.repo, b.Digest, "production", "app"); err == nil {
+		t.Fatal("Promote tagged a bundle from another repository")
+	}
+	if f.reg.Tag("acme/app", "production") != "" {
+		t.Fatal("the tag moved")
 	}
 }
