@@ -6,12 +6,20 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
-- Added release bundles (preview, #52). `azud release publish` pushes one OCI
-  artifact per release with the image digest, the configuration files as
-  written, and the runtime secrets encrypted with age to `release.recipients`;
+- Added release bundles (#52). `azud release publish` pushes one OCI artifact
+  per release with the image digest, the configuration files as written, and
+  the runtime secrets encrypted with age to `release.recipients`;
   `azud release promote` moves a tag to it after signing, and
   `azud release inspect` shows what it contains without decrypting secrets.
-  The agent does not apply bundles yet.
+- Added `agent.source: bundle`. The agent verifies a bundle, decrypts its
+  secrets with the key from `azud agent init`, and deploys its image with its
+  configuration, so changing secrets or configuration needs no SSH. The
+  server's own configuration keeps every trust setting; bundles for another
+  service, repository or host, and bundles older than the deployed one
+  (unless `--allow-downgrade`), are refused; a failed deploy restores the
+  previous secrets; hooks never run for a bundle. Changes the agent does not
+  apply (accessories, cron, Podman, shared proxy settings) are reported by
+  `azud agent status`.
 
 ## 1.4.0 - 2026-10-31
 

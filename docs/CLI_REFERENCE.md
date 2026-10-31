@@ -176,6 +176,19 @@ azud agent run --once --retry-failed  # Retry a release that failed
 Show the tag the agent follows, the digest it last saw, the digest it
 deployed, and the last failure.
 
+#### `azud agent init`
+
+Create this server's age identity for release bundles (default
+`~/.config/azud/agent/<service>.age`, mode 0600) and print its public
+recipient for `release.recipients`. An existing identity is kept.
+
+```bash
+azud agent init -d agent
+```
+
+`azud agent run --once --allow-downgrade` deploys a bundle older than the
+deployed one: the rollback path for `agent.source: bundle`.
+
 #### `azud agent unit`
 
 Print a systemd user unit that runs `azud agent run` with the current

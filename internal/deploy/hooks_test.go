@@ -478,3 +478,23 @@ func TestHookRunner_RunWithOutput_Role(t *testing.T) {
 		t.Errorf("output should contain role, got: %q", out)
 	}
 }
+
+func TestDeployerWithoutHooksRunsNone(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	hook := "#!/bin/sh\ntouch " + marker + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "pre-deploy"), []byte(hook), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	d := (&Deployer{hooks: NewHookRunner(dir, 5*time.Second, nil)}).WithoutHooks()
+	if err := d.hooks.Run(context.Background(), "pre-deploy", &HookContext{}); err != nil {
+		t.Fatalf("Run = %v, want hooks skipped", err)
+	}
+	if out, err := d.hooks.RunWithOutput(context.Background(), "pre-deploy", &HookContext{}); out != "" || err != nil {
+		t.Fatalf("RunWithOutput = %q, %v, want hooks skipped", out, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("the hook ran")
+	}
+}

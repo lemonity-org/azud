@@ -180,7 +180,7 @@ State lives in `~/.local/share/azud/agent/<service>.json` for non-root users
 (`/var/lib/azud/agent/` for root). Deployment history is recorded on the
 server, as for any deploy run there.
 
-## Release bundles (preview)
+## Release bundles
 
 A release bundle is one OCI artifact per release, in the image's repository,
 that carries the image digest, `config/deploy.yml` and the destination file as
@@ -198,12 +198,67 @@ azud release inspect production      # image, commit, secret names; never values
 and refuses to publish when a secret named in `env.secret` or an accessory is
 missing. It never tags, so a tag only ever points at a signed bundle.
 
-The agent does not apply bundles yet: that is the next step (issue #52). Until
-then, keep following image tags as described above.
+### Apply bundles on the server
+
+With `agent.source: bundle`, the tag points to a bundle instead of an image.
+The agent verifies the bundle's signature with `verify_command`, decrypts the
+secrets with the server's key, writes the runtime secrets file, and deploys
+the bundle's image with the bundle's configuration. Changing a secret or the
+configuration then needs no SSH: change it in the repository or the secrets
+store and publish a release.
+
+Set it up once, on the server, as `ssh.user`:
+
+```bash
+azud agent init -d agent     # creates ~/.config/azud/agent/<service>.age (0600), prints age1...
+```
+
+Add the printed recipient to `release.recipients` in the repository's
+`config/deploy.yml` and publish a release. Then switch the server:
+
+```yaml
+# config/deploy.agent.yml on the server
+agent:
+  source: bundle
+  track: production
+  verify_command: >-
+    cosign verify --certificate-identity https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com "$$AZUD_AGENT_IMAGE"
+```
+
+`verify_command` is required: the recipients are public keys, so only the
+signature proves who built a bundle. `AZUD_AGENT_IMAGE` names the bundle by
+digest; sign the bundle digest that `azud release publish` prints.
+
+**The server's configuration is the trust anchor.** From it the agent takes
+`agent`, `ssh`, `security`, `registry`, `builder`, `hooks`, `hooks_path` and
+the `secrets_*` settings, and the bundle's values for them are ignored (the
+repository's `deploy.yml` sets several of them for push mode). Everything else
+comes from the bundle. A bundle for another service, another image
+repository, or a host other than this server is refused. Hooks never run for
+a bundle.
+
+What the agent does for each bundle:
+
+- **Secrets:** it writes them atomically to the runtime secrets file (0600).
+  If the deploy fails, it puts the previous release's secrets back by
+  decrypting that release again; before the first bundle, the file is copied
+  once to `<file>.pre-bundle`. Decrypted secrets are never stored elsewhere.
+- **Downgrades:** a bundle older than the deployed one is refused, so access to
+  the registry alone cannot bring back an old release. To roll back, move the
+  tag to the older bundle and run `azud agent run --once --allow-downgrade -d agent`
+  (or set `agent.allow_downgrade: true`).
+- **What it does not apply:** changes to accessories, cron, Podman, and the
+  proxy settings shared by every app on the host. It deploys the app, and
+  `azud agent status` lists those changes with the command to run from a
+  workstation. A changed secret used only by an accessory is listed too.
+- **Storage:** each applied release (configuration, `release.json`, encrypted
+  secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`.
 
 ## Limitations
 
 - One server per service.
-- `config/deploy.yml` on the server is what the agent uses. A change to it in
-  the repository reaches the server only when you copy it there.
+- With image tags, `config/deploy.yml` on the server is what the agent uses; a
+  change in the repository reaches the server only when you copy it there.
+  Release bundles carry the configuration instead.
 - `azud setup`, `azud proxy`, and accessory commands still run in push mode.

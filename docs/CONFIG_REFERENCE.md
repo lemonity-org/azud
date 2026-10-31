@@ -545,7 +545,13 @@ agent:
     cosign verify --certificate-identity ... "$$AZUD_AGENT_IMAGE"
   verify_timeout: 2m       # Limit for verify_command (default: 2m)
   # insecure_skip_verify: true  # Deploy unverified images instead
+  source: bundle           # What the tag points to: image (default) or bundle
+  identity: ~/.config/azud/agent/app.age  # Bundle key (default shown; azud agent init)
+  allow_downgrade: false   # Deploy bundles older than the deployed one
 ```
+
+With `source: bundle`, `verify_command` is required and `insecure_skip_verify`
+is not allowed; `identity` and `allow_downgrade` apply only to bundles.
 
 One of `verify_command` and `insecure_skip_verify` is required. Write
 `$$AZUD_AGENT_IMAGE`: `$$` keeps the variable for the agent to set instead of
