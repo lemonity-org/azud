@@ -136,7 +136,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	defer func() { _ = sshClient.Close() }()
 
 	resolver := &registry.Resolver{UserAgent: "azud/" + version.Version}
-	creds := agentRegistryCredentials(cfg, ref)
+	creds, err := agentRegistryCredentials(cfg, ref)
+	if err != nil {
+		return err
+	}
 
 	a := &agent.Agent{
 		Ref:        repository + ":" + cfg.Agent.Track,
@@ -346,23 +349,34 @@ func imageRepository(image string) string {
 
 // agentRegistryCredentials returns the configured registry credentials when
 // they belong to the registry the followed image lives in, and nil otherwise,
-// so credentials are never sent to a different registry.
-func agentRegistryCredentials(cfg *config.Config, ref registry.Reference) *registry.Credentials {
+// so credentials are never sent to a different registry. A configured password
+// that cannot be found is an error, as it is for a pushed deploy: resolving
+// anonymously instead would only fail later with a less useful message.
+func agentRegistryCredentials(cfg *config.Config, ref registry.Reference) (*registry.Credentials, error) {
 	if cfg.Registry.Username == "" || len(cfg.Registry.Password) == 0 {
-		return nil
+		return nil, nil
 	}
 	server := cfg.Registry.Server
 	if server == "" || server == "index.docker.io" || server == "registry-1.docker.io" {
 		server = "docker.io"
 	}
 	if server != ref.Registry {
-		return nil
+		return nil, nil
 	}
-	password, ok := getSecret(cfg.Registry.Password[0])
+	key := cfg.Registry.Password[0]
+	password, ok := getSecret(key)
 	if !ok {
-		return nil
+		where := "the agent's environment"
+		if strings.EqualFold(strings.TrimSpace(cfg.SecretsProvider), "file") || cfg.SecretsProvider == "" {
+			path := cfg.SecretsPath
+			if path == "" {
+				path = ".azud/secrets"
+			}
+			where = fmt.Sprintf("%s (KEY=value, mode 0600) or the agent's environment", path)
+		}
+		return nil, fmt.Errorf("registry password %s for %s was not found: put it in %s", key, ref.Registry, where)
 	}
-	return &registry.Credentials{Username: cfg.Registry.Username, Password: password}
+	return &registry.Credentials{Username: cfg.Registry.Username, Password: password}, nil
 }
 
 // runningDigest reports the digest every role container runs, or "" when a
