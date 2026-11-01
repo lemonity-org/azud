@@ -136,7 +136,18 @@ jobs:
             sleep 1
           done
           # Runner images point XDG_* at /home/runner, for sudo and for the user's
-          # systemd manager, and Podman and Quadlet both read them.
+          # systemd manager, and Podman and Quadlet both read them. Quadlet's generator
+          # gets its environment from environment.d, not from import-environment.
+          sudo install -d -m 700 -o deploy -g deploy /home/deploy/.config /home/deploy/.config/environment.d
+          sudo tee /home/deploy/.config/environment.d/zz-azud-e2e.conf >/dev/null <<EOF
+          HOME=/home/deploy
+          XDG_CONFIG_HOME=/home/deploy/.config
+          XDG_DATA_HOME=/home/deploy/.local/share
+          XDG_CACHE_HOME=/home/deploy/.cache
+          XDG_RUNTIME_DIR=/run/user/${uid}
+          EOF
+          sudo chown deploy:deploy /home/deploy/.config/environment.d/zz-azud-e2e.conf
+          sudo chmod 600 /home/deploy/.config/environment.d/zz-azud-e2e.conf
           e2e_env=(
             HOME=/home/deploy
             XDG_CONFIG_HOME=/home/deploy/.config
@@ -147,6 +158,7 @@ jobs:
           )
           sudo -u deploy -H env "${e2e_env[@]}" systemctl --user import-environment \
             HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR
+          sudo -u deploy -H env "${e2e_env[@]}" systemctl --user daemon-reload
           sudo -u deploy -H env "${e2e_env[@]}" \
             AZUD_E2E_BINARY=/tmp/azud-e2e/azud \
             AZUD_E2E_REQUIRE_SYSTEMD=1 \
