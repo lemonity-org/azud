@@ -70,6 +70,79 @@ jobs:
       - name: Run release and installer smoke
         run: sh scripts/release_smoke_test.sh
 
+  e2e:
+    name: End-to-end (${{ matrix.mode }})
+    runs-on: ubuntu-26.04
+    needs: test
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: root
+            user: root
+            proxy_rootful: "false"
+          - mode: rootless
+            user: deploy
+            proxy_rootful: "false"
+          - mode: rootless-app-rootful-proxy
+            user: deploy
+            proxy_rootful: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+          cache: true
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman netavark aardvark-dns uidmap passt fuse-overlayfs nftables dbus-user-session
+
+      - name: Build
+        run: |
+          mkdir -p /tmp/azud-e2e
+          go build -o /tmp/azud-e2e/azud ./cmd/azud
+          go test -c -tags e2e -o /tmp/azud-e2e/e2e.test ./e2e
+          chmod -R a+rX /tmp/azud-e2e
+
+      - name: Run as root
+        if: matrix.user == 'root'
+        working-directory: /tmp/azud-e2e
+        run: |
+          sudo env AZUD_E2E_BINARY=/tmp/azud-e2e/azud AZUD_E2E_REQUIRE_SYSTEMD=1 \
+            ./e2e.test -test.v -test.timeout=40m
+
+      - name: Run as a rootless user
+        if: matrix.user == 'deploy'
+        working-directory: /tmp/azud-e2e
+        env:
+          PROXY_ROOTFUL: ${{ matrix.proxy_rootful }}
+        run: |
+          sudo useradd --create-home --shell /bin/bash deploy
+          printf 'deploy ALL=(root) NOPASSWD: /usr/bin/podman\n' | sudo tee /etc/sudoers.d/azud-e2e >/dev/null
+          sudo chmod 440 /etc/sudoers.d/azud-e2e
+          sudo loginctl enable-linger deploy
+          uid=$(id -u deploy)
+          for _ in $(seq 1 30); do
+            sudo test -S "/run/user/${uid}/bus" && break
+            sleep 1
+          done
+          sudo -u deploy -H env \
+            XDG_RUNTIME_DIR="/run/user/${uid}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+            AZUD_E2E_BINARY=/tmp/azud-e2e/azud \
+            AZUD_E2E_REQUIRE_SYSTEMD=1 \
+            AZUD_E2E_PROXY_ROOTFUL="${PROXY_ROOTFUL}" \
+            ./e2e.test -test.v -test.timeout=40m
+
   integration:
     name: Integration (${{ matrix.mode }})
     runs-on: ${{ matrix.runner }}

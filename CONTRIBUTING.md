@@ -39,6 +39,14 @@ go test -race ./...
 sh scripts/release_smoke_test.sh
 ```
 
+For changes to how Azud deploys, also run the end-to-end suite. It needs Docker, and
+runs the real binary against real Podman with no sshd, in a topology of your choice
+(`root`, `deploy` or `mixed`):
+
+```bash
+sh scripts/e2e-in-container.sh deploy
+```
+
 Run the relevant integration tests when changing setup, SSH, Podman, proxy,
 or deployment behavior. The full integration matrix also runs in GitHub
 Actions.
