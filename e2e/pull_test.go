@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,6 +63,11 @@ func TestNewReleaseIsZeroDowntime(t *testing.T) {
 	var lastFailure atomic.Value
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	finish := sync.OnceFunc(func() {
+		close(stop)
+		<-done
+	})
+	t.Cleanup(finish)
 	go func() {
 		defer close(done)
 		for {
@@ -88,8 +94,7 @@ func TestNewReleaseIsZeroDowntime(t *testing.T) {
 	s.release("v2")
 	s.deploys()
 	s.waitServes("v2")
-	close(stop)
-	<-done
+	finish()
 
 	if failed.Load() != 0 {
 		t.Errorf("%d of %d requests failed during the swap, last: %v", failed.Load(), failed.Load()+served.Load(), lastFailure.Load())

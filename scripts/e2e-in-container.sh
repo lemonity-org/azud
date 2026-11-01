@@ -38,6 +38,8 @@ trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 go build -o "$work/azud" ./cmd/azud
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 go test -c -tags e2e -o "$work/e2e.test" ./e2e
+# mktemp makes the directory 0700, which the container's deploy user may not enter.
+chmod -R a+rX "$work"
 
 docker build -q -t "$image" - >/dev/null <<'DOCKERFILE'
 FROM ubuntu:26.04
