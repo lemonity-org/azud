@@ -127,7 +127,7 @@ func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) 
 			if err != nil {
 				return false, err
 			}
-			return strings.TrimSpace(status) == "active", nil
+			return unitWillRun(status), nil
 		},
 		registry: podman.NewRegistryManager(podmanClient),
 		proxy:    proxyManager,
@@ -244,6 +244,11 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	// Create deployment record for history
 	record := NewDeploymentRecord(d.cfg.Service, image, version, opts.Destination, hosts)
 	record.Start()
+
+	// Refuse before any hook, pull or migration runs.
+	if err := d.ensureRoleUnitsInactive(targets); err != nil {
+		return d.failAndRecord(record, err)
+	}
 
 	// Ensure required secrets are present on all hosts.
 	if err := d.ensureRemoteSecrets(hosts); err != nil {
@@ -446,9 +451,6 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	var oldExists bool
 	var err error
 	if stopFirst {
-		if err := d.ensureSingletonUnitInactive(host, oldContainerName); err != nil {
-			return err
-		}
 		oldExists, err = d.reconcileStopFirstStandaloneRole(host, role, oldContainerName)
 		if err != nil {
 			return fmt.Errorf("failed to reconcile current container state: %w", err)
@@ -910,31 +912,46 @@ func (d *Deployer) removeSingletonContainers(host string, containers []string, s
 	return errors.Join(removeErrors...)
 }
 
-// ensureSingletonUnitInactive refuses a stop-first deployment while the role's
-// generated systemd unit is running. Those units carry Restart=always, so
-// stopping the renamed previous container would prompt systemd to start a fresh
-// one from the unit while the candidate is booting — precisely the overlap this
-// strategy exists to prevent.
-func (d *Deployer) ensureSingletonUnitInactive(host, unit string) error {
+// unitWillRun reports whether a unit in this systemctl is-active state runs its
+// container now or is about to. A unit with Restart=always passes through activating
+// and deactivating on its way back up.
+func unitWillRun(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "active", "activating", "deactivating", "reloading", "refreshing":
+		return true
+	}
+	return false
+}
+
+// ensureRoleUnitsInactive refuses a deployment while a target role's generated
+// systemd unit is running. Those units carry Restart=always and a pinned image, and
+// Quadlet runs them with --replace. Stopping the previous container makes systemd
+// restart the unit, which replaces the new release with the pinned image, or, for a
+// stop-first role, runs the previous container beside the replacement.
+func (d *Deployer) ensureRoleUnitsInactive(targets []deploymentTarget) error {
 	if d.unitActive == nil {
 		return nil
 	}
-	active, err := d.unitActive(host, unit)
-	if err != nil {
-		// An inconclusive probe (no systemd, no unit installed, transport
-		// hiccup) must not block deployments; the podman calls that follow run
-		// over the same connection and will surface a real connectivity fault.
-		d.log.Debug("Could not determine %s unit state on %s: %v", unit, host, err)
-		return nil
+	for _, target := range targets {
+		unit := RoleContainerName(d.cfg, target.Role)
+		active, err := d.unitActive(target.Host, unit)
+		if err != nil {
+			// An inconclusive probe (no systemd, no unit installed, transport
+			// hiccup) must not block deployments; the podman calls that follow run
+			// over the same connection and will surface a real connectivity fault.
+			d.log.Debug("Could not determine %s unit state on %s: %v", unit, target.Host, err)
+			continue
+		}
+		if active {
+			return fmt.Errorf(
+				"systemd unit %s.service is active on %s; stop it before deploying "+
+					"(it would restart with its pinned image and undo this deployment), "+
+					"then rerun `azud systemd enable` to pin the new release",
+				unit, target.Host,
+			)
+		}
 	}
-	if !active {
-		return nil
-	}
-	return fmt.Errorf(
-		"systemd unit %s.service is active on %s; stop it before deploying this stop_first role "+
-			"(the unit restarts the previous container automatically and would run beside the replacement)",
-		unit, host,
-	)
+	return nil
 }
 
 // reconcileStopFirstStandaloneRole recovers an interrupted singleton swap

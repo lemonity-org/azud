@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -778,24 +779,65 @@ func TestDeployToTargetLockedSelectsStopFirstForSingletonRoles(t *testing.T) {
 	}
 }
 
-func TestEnsureSingletonUnitInactiveBlocksActiveUnit(t *testing.T) {
+func TestEnsureRoleUnitsInactive(t *testing.T) {
 	deployer, _ := stopFirstTestDeployer(newFakeContainerLifecycle("shop-worker"))
+	targets := []deploymentTarget{{Host: "host", Role: "web"}, {Host: "host", Role: "worker"}}
 
-	deployer.unitActive = func(_, _ string) (bool, error) { return true, nil }
-	err := deployer.ensureSingletonUnitInactive("host", "shop-worker")
-	if err == nil || !strings.Contains(err.Error(), "stop it before deploying this stop_first role") {
+	var probed []string
+	deployer.unitActive = func(_, unit string) (bool, error) {
+		probed = append(probed, unit)
+		return unit == "shop-worker", nil
+	}
+	err := deployer.ensureRoleUnitsInactive(targets)
+	if err == nil || !strings.Contains(err.Error(), "shop-worker.service") || !strings.Contains(err.Error(), "stop it before deploying") {
 		t.Fatalf("active unit was not rejected: %v", err)
+	}
+	if want := []string{"shop", "shop-worker"}; !slices.Equal(probed, want) {
+		t.Fatalf("probed units = %v, want every target role: %v", probed, want)
 	}
 
 	deployer.unitActive = func(_, _ string) (bool, error) { return false, nil }
-	if err := deployer.ensureSingletonUnitInactive("host", "shop-worker"); err != nil {
-		t.Fatalf("inactive unit blocked the deployment: %v", err)
+	if err := deployer.ensureRoleUnitsInactive(targets); err != nil {
+		t.Fatalf("inactive units blocked the deployment: %v", err)
 	}
 
 	// An inconclusive probe must not block the deployment.
 	deployer.unitActive = func(_, _ string) (bool, error) { return false, errors.New("no systemd") }
-	if err := deployer.ensureSingletonUnitInactive("host", "shop-worker"); err != nil {
+	if err := deployer.ensureRoleUnitsInactive(targets); err != nil {
 		t.Fatalf("inconclusive unit probe blocked the deployment: %v", err)
+	}
+}
+
+func TestUnitWillRun(t *testing.T) {
+	tests := map[string]bool{
+		"active\n":     true,
+		"activating":   true,
+		"deactivating": true,
+		"reloading":    true,
+		"refreshing":   true,
+		"inactive\n":   false,
+		"failed":       false,
+		"unknown":      false,
+		"":             false,
+	}
+	for status, want := range tests {
+		if got := unitWillRun(status); got != want {
+			t.Errorf("unitWillRun(%q) = %v, want %v", status, got, want)
+		}
+	}
+}
+
+// A refused deployment must stop before anything changes. The deployer has no
+// transport here, so reaching the secrets check or a hook would panic.
+func TestDeployRefusesAnActiveUnitBeforeAnyWork(t *testing.T) {
+	t.Setenv("AZUD_STATE_DIR", t.TempDir())
+	deployer, _ := stopFirstTestDeployer(newFakeContainerLifecycle("shop-worker"))
+	deployer.history = NewDurableHistoryStore(0, output.DefaultLogger)
+	deployer.unitActive = func(_, _ string) (bool, error) { return true, nil }
+
+	err := deployer.Deploy(context.Background(), &DeployOptions{})
+	if err == nil || !strings.Contains(err.Error(), "stop it before deploying") {
+		t.Fatalf("Deploy = %v, want the active unit refusal", err)
 	}
 }
 

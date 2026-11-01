@@ -13,18 +13,11 @@ import (
 	"github.com/lemonity-org/azud/internal/quadlet"
 )
 
-// TestRollingDeployWithAppUnit settles the question behind removing app units in v2.
-// A unit from `azud systemd enable` has Restart=always and a pinned image, and Quadlet
-// runs it with --replace. A rolling swap renames the new container to the stable name
-// and stops the old one, so systemd restarts the unit, which replaces the new release
-// with the pinned old image. First run on v1.6.0 and Podman 5.7, rootless: the deploy
-// reports success, the proxy then times out for tens of seconds, and the old release
-// comes back while the agent still records the new one.
-//
-// It reports what happened instead of asserting it, because on v1 the behaviour is what
-// is in question and no outcome should turn CI red. It fails only if the container
-// runs something that is neither release.
-func TestRollingDeployWithAppUnit(t *testing.T) {
+// TestDeployIsRefusedWhileAnAppUnitIsActive guards against a silent revert. A unit from
+// `azud systemd enable` has Restart=always and a pinned image, and Quadlet runs it with
+// --replace. A rolling swap stops the old container, so systemd restarts the unit, which
+// replaces the new release with the pinned image while the agent records the new one.
+func TestDeployIsRefusedWhileAnAppUnitIsActive(t *testing.T) {
 	requireSystemd(t)
 	s := newService(t, "appunit")
 	first := s.release("v1")
@@ -35,58 +28,35 @@ func TestRollingDeployWithAppUnit(t *testing.T) {
 	s.installAppUnit(unit, s.repo+"@"+first)
 	t.Cleanup(func() { s.removeAppUnit(unit) })
 	s.waitServes("v1")
+	running := s.inspect("{{.Id}}")
 
 	second := s.release("v2")
-	out, deployErr := s.agentOnce()
-	t.Logf("deploy with the unit active: err=%v\n%s", deployErr, out)
-
-	// Restart=always acts after RestartSec, so watch long enough to see it settle.
-	var last string
-	var final observation
-	for i := 0; i < 16; i++ {
-		final = s.observeRole(unit)
-		if line := final.String(); line != last {
-			t.Logf("t+%ds: %s", i*5, line)
-			last = line
-		}
-		time.Sleep(5 * time.Second)
+	out, err := s.agentOnce()
+	if err == nil || !strings.Contains(out, unit+".service") || !strings.Contains(out, "stop it before deploying") {
+		t.Fatalf("deploy with the unit active: err=%v, want the unit named in a refusal\n%s", err, out)
 	}
-	status, _ := run("systemctl", systemctlArgs("status", "--no-pager", "-l", unit+".service")...)
-	containers, _ := podman("ps", "-a", "--filter", "label=azud.service="+s.name, "--format", "{{.Names}} {{.Image}} {{.Status}}")
-	t.Logf("unit status:\n%s\ncontainers:\n%s", status, containers)
-
-	switch {
-	case final.image == "":
-		t.Logf("OBSERVATION app-unit-race: gone. No container holds the stable name; the agent records %s and the proxy answers %q", s.agentState().DeployedDigest, final.serves)
-	case final.image == s.repo+"@"+first:
-		t.Logf("OBSERVATION app-unit-race: reverted. The stable container runs the unit's pinned %s, not the deployed %s; the proxy answers %q; the agent records %s", first, second, final.serves, s.agentState().DeployedDigest)
-	case final.image == s.repo+"@"+second:
-		t.Logf("OBSERVATION app-unit-race: kept. The stable container stays on the deployed %s; the proxy answers %q", second, final.serves)
-	default:
-		t.Fatalf("the stable container runs %q, which is neither release", final.image)
+	s.waitServes("v1")
+	if after := s.inspect("{{.Id}}"); after != running {
+		t.Errorf("a refused deploy replaced the container: %s to %s", running, after)
 	}
-}
-
-// observation is one look at a role during the race test.
-type observation struct {
-	image, unit, serves string
-}
-
-func (o observation) String() string {
-	return fmt.Sprintf("container=%q unit=%s proxy=%q", o.image, o.unit, o.serves)
-}
-
-func (s *service) observeRole(unit string) observation {
-	image, err := podman("container", "inspect", "--format", "{{.ImageName}}", s.roleContainer())
-	if err != nil {
-		image = ""
+	st := s.agentState()
+	if st.DeployedDigest != first || st.FailedDigest != second {
+		t.Errorf("state = %+v, want deployed %s and failed %s", st, first, second)
 	}
-	active, _ := run("systemctl", systemctlArgs("is-active", unit+".service")...)
-	body, serveErr := s.serves()
-	if serveErr != nil {
-		body = "error: " + serveErr.Error()
+
+	// The way through that the refusal names: stop the unit, then deploy.
+	s.systemctl("stop", unit+".service")
+	if out, err := s.agentOnce("--retry-failed"); err != nil {
+		t.Fatalf("retry with the unit stopped: %v\n%s", err, out)
 	}
-	return observation{image: strings.TrimSpace(image), unit: strings.TrimSpace(active), serves: body}
+	s.waitServes("v2")
+
+	// Long enough for a unit restart to have undone it, as it did before the guard.
+	time.Sleep(30 * time.Second)
+	if got := s.inspect("{{.ImageName}}"); got != s.repo+"@"+second {
+		t.Errorf("container runs %q, want the deployed %s", got, second)
+	}
+	s.waitServes("v2")
 }
 
 func requireSystemd(t *testing.T) {
