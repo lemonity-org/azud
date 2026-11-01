@@ -80,6 +80,13 @@ func systemctlArgs(args ...string) []string {
 	return append([]string{"--user"}, args...)
 }
 
+func journalArgs(args ...string) []string {
+	if h.root {
+		return args
+	}
+	return append([]string{"--user"}, args...)
+}
+
 func (s *service) quadletDir() string {
 	if h.root {
 		return "/etc/containers/systemd"
@@ -115,7 +122,11 @@ func (s *service) installAppUnit(name, image string) {
 		}
 	}
 	s.systemctl("daemon-reload")
-	s.systemctl("start", name+".service")
+	if out, err := run("systemctl", systemctlArgs("start", name+".service")...); err != nil {
+		status, _ := run("systemctl", systemctlArgs("status", "--no-pager", "-l", name+".service")...)
+		journal, _ := run("journalctl", journalArgs("--no-pager", "-n", "40", "-u", name+".service")...)
+		s.t.Fatalf("start %s: %v\n%s\nstatus:\n%s\njournal:\n%s", name, err, out, status, journal)
+	}
 }
 
 // publishedPorts returns the running container's port mappings in Quadlet's form. With a
