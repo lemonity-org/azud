@@ -131,6 +131,19 @@ copy) before restarting the unit; it does not mount Azud's state directory.
 Rerun it after upgrading so an existing proxy unit picks up the current
 container definition.
 
+An app unit pins the image it was enabled with, so a deploy refuses a role while
+its unit is running. Otherwise the unit would restart and undo the deploy. Deploying
+such a role is not zero-downtime:
+
+```bash
+systemctl --user stop myapp.service      # takes the role down
+azud deploy
+azud systemd enable                      # pins the new release
+```
+
+In pull mode, the refused release is recorded as failed. After stopping the unit,
+run `azud agent run --once --retry-failed`.
+
 ## Server Admin Commands
 
 ```bash

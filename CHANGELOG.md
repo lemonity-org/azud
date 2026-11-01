@@ -6,6 +6,18 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Fixed a deploy being silently undone by an active app unit from
+  `azud systemd enable`. The unit has `Restart=always` and a pinned image, so
+  when a rolling deploy stopped the old container, systemd restarted the unit,
+  which replaced the new release with the old image. The deploy reported
+  success, the service was unreachable while this happened, and history and
+  the agent's state named the new release. A deploy now refuses to run while a
+  target role's unit is running, before any hook, pull or migration, as it
+  already did for `stop_first` roles. To deploy, stop the unit, which takes
+  the role down until the deploy finishes, then rerun `azud systemd enable` to
+  pin the new release. In pull mode, the refused release is recorded as failed,
+  so use `azud agent run --once --retry-failed` after stopping the unit.
+
 ## 1.6.0 - 2026-10-31
 
 - Added `agent.deploy_command`, `agent.deploy_timeout` and
