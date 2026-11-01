@@ -35,6 +35,7 @@ const (
 	registryContainer = "azud-e2e-registry"
 	trackTag          = "production"
 	proxyContainer    = "azud-proxy"
+	netnsKeeper       = "azud-e2e-netns"
 )
 
 // h is shared by every test: one registry and one proxy, as on a real server.
@@ -105,6 +106,18 @@ func runTests(m *testing.M) (int, error) {
 func (h *harness) bootstrap() error {
 	if out, err := podman("network", "create", "--ignore", "azud"); err != nil {
 		return fmt.Errorf("create azud network: %w\n%s", err, out)
+	}
+	if h.root {
+		return nil
+	}
+	// With a rootful proxy, an app can be the only rootless container on the network.
+	// Replacing it then makes Podman tear down the rootless network namespace, which on
+	// GitHub's runners fails with "kill network process: permission denied". These tests
+	// are not about that, so something else keeps the namespace in use.
+	_, _ = podman("rm", "-f", netnsKeeper)
+	if out, err := podman("run", "-d", "--name", netnsKeeper, "--network", "azud",
+		"docker.io/library/busybox:1.37", "sleep", "infinity"); err != nil {
+		return fmt.Errorf("start %s: %w\n%s", netnsKeeper, err, out)
 	}
 	return nil
 }
@@ -188,6 +201,7 @@ func (h *harness) cleanupShared() {
 	} else {
 		_, _ = podman("rm", "-f", proxyContainer)
 	}
+	_, _ = podman("rm", "-f", netnsKeeper)
 	_, _ = podman("network", "rm", "azud")
 }
 
