@@ -448,6 +448,11 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 
 	oldContainerName := RoleContainerName(d.cfg, role)
 	stopFirst := !IsProxyRole(role) && d.cfg.UsesStopFirst(role)
+	// Deploy refused this before doing any work, but the unit may have started since,
+	// and an automatic rollback reaches here without passing through Deploy.
+	if err := d.ensureRoleUnitInactive(host, oldContainerName); err != nil {
+		return err
+	}
 	var oldExists bool
 	var err error
 	if stopFirst {
@@ -929,29 +934,35 @@ func unitWillRun(status string) bool {
 // restart the unit, which replaces the new release with the pinned image, or, for a
 // stop-first role, runs the previous container beside the replacement.
 func (d *Deployer) ensureRoleUnitsInactive(targets []deploymentTarget) error {
-	if d.unitActive == nil {
-		return nil
-	}
 	for _, target := range targets {
-		unit := RoleContainerName(d.cfg, target.Role)
-		active, err := d.unitActive(target.Host, unit)
-		if err != nil {
-			// An inconclusive probe (no systemd, no unit installed, transport
-			// hiccup) must not block deployments; the podman calls that follow run
-			// over the same connection and will surface a real connectivity fault.
-			d.log.Debug("Could not determine %s unit state on %s: %v", unit, target.Host, err)
-			continue
-		}
-		if active {
-			return fmt.Errorf(
-				"systemd unit %s.service is active on %s; stop it before deploying "+
-					"(it would restart with its pinned image and undo this deployment), "+
-					"then rerun `azud systemd enable` to pin the new release",
-				unit, target.Host,
-			)
+		if err := d.ensureRoleUnitInactive(target.Host, RoleContainerName(d.cfg, target.Role)); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (d *Deployer) ensureRoleUnitInactive(host, unit string) error {
+	if d.unitActive == nil {
+		return nil
+	}
+	active, err := d.unitActive(host, unit)
+	if err != nil {
+		// An inconclusive probe (no systemd, no unit installed, transport hiccup)
+		// must not block deployments; the podman calls that follow run over the same
+		// connection and will surface a real connectivity fault.
+		d.log.Debug("Could not determine %s unit state on %s: %v", unit, host, err)
+		return nil
+	}
+	if !active {
+		return nil
+	}
+	return fmt.Errorf(
+		"systemd unit %s.service is active on %s; stop it before deploying "+
+			"(it would restart with its pinned image and undo this deployment), "+
+			"then rerun `azud systemd enable` to pin the new release",
+		unit, host,
+	)
 }
 
 // reconcileStopFirstStandaloneRole recovers an interrupted singleton swap

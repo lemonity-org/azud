@@ -808,6 +808,24 @@ func TestEnsureRoleUnitsInactive(t *testing.T) {
 	}
 }
 
+// A unit can start after Deploy's early check, and an automatic rollback does not pass
+// through it, so a target checks again before it changes any container.
+func TestDeployToTargetRefusesAUnitThatStartedLater(t *testing.T) {
+	fake := newFakeContainerLifecycle("shop-worker")
+	for _, role := range []string{"web", "worker"} {
+		deployer, _ := stopFirstTestDeployer(fake)
+		deployer.unitActive = func(_, _ string) (bool, error) { return true, nil }
+
+		err := deployer.deployToTargetLocked(context.Background(), deploymentTarget{Host: "host", Role: role}, "image", "v1", &DeployOptions{})
+		if err == nil || !strings.Contains(err.Error(), "stop it before deploying") {
+			t.Fatalf("%s: deployToTargetLocked = %v, want the active unit refusal", role, err)
+		}
+		if len(fake.operations) != 0 {
+			t.Fatalf("%s: a refused target changed containers: %v", role, fake.operations)
+		}
+	}
+}
+
 func TestUnitWillRun(t *testing.T) {
 	tests := map[string]bool{
 		"active\n":     true,

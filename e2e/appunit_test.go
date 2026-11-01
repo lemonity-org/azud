@@ -59,17 +59,18 @@ func TestDeployIsRefusedWhileAnAppUnitIsActive(t *testing.T) {
 	s.waitServes("v2")
 }
 
+// requireSystemd asks whether the service manager answers, not whether it reports
+// "running": a CI runner can stay in "starting" indefinitely while its manager works.
 func requireSystemd(t *testing.T) {
 	t.Helper()
-	out, _ := run("systemctl", systemctlArgs("is-system-running")...)
-	state := strings.TrimSpace(out)
-	if state == "running" || state == "degraded" {
+	out, err := run("systemctl", systemctlArgs("show", "--property=Version")...)
+	if err == nil && strings.HasPrefix(out, "Version=") {
 		return
 	}
 	if os.Getenv("AZUD_E2E_REQUIRE_SYSTEMD") == "1" {
-		t.Fatalf("systemd is required here, but its state is %q", state)
+		t.Fatalf("systemd is required here, but the manager did not answer: %v\n%s", err, out)
 	}
-	t.Skipf("no usable systemd for this user: %q", state)
+	t.Skipf("no usable systemd for this user: %v", err)
 }
 
 func systemctlArgs(args ...string) []string {
