@@ -295,11 +295,31 @@ func TestFromReleaseKeepsTheServersPodmanSettings(t *testing.T) {
 		t.Fatalf("podman = %+v, ignored = %v; a release that does not set it inherits it silently", cfg.Podman, ignored)
 	}
 
-	cfg, ignored, err = FromRelease([]byte(base+"podman:\n  rootless: false\n  quadlet_path: /tmp/evil/\n"), nil, server)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(cfg.Podman, server.Podman) || !slices.Contains(ignored, "podman") {
-		t.Fatalf("podman = %+v, ignored = %v; want the server's, reported", cfg.Podman, ignored)
+	for _, test := range []struct {
+		name, base, dest string
+		reported         bool
+	}{
+		{name: "another path", base: "podman:\n  rootless: false\n  quadlet_path: /tmp/evil/\n", reported: true},
+		{name: "only rootless false", base: "podman:\n  rootless: false\n", reported: true},
+		{name: "the same rootless", base: "podman:\n  rootless: true\n"},
+		{name: "another value in the destination file", dest: "podman:\n  network_backend: cni\n", reported: true},
+		{name: "the destination file puts it back", base: "podman:\n  rootless: false\n", dest: "podman:\n  rootless: true\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var dest []byte
+			if test.dest != "" {
+				dest = []byte(test.dest)
+			}
+			cfg, ignored, err := FromRelease([]byte(base+test.base), dest, server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Podman, server.Podman) {
+				t.Fatalf("podman = %+v, want the server's", cfg.Podman)
+			}
+			if got := slices.Contains(ignored, "podman"); got != test.reported {
+				t.Fatalf("ignored = %v, want podman reported: %v", ignored, test.reported)
+			}
+		})
 	}
 }

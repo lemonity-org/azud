@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // FromRelease builds the configuration a pull-mode server deploys a release
@@ -21,20 +23,19 @@ import (
 // A bundle must belong to the server's service and image repository and run
 // only on the server's hosts.
 func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
-	cfg, _, err := parseConfigBytes(base)
+	cfg, baseNode, err := parseConfigBytes(base)
 	if err != nil {
 		return nil, nil, fmt.Errorf("release deploy.yml: %w", err)
 	}
+	var destNode *yaml.Node
 	if dest != nil {
-		destCfg, destNode, err := parseConfigBytes(dest)
+		var destCfg *Config
+		destCfg, destNode, err = parseConfigBytes(dest)
 		if err != nil {
 			return nil, nil, fmt.Errorf("release destination file: %w", err)
 		}
 		cfg = mergeConfigs(cfg, destCfg, destNode)
 	}
-	// Taken before defaults, so a bundle that does not set podman is not
-	// reported as differing from a server that does.
-	bundlePodman := cfg.Podman
 	applyDefaults(cfg)
 	if cfg.commandTimeoutDerived {
 		// Not something the bundle asked for: re-derived below if the
@@ -54,7 +55,9 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 	trust("security", &cfg.Security, &server.Security)
 	trust("registry", &cfg.Registry, &server.Registry)
 	trust("builder", &cfg.Builder, &server.Builder)
-	trust("podman", &bundlePodman, &server.Podman)
+	if podmanDiffers(cfg.Podman, server.Podman, baseNode, destNode) {
+		ignored = append(ignored, "podman")
+	}
 	cfg.Podman = server.Podman
 	trust("secrets_provider", &cfg.SecretsProvider, &server.SecretsProvider)
 	trust("secrets_command", &cfg.SecretsCommand, &server.SecretsCommand)
@@ -96,6 +99,20 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 		return nil, nil, fmt.Errorf("release configuration is invalid: %w", err)
 	}
 	return cfg, ignored, nil
+}
+
+// podmanDiffers reports whether a bundle sets a podman key to something other
+// than the server's value. Only the keys it sets count: its zero values and
+// defaults say nothing, and false is a value it can set for rootless.
+func podmanDiffers(bundle, server PodmanConfig, nodes ...*yaml.Node) bool {
+	set := func(key string) bool {
+		return slices.ContainsFunc(nodes, func(node *yaml.Node) bool {
+			return nodeHasPath(node, "podman", key)
+		})
+	}
+	return set("rootless") && bundle.Rootless != server.Rootless ||
+		set("quadlet_path") && bundle.QuadletPath != server.QuadletPath ||
+		set("network_backend") && bundle.NetworkBackend != server.NetworkBackend
 }
 
 // sharedProxy returns the proxy settings that configure Caddy for every app
