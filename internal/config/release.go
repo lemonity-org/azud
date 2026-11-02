@@ -12,9 +12,9 @@ import (
 // (dest may be nil), with every trust setting taken from server, the server's
 // own configuration.
 //
-// Trust settings either run commands on the host or decide what the agent
-// accepts: agent, ssh, security, registry, builder, the secrets provider and
-// paths, and hooks. The repository's deploy.yml sets several of them for push
+// Trust settings run commands on the host, decide what the agent accepts, or
+// describe the host itself: agent, ssh, security, registry, builder, podman,
+// the secrets provider and paths, and hooks. The repository's deploy.yml sets several of them for push
 // mode, so a bundle's values are not an error; they are replaced, and their
 // keys returned as ignored when they differ from the server's.
 //
@@ -32,7 +32,15 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 		}
 		cfg = mergeConfigs(cfg, destCfg, destNode)
 	}
+	// Taken before defaults, so a bundle that does not set podman is not
+	// reported as differing from a server that does.
+	bundlePodman := cfg.Podman
 	applyDefaults(cfg)
+	if cfg.commandTimeoutDerived {
+		// Not something the bundle asked for: re-derived below if the
+		// server's timeout was derived too.
+		cfg.SSH.CommandTimeout = server.SSH.CommandTimeout
+	}
 
 	var ignored []string
 	trust := func(key string, bundle, own any) {
@@ -46,6 +54,8 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 	trust("security", &cfg.Security, &server.Security)
 	trust("registry", &cfg.Registry, &server.Registry)
 	trust("builder", &cfg.Builder, &server.Builder)
+	trust("podman", &bundlePodman, &server.Podman)
+	cfg.Podman = server.Podman
 	trust("secrets_provider", &cfg.SecretsProvider, &server.SecretsProvider)
 	trust("secrets_command", &cfg.SecretsCommand, &server.SecretsCommand)
 	trust("secrets_env_prefix", &cfg.SecretsEnvPrefix, &server.SecretsEnvPrefix)
@@ -60,6 +70,14 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 	bundleShared, ownShared := sharedProxy(cfg.Proxy), sharedProxy(server.Proxy)
 	trust("proxy (settings shared by every app on the host)", &bundleShared, &ownShared)
 	applySharedProxy(&cfg.Proxy, server.Proxy)
+
+	// A timeout the server set stays binding, and Validate refuses a release
+	// that needs longer. One the server left to its default follows what
+	// this release deploys with, such as a longer stop timeout.
+	cfg.commandTimeoutDerived = server.commandTimeoutDerived
+	if server.commandTimeoutDerived {
+		cfg.SSH.CommandTimeout = derivedCommandTimeout(cfg)
+	}
 
 	if cfg.Service != server.Service {
 		return nil, nil, fmt.Errorf("release is for service %q, not %q", cfg.Service, server.Service)

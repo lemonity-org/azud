@@ -192,9 +192,9 @@ verification passed, with the variables `verify_command` gets plus
 (written `$$`, as above), so it deploys the image that was verified.
 
 - **Lock.** It runs while the agent holds the host's deploy lock, the one a
-  pushed `azud deploy` takes, so the two never overlap. `AZUD_DEPLOY_LOCK`
-  names that lock; the command must not run `azud deploy` or `azud rollback`
-  itself, which would wait for it. Other `azud` commands, such as `azud systemd enable` or
+  pushed `azud deploy` takes, so the two never overlap. `AZUD_DEPLOY_LOCK` is
+  that lock's absolute path. The agent already holds it, so the command must
+  not wait for it, with `flock` or by running `azud deploy` or `azud rollback`. Other `azud` commands, such as `azud systemd enable` or
   `azud proxy reconcile`, do not take it.
 - **Result.** Exit 0 records the release as deployed. Any other exit records
   it as failed, with the last 40 output lines, and it is not retried until the
@@ -277,11 +277,12 @@ signature proves who built a bundle. `AZUD_AGENT_IMAGE` names the bundle by
 digest; sign the bundle digest that `azud release publish` prints.
 
 **The server's configuration is the trust anchor.** From it the agent takes
-`agent`, `ssh`, `security`, `registry`, `builder`, `hooks`, `hooks_path`, the
-`secrets_*` settings, and the proxy settings shared by every app on the host
+`agent`, `ssh`, `security`, `registry`, `builder`, `podman`, `hooks`,
+`hooks_path`, the `secrets_*` settings, and the proxy settings shared by every app on the host
 (TLS, ACME, listener ports, header limits, logging, `rootful`). The bundle's
 values for them are ignored (the repository's `deploy.yml` sets several of
-them for push mode). Everything else, including the app's own route, comes
+them for push mode). If the server leaves `ssh.command_timeout` unset, it is
+derived from the bundle's deploy and stop timeouts. Everything else, including the app's own route, comes
 from the bundle. A bundle for another service, another image
 repository, or a host other than this server is refused. Hooks never run for
 a bundle.
@@ -295,9 +296,15 @@ What the agent does for each bundle:
   decrypted again; before the first bundle, the file as it was, kept once in
   `<file>.pre-bundle`, or no file) and redeploys the previous release as a
   whole, so no role runs one release's image with another's configuration.
-  Roles the failed release added are stopped. If the agent dies in the middle,
-  its next check redeploys, even when the tag still names the recorded
-  release.
+  Roles the failed release added are stopped. A failed first release has
+  nothing to return to, so its roles are stopped too, unless this service was
+  already running on the server when it started; those roles keep running.
+- **Interruption.** If the agent dies in the middle, its next check redeploys,
+  even when the tag still names the recorded release. If the rollback itself
+  fails, the agent keeps trying it without waiting for the tag to move, 30
+  seconds after the first failure and doubling to every 15 minutes, and
+  `azud agent status` shows the next attempt. The failed release is not
+  deployed again until the tag moves or you run `--once --retry-failed`.
 - **Version:** a bundle whose `minimum_version` is newer than the agent's
   azud is refused before anything changes.
 - **Downgrades:** a bundle older than the deployed one is refused, so access to

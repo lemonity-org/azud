@@ -17,6 +17,26 @@ release notes for the corresponding signed tag.
   the role down until the deploy finishes, then rerun `azud systemd enable` to
   pin the new release. In pull mode, the refused release is recorded as failed,
   so use `azud agent run --once --retry-failed` after stopping the unit.
+- Fixed a server staying on parts of two releases when a bundle's rollback
+  failed, until the tag moved. The agent reported that it would redeploy on its
+  next check, but skipped the release as failed. It now retries the rollback,
+  backing off from 30 seconds to 15 minutes.
+- A failed first bundle now stops the roles it started, unless the service was
+  already running on the server, and no longer stays marked as interrupted.
+- Fixed `AZUD_DEPLOY_LOCK` reaching `deploy_command` as a literal
+  `${HOME}/...` for non-root users. It is now an absolute path.
+- A bundle's `podman` settings no longer reach the deployer. They describe the
+  server, so the server's own apply, and `podman` is reported with the other
+  ignored settings rather than as a pending change.
+- Fixed a bundle with a longer stop or deploy timeout being refused because of
+  the server's default `ssh.command_timeout`. A timeout the server leaves unset
+  is now derived from the release, and commands run with it. One the server
+  sets still binds, and a release that needs longer is refused.
+- `azud agent run` now refuses `source: bundle` when `secrets_path` and the
+  runtime secrets file are the same file. With the defaults this happens when
+  the agent runs from its home directory: each release would overwrite the
+  server's own secrets, including the registry password. To fix it, set either
+  path to another file, or run the agent from another directory.
 
 ## 1.6.0 - 2026-10-31
 

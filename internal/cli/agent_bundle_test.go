@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/agent"
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/registry"
@@ -33,6 +34,9 @@ type bundleEnv struct {
 	fails     []error
 	stopped   []string
 	pending   []bool // Interrupted() as each deploy started
+	// runningBefore lists the roles running before the first deploy. After
+	// it, every role of the configuration asked about is running.
+	runningBefore []string
 }
 
 type deployCall struct {
@@ -124,6 +128,12 @@ agent:
 		stopRoles: func(_ *config.Config, roles []string) error {
 			e.stopped = append(e.stopped, roles...)
 			return nil
+		},
+		runningRoles: func(cfg *config.Config) ([]string, error) {
+			if len(e.deploys) == 0 {
+				return slices.Clone(e.runningBefore), nil
+			}
+			return slices.Clone(cfg.GetRoles()), nil
 		},
 		version: "1.4.0",
 		accessoryEnv: func(name string) (map[string]string, error) {
@@ -473,7 +483,7 @@ func TestAgentInitCreatesAPrivateIdentityOnce(t *testing.T) {
 	}
 }
 
-func TestLocalSecretsPathExpandsHome(t *testing.T) {
+func TestLocalPathExpandsHome(t *testing.T) {
 	t.Setenv("HOME", "/home/deploy")
 	for in, want := range map[string]string{
 		"$HOME/.azud/secrets":   "/home/deploy/.azud/secrets",
@@ -481,8 +491,8 @@ func TestLocalSecretsPathExpandsHome(t *testing.T) {
 		"~/.azud/secrets":       "/home/deploy/.azud/secrets",
 		"/srv/app/secrets":      "/srv/app/secrets",
 	} {
-		if got, err := localSecretsPath(in); err != nil || got != want {
-			t.Errorf("localSecretsPath(%q) = %q, %v; want %q", in, got, err, want)
+		if got, err := localPath(in); err != nil || got != want {
+			t.Errorf("localPath(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
 }
@@ -522,7 +532,149 @@ func TestDeployIsMarkedInterruptedUntilItFinishes(t *testing.T) {
 		t.Fatal("Deploy succeeded")
 	}
 	if !e.applier.Interrupted() {
-		t.Fatal("a failed rollback must leave the deploy marked interrupted, so the next check redeploys")
+		t.Fatal("a failed rollback must leave the deploy marked interrupted, so the next check undoes it")
+	}
+}
+
+func TestFailedFirstReleaseStopsItsRoles(t *testing.T) {
+	e := newBundleEnv(t)
+	e.failNext = errors.New("web started, then failed")
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=new\n", day)); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if strings.Join(e.stopped, ",") != "web" {
+		t.Fatalf("stopped roles = %v; nothing ran before this release, so nothing of it should keep running", e.stopped)
+	}
+	if e.applier.Interrupted() {
+		t.Fatal("a finished cleanup left the deploy marked interrupted")
+	}
+}
+
+func TestFailedFirstReleaseLeavesAServiceThatRanBefore(t *testing.T) {
+	e := newBundleEnv(t)
+	e.runningBefore = []string{"web"} // pushed before the server moved to bundles
+	e.failNext = errors.New("health check failed")
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=new\n", day)); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if len(e.stopped) != 0 {
+		t.Fatalf("stopped roles = %v; that could take a running service down", e.stopped)
+	}
+	if e.applier.Interrupted() {
+		t.Fatal("nothing more can be undone, so the deploy must not stay marked interrupted")
+	}
+}
+
+func TestUnfinishedFirstReleaseStaysFirstAcrossAttempts(t *testing.T) {
+	e := newBundleEnv(t)
+	digest := e.publish(webOnApp1, "DATABASE_URL=new\n", day)
+	cfg := &config.Config{}
+	if err := e.applier.markPending(cfg, digest, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.runningBefore = []string{"web"} // started by the attempt that died
+	if err := e.applier.markPending(cfg, digest, nil); err != nil {
+		t.Fatal(err)
+	}
+	attempt, ok, err := e.applier.readPending()
+	if err != nil || !ok || attempt.digest != digest || !attempt.first {
+		t.Fatalf("pending = %+v, %v, %v; the attempt's own roles do not make it a later release", attempt, ok, err)
+	}
+}
+
+func TestPendingFileFromAnEarlierVersionIsNotAFirstRelease(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := os.MkdirAll(e.applier.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.applier.pendingPath(), []byte("sha256:abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attempt, ok, err := e.applier.readPending()
+	if err != nil || !ok || attempt.digest != "sha256:abc" || attempt.first {
+		t.Fatalf("pending = %+v, %v, %v; roles it cannot account for must not be stopped", attempt, ok, err)
+	}
+}
+
+// The state v1.6.0 stayed in until the tag moved: a release failed and so did
+// its rollback. This runs the real agent decision over the real applier.
+func TestFailedRollbackRecoversWithoutTheTagMoving(t *testing.T) {
+	e := newBundleEnv(t)
+	first := e.publish(webOnApp1, "DATABASE_URL=one\n", day)
+	if err := e.apply(first); err != nil {
+		t.Fatal(err)
+	}
+	second := e.publish(strings.Replace(webOnApp1, "MODE: v1", "MODE: v2", 1), "DATABASE_URL=two\n", day.Add(time.Hour))
+
+	now := day.Add(2 * time.Hour)
+	a := &agent.Agent{
+		Ref:         "registry/acme/app:production",
+		Repository:  e.repo.Name(),
+		Resolve:     func(context.Context) (string, error) { return second, nil },
+		Deploy:      func(ctx context.Context, image string) error { return e.applier.Deploy(ctx, image) },
+		Interrupted: e.applier.Interrupted,
+		Recover:     e.applier.Recover,
+		State:       agent.NewStore(t.TempDir(), "app"),
+		Now:         func() time.Time { return now },
+	}
+	if err := a.State.Save(agent.State{DeployedDigest: first}); err != nil {
+		t.Fatal(err)
+	}
+
+	e.fails = []error{errors.New("release 2 failed"), errors.New("rollback failed")}
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != agent.Failed || err == nil {
+		t.Fatalf("first check = %v, %v", outcome, err)
+	}
+	if !e.applier.Interrupted() {
+		t.Fatal("the failed rollback was not recorded as interrupted")
+	}
+
+	e.fails = []error{errors.New("rollback failed again")}
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != agent.Failed || err == nil {
+		t.Fatalf("second check = %v, %v", outcome, err)
+	}
+	deploys := len(e.deploys)
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != agent.Waiting || err != nil || len(e.deploys) != deploys {
+		t.Fatalf("check during backoff = %v, %v, deploys %d (was %d)", outcome, err, len(e.deploys), deploys)
+	}
+
+	now = now.Add(time.Minute)
+	outcome, _, err := a.Reconcile(context.Background(), false)
+	if outcome != agent.Recovered || err != nil {
+		t.Fatalf("check after backoff = %v, %v", outcome, err)
+	}
+	last := e.deploys[len(e.deploys)-1]
+	if last.cfg.Env.Clear["MODE"] != "v1" || last.env != "DATABASE_URL=one\n" || !last.locked {
+		t.Fatalf("recovery deployed MODE=%q secrets=%q locked=%v; want release 1 as a whole, under the lock", last.cfg.Env.Clear["MODE"], last.env, last.locked)
+	}
+	if e.applier.Interrupted() {
+		t.Fatal("a finished recovery left the deploy marked interrupted")
+	}
+	if outcome, _, _ := a.Reconcile(context.Background(), false); outcome != agent.SkippedFailed {
+		t.Fatalf("check after recovery = %v; the failed release must not be tried again", outcome)
+	}
+}
+
+func TestReleaseSettingPodmanDoesNotReachTheDeployer(t *testing.T) {
+	e := newBundleEnv(t)
+	release := webOnApp1 + "podman:\n  rootless: true\n  quadlet_path: /tmp/evil/\n"
+	if err := e.apply(e.publish(release, "DATABASE_URL=a\n", day)); err != nil {
+		t.Fatal(err)
+	}
+	got := e.deploys[0].cfg.Podman
+	if got.Rootless || got.QuadletPath != e.applier.server.Podman.QuadletPath {
+		t.Fatalf("deployer podman settings = %+v; want the server's %+v", got, e.applier.server.Podman)
+	}
+}
+
+func TestReleaseWithALongerStopTimeoutDeploysWithALongerCommandTimeout(t *testing.T) {
+	e := newBundleEnv(t)
+	release := webOnApp1 + "deploy:\n  stop_timeout: 60s\n"
+	if err := e.apply(e.publish(release, "DATABASE_URL=a\n", day)); err != nil {
+		t.Fatalf("Deploy = %v; the server did not set ssh.command_timeout, so it follows the release", err)
+	}
+	if got := e.deploys[0].cfg.SSH.CommandTimeout; got != 65*time.Second {
+		t.Fatalf("command timeout = %s, want 65s", got)
 	}
 }
 

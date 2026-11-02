@@ -916,11 +916,8 @@ func applyDefaults(cfg *Config) {
 		cfg.Deploy.DeployTimeout = 30 * time.Second
 	}
 	if cfg.SSH.CommandTimeout == 0 {
-		cfg.SSH.CommandTimeout = cfg.Deploy.DeployTimeout
-		minCommandTimeout := cfg.MaxStopTimeout() + StopTimeoutOverhead
-		if cfg.SSH.CommandTimeout < minCommandTimeout {
-			cfg.SSH.CommandTimeout = minCommandTimeout
-		}
+		cfg.SSH.CommandTimeout = derivedCommandTimeout(cfg)
+		cfg.commandTimeoutDerived = true
 	}
 	if cfg.Deploy.DrainTimeout == 0 {
 		cfg.Deploy.DrainTimeout = 30 * time.Second
@@ -1005,4 +1002,10 @@ func currentUsername() string {
 	}
 	// Last resort fallback
 	return "root"
+}
+
+// derivedCommandTimeout is ssh.command_timeout when it is not configured: the
+// deploy timeout, or longer if a container takes longer to stop.
+func derivedCommandTimeout(cfg *Config) time.Duration {
+	return max(cfg.Deploy.DeployTimeout, cfg.MaxStopTimeout()+StopTimeoutOverhead)
 }

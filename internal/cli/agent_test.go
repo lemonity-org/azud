@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/registry"
 	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/state"
 )
 
 func TestImageRepository(t *testing.T) {
@@ -192,6 +194,8 @@ func (l *recordingLocker) WithRemoteLock(host, lockFile string, timeout time.Dur
 }
 
 func TestCommandDeployRunsUnderTheDeployLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	envFile := filepath.Join(t.TempDir(), "env")
 	cfg := &config.Config{
 		Service: "app",
@@ -216,7 +220,8 @@ func TestCommandDeployRunsUnderTheDeployLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Join([]string{image, "app", "ghcr.io/acme/app:production", wantLock}, "\n") + "\n"
+	absoluteLock := filepath.Join(home, state.UserStateDirName, "app.deploy.lock")
+	want := strings.Join([]string{image, "app", "ghcr.io/acme/app:production", absoluteLock}, "\n") + "\n"
 	if string(got) != want {
 		t.Fatalf("command environment = %q, want %q", got, want)
 	}
@@ -231,5 +236,91 @@ func TestCommandDeployReportsTheCommandFailure(t *testing.T) {
 	err := commandDeploy(cfg, &recordingLocker{}, "h", "r", io.Discard)(context.Background(), "ghcr.io/acme/app@sha256:"+strings.Repeat("b", 64))
 	if err == nil || !strings.Contains(err.Error(), "contract preflight failed") {
 		t.Fatalf("deploy = %v; want the command output", err)
+	}
+}
+
+func TestCommandDeployLockIsTheFileTheShellLocks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &config.Config{
+		Service: "app",
+		SSH:     config.SSHConfig{User: "deploy"},
+		Deploy:  config.DeployConfig{DeployTimeout: time.Minute},
+	}
+	lockFile, _ := deploy.DeployLock(cfg)
+	expanded, err := exec.Command("/bin/sh", "-c", `printf %s "`+lockFile+`"`).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := localPath(lockFile)
+	if err != nil || got != string(expanded) {
+		t.Fatalf("AZUD_DEPLOY_LOCK = %q, %v; the shell locks %q", got, err, expanded)
+	}
+}
+
+func TestBundleAgentRefusesSecretsPathsThatCollide(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(home)
+	bundle := config.AgentConfig{Source: config.AgentSourceBundle}
+
+	cfg := &config.Config{SecretsPath: ".azud/secrets", Agent: bundle}
+	if err := checkBundleSecretsPaths(cfg); err == nil || !strings.Contains(err.Error(), "registry password") {
+		t.Fatalf("defaults run from the home directory = %v; each release would overwrite the agent's secrets", err)
+	}
+
+	for name, ok := range map[string]*config.Config{
+		"another runtime file": {SecretsPath: ".azud/secrets", SecretsRemotePath: "$HOME/run/secrets", Agent: bundle},
+		"another own file":     {SecretsPath: "agent/secrets", Agent: bundle},
+		"image source":         {SecretsPath: ".azud/secrets"},
+		"another provider":     {SecretsPath: ".azud/secrets", SecretsProvider: "env", Agent: bundle},
+	} {
+		if err := checkBundleSecretsPaths(ok); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
+	other := t.TempDir()
+	t.Chdir(other)
+	if err := checkBundleSecretsPaths(&config.Config{SecretsPath: ".azud/secrets", Agent: bundle}); err != nil {
+		t.Fatalf("defaults run from another directory = %v", err)
+	}
+
+	// The same file under two names is still the same file.
+	runtimeFile := filepath.Join(home, ".azud", "secrets")
+	if err := os.MkdirAll(filepath.Dir(runtimeFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimeFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(runtimeFile, filepath.Join(other, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkBundleSecretsPaths(&config.Config{SecretsPath: "linked", Agent: bundle}); err == nil {
+		t.Fatal("a symlink to the runtime file was accepted")
+	}
+}
+
+func TestReleaseClientUsesTheReleasesCommandTimeout(t *testing.T) {
+	host := "app-1"
+	server := &config.Config{SSH: config.SSHConfig{User: "deploy", CommandTimeout: 200 * time.Millisecond}}
+	own := ssh.NewClient(&ssh.Config{Context: context.Background(), User: "deploy", CommandTimeout: server.SSH.CommandTimeout, LocalHost: host})
+	defer func() { _ = own.Close() }()
+
+	same, closeSame := releaseClient(context.Background(), own, server, server, host)
+	defer closeSame()
+	if same != own {
+		t.Fatal("a release with the server's timeout got a client of its own")
+	}
+
+	longer := &config.Config{SSH: config.SSHConfig{User: "deploy", CommandTimeout: time.Minute}}
+	client, closeClient := releaseClient(context.Background(), own, server, longer, host)
+	defer closeClient()
+	if result, err := own.Execute(host, "sleep 1"); err == nil && result.ExitCode == 0 {
+		t.Fatal("the agent's own client did not enforce its timeout")
+	}
+	if result, err := client.Execute(host, "sleep 1"); err != nil || result.ExitCode != 0 {
+		t.Fatalf("release client = %+v, %v; want the release's longer timeout", result, err)
 	}
 }
