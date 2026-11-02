@@ -311,11 +311,10 @@ What the agent does for each bundle:
   the registry alone cannot bring back an old release. To roll back, move the
   tag to the older bundle and run `azud agent run --once --allow-downgrade -d agent`
   (or set `agent.allow_downgrade: true`).
-- **What it does not apply:** accessories, cron jobs and Podman settings that
-  differ from this server's configuration, and accessories running with secret
-  values other than the release's. It deploys the app, and `azud agent status`
-  lists them with the command to run from a workstation, with every release
-  until they match.
+- **What it does not apply:** accessories and cron jobs that differ from this
+  server's configuration, and accessories running with secret values other than
+  the release's. It deploys the app, and `azud agent status` lists them with the
+  command to run from a workstation, with every release until they match.
 - **Storage:** each applied release (configuration, `release.json`, encrypted
   secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`.
 
