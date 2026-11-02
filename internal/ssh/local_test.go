@@ -201,3 +201,99 @@ func TestLocalLockExcludesConcurrentHolders(t *testing.T) {
 		t.Fatalf("lock after release = %v, ran=%v", err, ran)
 	}
 }
+
+func TestLocalTransportErrorsReachStderr(t *testing.T) {
+	client := newLocalTestClient(t, 200*time.Millisecond)
+
+	silent, err := client.Execute("app-1", "sleep 30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(silent.Stderr, "timed out") {
+		t.Fatalf("stderr = %q; callers that report only stderr would print nothing", silent.Stderr)
+	}
+
+	pulling, err := client.Execute("app-1", "echo Trying to pull >&2; sleep 30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(pulling.Stderr, "Trying to pull\n") || !strings.Contains(pulling.Stderr, "timed out") {
+		t.Fatalf("stderr = %q, want the command's output and the reason", pulling.Stderr)
+	}
+}
+
+func TestLocalCommandLeavingAProcessBehindKeepsItsResult(t *testing.T) {
+	original := localWaitDelay
+	localWaitDelay = 100 * time.Millisecond
+	t.Cleanup(func() { localWaitDelay = original })
+	client := newLocalTestClient(t, 0)
+
+	// The background sleep inherits the command's stdout and stderr.
+	result, err := client.Execute("app-1", "sleep 5 & echo started")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success() || result.Stdout != "started\n" {
+		t.Fatalf("result = %+v; the command exited 0", result)
+	}
+
+	failed, err := client.Execute("app-1", "sleep 5 & exit 3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.ExitCode != 3 || failed.Error != nil {
+		t.Fatalf("result = %+v, want its exit code", failed)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := client.ExecuteStream("app-1", "sleep 5 & echo started", &stdout, &stderr); err != nil {
+		t.Fatalf("ExecuteStream = %v; the command exited 0", err)
+	}
+}
+
+func TestExecuteLongGetsTheLongerLimit(t *testing.T) {
+	const slow = "sleep 1"
+	for _, test := range []struct {
+		name          string
+		command, long time.Duration
+		finishes      bool
+	}{
+		{name: "the long limit applies", command: 100 * time.Millisecond, long: time.Minute, finishes: true},
+		{name: "a short long limit still times out", command: 100 * time.Millisecond, long: 200 * time.Millisecond},
+		{name: "unset falls back to the command timeout", command: 100 * time.Millisecond},
+		{name: "a longer command timeout is not shortened", command: time.Minute, long: 100 * time.Millisecond, finishes: true},
+		{name: "no limit stays no limit", long: 100 * time.Millisecond, finishes: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client := NewClient(&Config{LocalHost: "app-1", CommandTimeout: test.command, LongCommandTimeout: test.long})
+			defer func() { _ = client.Close() }()
+
+			result, err := client.ExecuteLong("app-1", slow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Success() != test.finishes {
+				t.Fatalf("result = %+v, want finished: %v", result, test.finishes)
+			}
+			parallel := client.ExecuteLongParallel([]string{"app-1"}, slow)
+			if parallel[0].Success() != test.finishes {
+				t.Fatalf("parallel result = %+v, want finished: %v", parallel[0], test.finishes)
+			}
+		})
+	}
+}
+
+func TestOnlyExecuteLongGetsTheLongerLimit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	client := NewClient(&Config{LocalHost: "app-1", CommandTimeout: 100 * time.Millisecond, LongCommandTimeout: time.Minute})
+	defer func() { _ = client.Close() }()
+
+	result, err := client.Execute("app-1", "sleep 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Success() {
+		t.Fatal("Execute outlasted the command timeout")
+	}
+}

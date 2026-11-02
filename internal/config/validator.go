@@ -896,6 +896,10 @@ func Validate(cfg *Config) error {
 		errs = append(errs, ValidationError{Field: "deploy.stop_timeout", Message: "must use whole seconds"})
 	}
 
+	if cfg.Deploy.PullTimeout < 0 {
+		errs = append(errs, ValidationError{Field: "deploy.pull_timeout", Message: "must be non-negative"})
+	}
+
 	// Validate minimum_version format
 	if cfg.MinimumVersion != "" && !isValidSemver(cfg.MinimumVersion) {
 		errs = append(errs, ValidationError{

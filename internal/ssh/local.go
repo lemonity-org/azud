@@ -25,16 +25,17 @@ import (
 // localShell is the POSIX shell that runs local commands.
 const localShell = "/bin/sh"
 
-// localWaitDelay bounds how long a canceled local command may keep its output
-// pipes open after its process group has been signaled.
-const localWaitDelay = 10 * time.Second
+// localWaitDelay bounds how long a local command's output pipes may stay open
+// after it exits or is signaled. A background process it left behind can hold
+// them for as long as it runs.
+var localWaitDelay = 10 * time.Second
 
 var errLocalPTY = errors.New("the local transport does not allocate terminals")
 
 // newLocalConnection returns a connection that runs commands on this machine.
 // It serves only localHost: any other host is refused, so a local run can
 // never execute commands meant for a different server.
-func newLocalConnection(localHost, host string, ctx context.Context, commandTimeout time.Duration) (*Connection, error) {
+func newLocalConnection(localHost, host string, ctx context.Context, commandTimeout, longCommandTimeout time.Duration) (*Connection, error) {
 	if host != localHost {
 		return nil, fmt.Errorf("local transport serves %s only; refusing to run commands for %s", localHost, host)
 	}
@@ -42,18 +43,19 @@ func newLocalConnection(localHost, host string, ctx context.Context, commandTime
 		return nil, fmt.Errorf("the local transport needs a POSIX shell and is not supported on Windows")
 	}
 	return &Connection{
-		host:           host,
-		lastUsed:       time.Now(),
-		commandTimeout: commandTimeout,
-		context:        ctx,
-		local:          true,
+		host:               host,
+		lastUsed:           time.Now(),
+		commandTimeout:     commandTimeout,
+		longCommandTimeout: longCommandTimeout,
+		context:            ctx,
+		local:              true,
 	}, nil
 }
 
-func (c *Connection) localExecute(cmd string, stdin io.Reader) (*Result, error) {
+func (c *Connection) localExecute(cmd string, stdin io.Reader, timeout time.Duration) (*Result, error) {
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	err := c.runLocal(cmd, stdin, &stdout, &stderr)
+	err := c.runLocal(cmd, stdin, &stdout, &stderr, timeout)
 	result := &Result{
 		Host:     c.host,
 		Stdout:   stdout.String(),
@@ -66,24 +68,23 @@ func (c *Connection) localExecute(cmd string, stdin io.Reader) (*Result, error) 
 		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
-			result.ExitCode = -1
-			result.Error = err
+			result.setError(err)
 		}
 	}
 
 	return result, nil
 }
 
-// runLocal runs cmd to completion, honoring the connection context and the
-// command timeout the same way runWithTimeout does for SSH sessions.
-func (c *Connection) runLocal(cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+// runLocal runs cmd to completion, honoring the connection context and timeout
+// the same way runWithLimit does for SSH sessions. A zero timeout means no limit.
+func (c *Connection) runLocal(cmd string, stdin io.Reader, stdout, stderr io.Writer, timeout time.Duration) error {
 	ctx := c.context
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	var cancel context.CancelFunc
-	if c.commandTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, c.commandTimeout)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 	} else {
 		ctx, cancel = context.WithCancel(ctx)
 	}
@@ -98,9 +99,14 @@ func (c *Connection) runLocal(cmd string, stdin io.Reader, stdout, stderr io.Wri
 	command.Stderr = stderr
 
 	if err := command.Run(); err != nil {
+		// The command exited 0 and left a process holding its output pipes.
+		// That is its success, not a failure to run it.
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			if errors.Is(ctxErr, context.DeadlineExceeded) && c.commandTimeout > 0 {
-				return fmt.Errorf("command timed out after %s: %w", c.commandTimeout, ctxErr)
+			if errors.Is(ctxErr, context.DeadlineExceeded) && timeout > 0 {
+				return fmt.Errorf("command timed out after %s: %w", timeout, ctxErr)
 			}
 			return fmt.Errorf("command canceled: %w", ctxErr)
 		}

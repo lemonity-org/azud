@@ -23,9 +23,11 @@ type Connection struct {
 	proxyClient    *ssh.Client // bastion/proxy connection, closed with client
 	lastUsed       time.Time
 	commandTimeout time.Duration
-	context        context.Context
-	mu             sync.Mutex
-	sessions       chan struct{}
+	// longCommandTimeout bounds commands run with ExecuteLong.
+	longCommandTimeout time.Duration
+	context            context.Context
+	mu                 sync.Mutex
+	sessions           chan struct{}
 	// local runs commands on this machine instead of over SSH (see local.go).
 	local bool
 }
@@ -59,6 +61,15 @@ func (r *Result) Success() bool {
 	return r.ExitCode == 0 && r.Error == nil
 }
 
+// setError records that the command could not run or finish. Most callers
+// report only Stderr, so it carries the reason too, after any output the command
+// wrote: the last lines of an interrupted pull do not say why it stopped.
+func (r *Result) setError(err error) {
+	r.ExitCode = -1
+	r.Error = err
+	r.Stderr = strings.TrimLeft(strings.TrimRight(r.Stderr, "\n")+"\n"+err.Error(), "\n")
+}
+
 // Output returns stdout if successful, stderr otherwise
 func (r *Result) Output() string {
 	if r.Stdout != "" {
@@ -69,8 +80,27 @@ func (r *Result) Output() string {
 
 // Execute runs a command on the remote host
 func (c *Connection) Execute(cmd string) (*Result, error) {
+	return c.execute(cmd, c.commandTimeout)
+}
+
+// ExecuteLong runs a command that can outlast the command timeout, such as an
+// image pull.
+func (c *Connection) ExecuteLong(cmd string) (*Result, error) {
+	return c.execute(cmd, c.longTimeout())
+}
+
+// longTimeout is the limit for ExecuteLong. It never shortens the command
+// timeout, and no limit stays no limit.
+func (c *Connection) longTimeout() time.Duration {
+	if c.commandTimeout <= 0 {
+		return c.commandTimeout
+	}
+	return max(c.commandTimeout, c.longCommandTimeout)
+}
+
+func (c *Connection) execute(cmd string, timeout time.Duration) (*Result, error) {
 	if c.local {
-		return c.localExecute(cmd, nil)
+		return c.localExecute(cmd, nil, timeout)
 	}
 	release := c.beginSession()
 	defer release()
@@ -86,7 +116,7 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 	session.Stderr = &stderr
 
 	start := time.Now()
-	err = c.runWithTimeout(session, cmd)
+	err = c.runWithLimit(session, cmd, timeout)
 	duration := time.Since(start)
 
 	result := &Result{
@@ -100,8 +130,7 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 		if exitErr, ok := err.(*ssh.ExitError); ok {
 			result.ExitCode = exitErr.ExitStatus()
 		} else {
-			result.ExitCode = -1
-			result.Error = err
+			result.setError(err)
 		}
 	}
 
@@ -111,7 +140,7 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 // ExecuteWithStdin runs a command on the remote host with provided stdin.
 func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, error) {
 	if c.local {
-		return c.localExecute(cmd, stdin)
+		return c.localExecute(cmd, stdin, c.commandTimeout)
 	}
 	release := c.beginSession()
 	defer release()
@@ -142,8 +171,7 @@ func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, err
 		if exitErr, ok := err.(*ssh.ExitError); ok {
 			result.ExitCode = exitErr.ExitStatus()
 		} else {
-			result.ExitCode = -1
-			result.Error = err
+			result.setError(err)
 		}
 	}
 
@@ -190,7 +218,7 @@ func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr 
 // ExecuteStream runs a command and streams output to the provided writers
 func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	if c.local {
-		return c.runLocal(cmd, nil, stdout, stderr)
+		return c.runLocal(cmd, nil, stdout, stderr, c.commandTimeout)
 	}
 	release := c.beginSession()
 	defer release()
@@ -214,7 +242,7 @@ func (c *Connection) ExecuteIO(cmd string, stdin io.Reader, stdout, stderr io.Wr
 		return c.ExecuteWithPty(cmd, stdin, stdout, stderr)
 	}
 	if c.local {
-		return c.runLocal(cmd, stdin, stdout, stderr)
+		return c.runLocal(cmd, stdin, stdout, stderr, c.commandTimeout)
 	}
 	release := c.beginSession()
 	defer release()
@@ -229,16 +257,20 @@ func (c *Connection) ExecuteIO(cmd string, stdin io.Reader, stdout, stderr io.Wr
 	return c.runWithTimeout(session, cmd)
 }
 
-// runWithTimeout executes a command on the session with an optional timeout.
-// If commandTimeout is zero, it falls back to session.Run (no timeout).
+// runWithTimeout executes a command on the session with the command timeout.
 func (c *Connection) runWithTimeout(session *ssh.Session, cmd string) error {
+	return c.runWithLimit(session, cmd, c.commandTimeout)
+}
+
+// runWithLimit executes a command on the session. A zero timeout means no limit.
+func (c *Connection) runWithLimit(session *ssh.Session, cmd string, timeout time.Duration) error {
 	ctx := c.context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if c.commandTimeout > 0 {
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.commandTimeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
@@ -256,8 +288,8 @@ func (c *Connection) runWithTimeout(session *ssh.Session, cmd string) error {
 		return err
 	case <-ctx.Done():
 		_ = session.Close()
-		if ctx.Err() == context.DeadlineExceeded && c.commandTimeout > 0 {
-			return fmt.Errorf("command timed out after %s: %w", c.commandTimeout, ctx.Err())
+		if ctx.Err() == context.DeadlineExceeded && timeout > 0 {
+			return fmt.Errorf("command timed out after %s: %w", timeout, ctx.Err())
 		}
 		return fmt.Errorf("command canceled: %w", ctx.Err())
 	}

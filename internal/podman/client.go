@@ -42,6 +42,18 @@ func (c *Client) ExecuteAll(hosts []string, args ...string) []*ssh.Result {
 	return c.ssh.ExecuteParallel(hosts, cmd)
 }
 
+// ExecuteLong is Execute for commands that can outlast the command timeout.
+func (c *Client) ExecuteLong(host string, args ...string) (*ssh.Result, error) {
+	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
+	return c.ssh.ExecuteLong(host, cmd)
+}
+
+// ExecuteLongAll is ExecuteAll for commands that can outlast the command timeout.
+func (c *Client) ExecuteLongAll(hosts []string, args ...string) []*ssh.Result {
+	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
+	return c.ssh.ExecuteLongParallel(hosts, cmd)
+}
+
 // RewriteCommand rewrites shell commands generated with "podman" to use this
 // client's configured command prefix (e.g. "sudo -n podman").
 func (c *Client) RewriteCommand(cmd string) string {

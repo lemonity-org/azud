@@ -277,6 +277,8 @@ type service struct {
 	repo   string
 	host   string
 	built  int
+	// agentEnv adds to the environment agentOnce runs the agent with.
+	agentEnv []string
 }
 
 func newService(t *testing.T, name string) *service {
@@ -304,7 +306,7 @@ func newService(t *testing.T, name string) *service {
 
 // renderConfig is a server's config for the v1 agent. verify_command stands in for
 // cosign: only a digest the test has signed passes, which is the gate under test.
-// ssh.command_timeout is raised because the default also bounds podman pull.
+// ssh.command_timeout is written out so the tests about that limit can replace this line.
 func (s *service) renderConfig() string {
 	rootless := !h.root
 	return fmt.Sprintf(`service: %s
@@ -464,7 +466,7 @@ func (s *service) release(version string) string {
 func (s *service) agentOnce(args ...string) (string, error) {
 	command := exec.Command(h.binary, append([]string{"agent", "run", "--once", "-c", s.config}, args...)...)
 	command.Dir = s.dir
-	command.Env = append(os.Environ(), "AZUD_STATE_DIR="+s.state, "SSL_CERT_FILE="+h.caFile)
+	command.Env = append(append(os.Environ(), "AZUD_STATE_DIR="+s.state, "SSL_CERT_FILE="+h.caFile), s.agentEnv...)
 	out, err := command.CombinedOutput()
 	return string(out), err
 }

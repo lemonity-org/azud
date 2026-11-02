@@ -54,6 +54,10 @@ type Config struct {
 	// Command execution timeout (0 = no timeout)
 	CommandTimeout time.Duration
 
+	// LongCommandTimeout bounds commands run with ExecuteLong, such as image
+	// pulls, when it is longer than CommandTimeout.
+	LongCommandTimeout time.Duration
+
 	// Proxy/bastion host configuration
 	Proxy *ProxyConfig
 
@@ -148,7 +152,7 @@ func (c *Client) connect(host string) (*Connection, error) {
 	}
 
 	if c.config.LocalHost != "" {
-		conn, err := newLocalConnection(c.config.LocalHost, host, c.config.Context, c.config.CommandTimeout)
+		conn, err := newLocalConnection(c.config.LocalHost, host, c.config.Context, c.config.CommandTimeout, c.config.LongCommandTimeout)
 		if err != nil {
 			return nil, err
 		}
@@ -184,13 +188,14 @@ func (c *Client) connect(host string) (*Connection, error) {
 
 	// Create and store connection
 	conn := &Connection{
-		host:           host,
-		client:         client,
-		proxyClient:    proxyClient,
-		lastUsed:       time.Now(),
-		commandTimeout: c.config.CommandTimeout,
-		context:        c.config.Context,
-		sessions:       make(chan struct{}, 8),
+		host:               host,
+		client:             client,
+		proxyClient:        proxyClient,
+		lastUsed:           time.Now(),
+		commandTimeout:     c.config.CommandTimeout,
+		longCommandTimeout: c.config.LongCommandTimeout,
+		context:            c.config.Context,
+		sessions:           make(chan struct{}, 8),
 	}
 
 	c.pool.Put(host, conn)
@@ -560,6 +565,17 @@ func (c *Client) Execute(host, cmd string) (*Result, error) {
 	return conn.Execute(cmd)
 }
 
+// ExecuteLong runs a command on the given host that can outlast the command
+// timeout, such as an image pull.
+func (c *Client) ExecuteLong(host, cmd string) (*Result, error) {
+	conn, err := c.Connect(host)
+	if err != nil {
+		return nil, err
+	}
+
+	return conn.ExecuteLong(cmd)
+}
+
 // ExecuteWithStdin runs a command on the remote host with provided stdin.
 func (c *Client) ExecuteWithStdin(host, cmd string, stdin io.Reader) (*Result, error) {
 	conn, err := c.Connect(host)
@@ -588,6 +604,16 @@ func (c *Client) ExecuteIO(host, cmd string, stdin io.Reader, stdout, stderr io.
 
 // ExecuteParallel runs a command on multiple hosts concurrently
 func (c *Client) ExecuteParallel(hosts []string, cmd string) []*Result {
+	return c.executeParallel(hosts, cmd, c.Execute)
+}
+
+// ExecuteLongParallel is ExecuteParallel for commands that can outlast the
+// command timeout.
+func (c *Client) ExecuteLongParallel(hosts []string, cmd string) []*Result {
+	return c.executeParallel(hosts, cmd, c.ExecuteLong)
+}
+
+func (c *Client) executeParallel(hosts []string, cmd string, execute func(host, cmd string) (*Result, error)) []*Result {
 	results := make([]*Result, len(hosts))
 	var wg sync.WaitGroup
 
@@ -595,7 +621,7 @@ func (c *Client) ExecuteParallel(hosts []string, cmd string) []*Result {
 		wg.Add(1)
 		go func(idx int, h string) {
 			defer wg.Done()
-			result, err := c.Execute(h, cmd)
+			result, err := execute(h, cmd)
 			if err != nil {
 				results[idx] = &Result{
 					Host:     h,

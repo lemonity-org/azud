@@ -38,6 +38,16 @@ release notes for the corresponding signed tag.
   server's own secrets, including the registry password. To fix it, set either
   path to another file, or run the agent from another directory.
 
+- Added `deploy.pull_timeout` (default 15m), which limits pulling one image.
+  Pulls used to share `ssh.command_timeout`, so with the default of 35s a slow
+  first pull failed the deploy. If `ssh.command_timeout` is longer, it applies
+  to pulls too. A bundle that sets the new key needs an agent of this version.
+- Fixed errors with no reason in them. When a command timed out, was canceled or
+  lost its connection, most errors printed only its output, such as `failed to
+  stop container: `, or the last lines of a pull. They now say what happened.
+- Fixed `azud agent` reporting a command as failed when it exited 0 and left a
+  background process holding its output open. It now keeps the command's result.
+
 ## 1.6.0 - 2026-10-31
 
 - Added `agent.deploy_command`, `agent.deploy_timeout` and

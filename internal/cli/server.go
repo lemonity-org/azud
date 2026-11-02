@@ -136,9 +136,6 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 		if result.Stderr != "" {
 			output.DefaultLogger.OutputError(result.Stderr)
 		}
-		if result.Error != nil {
-			output.DefaultLogger.OutputError(result.Error.Error())
-		}
 	}
 
 	if hasErrors {
@@ -157,6 +154,7 @@ func createSSHClient() *ssh.Client {
 		KnownHostsFile:             cfg.SSH.KnownHostsFile,
 		ConnectTimeout:             cfg.SSH.ConnectTimeout,
 		CommandTimeout:             cfg.SSH.CommandTimeout,
+		LongCommandTimeout:         cfg.Deploy.PullTimeout,
 		InsecureIgnoreHostKey:      cfg.SSH.InsecureIgnoreHostKey,
 		TrustedHostFingerprints:    cfg.SSH.TrustedHostFingerprints,
 		RequireTrustedFingerprints: cfg.Security.RequireTrustedFingerprints,

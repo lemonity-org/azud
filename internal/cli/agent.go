@@ -160,10 +160,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	// it started instead of leaving the server between releases.
 	commandContext := context.WithoutCancel(cmd.Context())
 	sshClient := ssh.NewClient(&ssh.Config{
-		Context:        commandContext,
-		User:           cfg.SSH.User,
-		CommandTimeout: cfg.SSH.CommandTimeout,
-		LocalHost:      host,
+		Context:            commandContext,
+		User:               cfg.SSH.User,
+		CommandTimeout:     cfg.SSH.CommandTimeout,
+		LongCommandTimeout: cfg.Deploy.PullTimeout,
+		LocalHost:          host,
 	})
 	defer func() { _ = sshClient.Close() }()
 
@@ -466,18 +467,19 @@ type remoteLocker interface {
 }
 
 // releaseClient returns the client to deploy release with: the agent's own,
-// or one with the release's command timeout when that differs, so a longer
-// stop timeout in the release is not cut short. The returned function closes
-// what this call opened.
+// or one with the release's timeouts when they differ, so a longer stop or pull
+// timeout in the release is not cut short. The returned function closes what
+// this call opened.
 func releaseClient(ctx context.Context, own *ssh.Client, server, release *config.Config, host string) (*ssh.Client, func()) {
-	if release.SSH.CommandTimeout == server.SSH.CommandTimeout {
+	if release.SSH.CommandTimeout == server.SSH.CommandTimeout && release.Deploy.PullTimeout == server.Deploy.PullTimeout {
 		return own, func() {}
 	}
 	client := ssh.NewClient(&ssh.Config{
-		Context:        ctx,
-		User:           server.SSH.User,
-		CommandTimeout: release.SSH.CommandTimeout,
-		LocalHost:      host,
+		Context:            ctx,
+		User:               server.SSH.User,
+		CommandTimeout:     release.SSH.CommandTimeout,
+		LongCommandTimeout: release.Deploy.PullTimeout,
+		LocalHost:          host,
 	})
 	return client, func() { _ = client.Close() }
 }
