@@ -323,3 +323,50 @@ func TestFromReleaseKeepsTheServersPodmanSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestPullTimeoutDefaultsMergesAndValidates(t *testing.T) {
+	write := func(t *testing.T, dir, name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	base := "service: app\nimage: ghcr.io/acme/app\nservers:\n  web:\n    hosts: [app-1]\nproxy:\n  host: app.example.com\n"
+
+	dir := t.TempDir()
+	cfg, err := NewLoader(write(t, dir, "deploy.yml", base), "").WithoutSecrets().Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Deploy.PullTimeout != 15*time.Minute {
+		t.Errorf("default pull_timeout = %s, want 15m", cfg.Deploy.PullTimeout)
+	}
+	if cfg.SSH.CommandTimeout != 35*time.Second {
+		t.Errorf("command_timeout = %s; a pull timeout must not raise the limit on other commands", cfg.SSH.CommandTimeout)
+	}
+
+	withDeploy := base + "deploy:\n  pull_timeout: 1h\n"
+	cfg, err = NewLoader(write(t, dir, "deploy.yml", withDeploy), "").WithoutSecrets().Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Deploy.PullTimeout != time.Hour {
+		t.Errorf("pull_timeout = %s, want 1h", cfg.Deploy.PullTimeout)
+	}
+
+	write(t, dir, "deploy.prod.yml", "deploy:\n  pull_timeout: 2h\n")
+	cfg, err = NewLoader(filepath.Join(dir, "deploy.yml"), "prod").WithoutSecrets().Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Deploy.PullTimeout != 2*time.Hour {
+		t.Errorf("pull_timeout from the destination = %s, want 2h", cfg.Deploy.PullTimeout)
+	}
+
+	negative := t.TempDir()
+	if _, err := NewLoader(write(t, negative, "deploy.yml", base+"deploy:\n  pull_timeout: -1s\n"), "").WithoutSecrets().Load(); err == nil || !strings.Contains(err.Error(), "pull_timeout") {
+		t.Errorf("negative pull_timeout error = %v", err)
+	}
+}

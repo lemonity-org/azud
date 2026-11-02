@@ -324,3 +324,27 @@ func TestReleaseClientUsesTheReleasesCommandTimeout(t *testing.T) {
 		t.Fatalf("release client = %+v, %v; want the release's longer timeout", result, err)
 	}
 }
+
+func TestReleaseClientUsesTheReleasesPullTimeout(t *testing.T) {
+	host := "app-1"
+	server := &config.Config{
+		SSH:    config.SSHConfig{User: "deploy", CommandTimeout: 200 * time.Millisecond},
+		Deploy: config.DeployConfig{PullTimeout: 200 * time.Millisecond},
+	}
+	own := ssh.NewClient(&ssh.Config{Context: context.Background(), User: "deploy", CommandTimeout: server.SSH.CommandTimeout, LongCommandTimeout: server.Deploy.PullTimeout, LocalHost: host})
+	defer func() { _ = own.Close() }()
+
+	longer := *server
+	longer.Deploy.PullTimeout = time.Minute
+	client, closeClient := releaseClient(context.Background(), own, server, &longer, host)
+	defer closeClient()
+	if client == own {
+		t.Fatal("a release with a longer pull timeout kept the agent's client")
+	}
+	if result, err := client.ExecuteLong(host, "sleep 1"); err != nil || result.ExitCode != 0 {
+		t.Fatalf("release client = %+v, %v; want the release's longer pull timeout", result, err)
+	}
+	if result, err := client.Execute(host, "sleep 1"); err == nil && result.ExitCode == 0 {
+		t.Fatal("the release's pull timeout reached other commands")
+	}
+}

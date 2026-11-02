@@ -633,6 +633,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if has("deploy", "deploy_timeout") || destNode == nil && dest.Deploy.DeployTimeout != 0 {
 		merged.Deploy.DeployTimeout = dest.Deploy.DeployTimeout
 	}
+	if has("deploy", "pull_timeout") || destNode == nil && dest.Deploy.PullTimeout != 0 {
+		merged.Deploy.PullTimeout = dest.Deploy.PullTimeout
+	}
 	if has("deploy", "drain_timeout") || destNode == nil && dest.Deploy.DrainTimeout != 0 {
 		merged.Deploy.DrainTimeout = dest.Deploy.DrainTimeout
 	}
@@ -914,6 +917,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Deploy.DeployTimeout == 0 {
 		cfg.Deploy.DeployTimeout = 30 * time.Second
+	}
+	if cfg.Deploy.PullTimeout == 0 {
+		cfg.Deploy.PullTimeout = 15 * time.Minute
 	}
 	if cfg.SSH.CommandTimeout == 0 {
 		cfg.SSH.CommandTimeout = derivedCommandTimeout(cfg)

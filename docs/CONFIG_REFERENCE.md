@@ -96,6 +96,12 @@ the connection could be cut off while the container is still shutting down.
 Azud rejects a configuration that violates this, and raises the default
 `ssh.command_timeout` automatically when it is not set explicitly.
 
+### Pull timeout
+
+`deploy.pull_timeout` (default 15m) limits pulling one image, because a first
+pull can take far longer than any other command. `ssh.command_timeout` limits
+everything else. If `ssh.command_timeout` is longer, it applies to pulls too.
+
 A configuration containing only non-web roles does not require a `proxy`
 section. `azud setup` automatically skips proxy setup in that configuration.
 
@@ -330,6 +336,7 @@ deploy:
   pre_deploy_command: "./migrate up"
   readiness_delay: 10s
   deploy_timeout: 10m
+  pull_timeout: 15m        # Limit for pulling one image (default: 15m)
   drain_timeout: 30s
   retain_containers: 3
   retain_history: 20

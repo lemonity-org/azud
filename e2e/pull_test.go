@@ -3,6 +3,9 @@
 package e2e
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,5 +150,54 @@ func TestBadReleaseKeepsThePreviousOneServing(t *testing.T) {
 	}
 	if !strings.Contains(s.inspect("{{.ImageName}}"), fixed) {
 		t.Errorf("container runs %q, want %s", s.inspect("{{.ImageName}}"), fixed)
+	}
+}
+
+// A podman on the agent's PATH makes pulls slower than ssh.command_timeout, with
+// real pulls behind it. The first check keeps the limit below the pull, so it must
+// fail and say why. The second has the default pull_timeout and must finish.
+func TestSlowPullIsNotCutShort(t *testing.T) {
+	s := newService(t, "slowpull")
+	realPodman, err := exec.LookPath("podman")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(s.dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := "#!/bin/sh\nif [ \"$1\" = pull ]; then sleep 14; fi\nexec " + realPodman + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "podman"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.agentEnv = []string{"PATH=" + bin + ":" + os.Getenv("PATH")}
+
+	// Stops take 1s, so a 12s limit is enough for everything but the pull.
+	config := strings.Replace(s.renderConfig(), "  command_timeout: 5m\n", "  command_timeout: 12s\n", 1)
+	config = strings.Replace(config, "deploy:\n", "deploy:\n  stop_timeout: 1s\n", 1)
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(s.config, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(strings.Replace(config, "deploy:\n", "deploy:\n  pull_timeout: 13s\n", 1))
+
+	digest := s.release("v1")
+	out, err := s.agentOnce()
+	if err == nil {
+		t.Fatalf("the check passed with a pull limit below the pull's length:\n%s", out)
+	}
+	if !strings.Contains(out, "timed out after 13s") {
+		t.Errorf("the failed pull does not say why:\n%s", out)
+	}
+
+	write(config)
+	if out, err := s.agentOnce("--retry-failed"); err != nil {
+		t.Fatalf("a pull within the default pull_timeout failed: %v\n%s", err, out)
+	}
+	s.waitServes("v1")
+	if got := s.agentState().DeployedDigest; got != digest {
+		t.Errorf("deployed digest = %q, want %q", got, digest)
 	}
 }

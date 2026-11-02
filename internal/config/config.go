@@ -629,6 +629,10 @@ type DeployConfig struct {
 	// Maximum deployment time
 	DeployTimeout time.Duration `yaml:"deploy_timeout"`
 
+	// Maximum time to pull one image. Default: 15m. A longer
+	// ssh.command_timeout also applies to pulls.
+	PullTimeout time.Duration `yaml:"pull_timeout"`
+
 	// Time to drain connections
 	DrainTimeout time.Duration `yaml:"drain_timeout"`
 
