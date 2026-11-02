@@ -1,9 +1,13 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 	"gopkg.in/yaml.v3"
@@ -231,5 +235,71 @@ proxy:
 	}
 	if !found {
 		t.Fatalf("ignored = %v, want the shared proxy settings reported", ignored)
+	}
+}
+
+func TestFromReleaseDerivesTheCommandTimeoutAfterTheMerge(t *testing.T) {
+	release := []byte("service: app\nimage: ghcr.io/acme/app\nservers:\n  web:\n    hosts: [app-1]\nproxy:\n  host: app.example.com\ndeploy:\n  stop_timeout: 60s\n")
+	load := func(t *testing.T, extra string) *Config {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "deploy.yml")
+		yaml := "service: app\nimage: ghcr.io/acme/app\nservers:\n  web:\n    hosts: [app-1]\nproxy:\n  host: app.example.com\n" + extra
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		server, err := NewLoader(path, "").WithoutSecrets().Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return server
+	}
+
+	t.Run("derived on the server", func(t *testing.T) {
+		server := load(t, "")
+		cfg, ignored, err := FromRelease(release, nil, server)
+		if err != nil {
+			t.Fatalf("FromRelease = %v", err)
+		}
+		if cfg.SSH.CommandTimeout != 65*time.Second {
+			t.Fatalf("command timeout = %s, want 65s", cfg.SSH.CommandTimeout)
+		}
+		if slices.Contains(ignored, "ssh") {
+			t.Fatalf("ignored = %v; the release did not set ssh", ignored)
+		}
+	})
+	t.Run("set on the server", func(t *testing.T) {
+		server := load(t, "ssh:\n  command_timeout: 40s\n")
+		if _, _, err := FromRelease(release, nil, server); err == nil || !strings.Contains(err.Error(), "ssh.command_timeout") {
+			t.Fatalf("FromRelease = %v; an explicit timeout stays binding", err)
+		}
+	})
+}
+
+func TestFromReleaseKeepsTheServersPodmanSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deploy.yml")
+	serverYAML := "service: app\nimage: ghcr.io/acme/app\nservers:\n  web:\n    hosts: [app-1]\nproxy:\n  host: app.example.com\n  rootful: true\npodman:\n  rootless: true\n"
+	if err := os.WriteFile(path, []byte(serverYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewLoader(path, "").WithoutSecrets().Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "service: app\nimage: ghcr.io/acme/app\nservers:\n  web:\n    hosts: [app-1]\nproxy:\n  host: app.example.com\n"
+
+	cfg, ignored, err := FromRelease([]byte(base), nil, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Podman, server.Podman) || slices.Contains(ignored, "podman") {
+		t.Fatalf("podman = %+v, ignored = %v; a release that does not set it inherits it silently", cfg.Podman, ignored)
+	}
+
+	cfg, ignored, err = FromRelease([]byte(base+"podman:\n  rootless: false\n  quadlet_path: /tmp/evil/\n"), nil, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Podman, server.Podman) || !slices.Contains(ignored, "podman") {
+		t.Fatalf("podman = %+v, ignored = %v; want the server's, reported", cfg.Podman, ignored)
 	}
 }

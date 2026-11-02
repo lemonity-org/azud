@@ -29,6 +29,10 @@ const (
 
 // Config represents the main deployment configuration
 type Config struct {
+	// commandTimeoutDerived records that ssh.command_timeout was not set and
+	// came from the deploy and stop timeouts, so a release can derive its own.
+	commandTimeoutDerived bool
+
 	// Service name (used as container name prefix)
 	Service string `yaml:"service"`
 

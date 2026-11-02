@@ -28,6 +28,11 @@ const (
 	SkippedFailed
 	// Failed means verification or deployment of a new digest failed.
 	Failed
+	// Recovered means an interrupted deploy of a failed release was undone:
+	// the server runs one whole release again, without the failed one.
+	Recovered
+	// Waiting means undoing an interrupted deploy failed and is backing off.
+	Waiting
 )
 
 func (o Outcome) String() string {
@@ -42,6 +47,10 @@ func (o Outcome) String() string {
 		return "skipped-failed"
 	case Failed:
 		return "failed"
+	case Recovered:
+		return "recovered"
+	case Waiting:
+		return "waiting"
 	default:
 		return fmt.Sprintf("Outcome(%d)", int(o))
 	}
@@ -70,6 +79,10 @@ type Agent struct {
 	// recorded digest may not be what runs. The agent then deploys even an
 	// unchanged digest. Optional.
 	Interrupted func() bool
+	// Recover undoes an interrupted deploy when the tag names a release that
+	// failed, so the server does not stay between releases until the tag
+	// moves. Optional; it takes the deploy lock itself.
+	Recover func(ctx context.Context) error
 
 	State *Store
 	Log   *output.Logger
@@ -138,6 +151,11 @@ func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, strin
 	}
 
 	if st.FailedDigest == digest && !retryFailed {
+		// A failed digest is not deployed again, but a server left between
+		// releases must not wait for the tag to move.
+		if interrupted && a.Recover != nil {
+			return a.recoverInterrupted(ctx, &st, digest)
+		}
 		return SkippedFailed, digest, a.State.Save(st)
 	}
 
@@ -161,12 +179,45 @@ func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, strin
 	return Deployed, digest, a.State.Save(st)
 }
 
+// recoverInterrupted undoes an interrupted deploy, backing off while it fails.
+// Like a deploy, it runs to completion even if ctx is canceled.
+func (a *Agent) recoverInterrupted(ctx context.Context, st *State, digest string) (Outcome, string, error) {
+	if a.now().Before(st.RecoverAfter) {
+		return Waiting, digest, a.State.Save(*st)
+	}
+	if err := a.Recover(context.WithoutCancel(ctx)); err != nil {
+		cause := fmt.Errorf("undoing the failed deploy of %s failed: %w", a.Image(digest), err)
+		st.RecoverAfter = a.now().Add(recoverDelay(st.RecoverTries))
+		st.RecoverTries++
+		st.LastError = cause.Error()
+		if err := a.State.Save(*st); err != nil {
+			return Failed, digest, errors.Join(cause, err)
+		}
+		return Failed, digest, cause
+	}
+	st.RecoverTries = 0
+	st.RecoverAfter = time.Time{}
+	return Recovered, digest, a.State.Save(*st)
+}
+
+// recoverDelay is how long to wait after a failed recovery: 30s, doubling to
+// 15m. A recovery restarts containers, so it should not run on every check.
+func recoverDelay(tries int) time.Duration {
+	delay := 30 * time.Second
+	for i := 0; i < tries && delay < 15*time.Minute; i++ {
+		delay *= 2
+	}
+	return min(delay, 15*time.Minute)
+}
+
 func (a *Agent) recordDeployed(st *State, digest string) {
 	st.DeployedDigest = digest
 	st.DeployedAt = a.now()
 	st.FailedDigest = ""
 	st.FailedAt = time.Time{}
 	st.LastError = ""
+	st.RecoverTries = 0
+	st.RecoverAfter = time.Time{}
 }
 
 func (a *Agent) recordFailure(st *State, digest string, cause error) (Outcome, string, error) {
@@ -212,8 +263,12 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 			if err != nil {
 				log.Error("%v", err)
 			}
+		case Recovered:
+			log.Warn("Undid the failed deploy of %s; waiting for %s to move (retry with: azud agent run --once --retry-failed)", a.Image(digest), a.Ref)
+		case Waiting:
+			log.Debug("Waiting to retry undoing the failed deploy of %s", a.Image(digest))
 		}
-		if outcome == SkippedFailed || outcome == Failed && digest != "" {
+		if outcome == SkippedFailed || outcome == Recovered || outcome == Failed && digest != "" {
 			skippedDigest = digest
 		} else {
 			skippedDigest = ""

@@ -136,6 +136,9 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	if err := checkAgentUser(cfg); err != nil {
 		return err
 	}
+	if err := checkBundleSecretsPaths(cfg); err != nil {
+		return err
+	}
 
 	log.Header("Agent / %s", cfg.Service)
 
@@ -155,8 +158,9 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 
 	// Deploy commands outlive a stop request: the agent finishes the deploy
 	// it started instead of leaving the server between releases.
+	commandContext := context.WithoutCancel(cmd.Context())
 	sshClient := ssh.NewClient(&ssh.Config{
-		Context:        context.WithoutCancel(cmd.Context()),
+		Context:        commandContext,
 		User:           cfg.SSH.User,
 		CommandTimeout: cfg.SSH.CommandTimeout,
 		LocalHost:      host,
@@ -218,9 +222,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 			deploy: func(ctx context.Context, release *config.Config, image string) error {
 				pinned := *release
 				pinned.Image = image
+				client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
+				defer closeClient()
 				// Hooks never run for a bundle: they are host commands outside
 				// what its signature covers.
-				deployer := deploy.NewDeployer(&pinned, sshClient, log).WithoutHooks()
+				deployer := deploy.NewDeployer(&pinned, client, log).WithoutHooks()
 				return deployer.Deploy(ctx, &deploy.DeployOptions{
 					Hosts:       []string{host},
 					Destination: GetDestination(),
@@ -228,8 +234,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 				})
 			},
 			stopRoles: func(release *config.Config, roles []string) error {
-				return deploy.NewDeployer(release, sshClient, log).StopRoles([]string{host}, roles)
+				client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
+				defer closeClient()
+				return deploy.NewDeployer(release, client, log).StopRoles([]string{host}, roles)
 			},
+			runningRoles: runningRoles(podman.NewContainerManager(podman.NewClient(sshClient)), host),
 			accessoryEnv: accessoryEnvironment(podman.NewClient(sshClient), cfg.Service, host),
 			version:      version.Version,
 			log:          log,
@@ -239,6 +248,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		a.Running = nil
 		a.Deploy = applier.Deploy
 		a.Interrupted = applier.Interrupted
+		a.Recover = applier.Recover
 	}
 	if cfg.Agent.DeployCommand != "" {
 		a.Deploy = commandDeploy(cfg, sshClient, host, a.Ref, os.Stdout)
@@ -273,6 +283,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		log.Success("Deployed %s", a.Image(digest))
 	case agent.SkippedFailed:
 		return fmt.Errorf("%s failed before; run with --retry-failed to try it again", a.Image(digest))
+	case agent.Recovered:
+		log.Warn("Undid the failed deploy of %s; run with --retry-failed to try it again", a.Image(digest))
+	case agent.Waiting:
+		return fmt.Errorf("undoing the failed deploy of %s failed and is waiting to retry; see azud agent status", a.Image(digest))
 	}
 	return err
 }
@@ -318,6 +332,9 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		{"Failed", orDash(st.FailedDigest)},
 		{"Failed at", formatTime(st.FailedAt)},
 		{"Last error", orDash(firstLine(st.LastError))},
+	}
+	if !st.RecoverAfter.IsZero() {
+		rows = append(rows, []string{"Next undo attempt", formatTime(st.RecoverAfter)})
 	}
 	if cfg.Agent.Bundles() {
 		rows = append(rows, bundleStatusRows(stateDir, cfg, st.DeployedDigest)...)
@@ -408,23 +425,30 @@ func systemdQuote(value string) string {
 // rootless Podman, and the deploy lock match what pushed deploys use.
 // commandDeploy runs agent.deploy_command under the host's deploy lock, the
 // lock a pushed `azud deploy` takes, so the two never overlap. The command
-// learns the lock's path from AZUD_DEPLOY_LOCK and must not start an
-// `azud deploy` or `azud rollback` of its own, which would wait for it.
+// learns the lock's absolute path from AZUD_DEPLOY_LOCK and must not wait for
+// that lock, or start an `azud deploy` or `azud rollback` of its own, which
+// would wait for it.
 func commandDeploy(cfg *config.Config, locker remoteLocker, host, ref string, out io.Writer) func(context.Context, string) error {
 	lockFile, lockTimeout := deploy.DeployLock(cfg)
-	deployer := &agent.CommandDeployer{
-		Command:   cfg.Agent.DeployCommand,
-		Timeout:   cfg.Agent.DeployTimeout,
-		StopGrace: cfg.Agent.DeployStopGrace,
-		Env: []string{
-			"AZUD_SERVICE=" + cfg.Service,
-			"AZUD_AGENT_REF=" + ref,
-			"AZUD_DESTINATION=" + GetDestination(),
-			"AZUD_DEPLOY_LOCK=" + lockFile,
-		},
-		Output: out,
-	}
 	return func(ctx context.Context, image string) error {
+		// lockFile may start with ${HOME} for the shell that takes the lock.
+		// Nothing expands the value of an environment variable.
+		absoluteLock, err := localPath(lockFile)
+		if err != nil {
+			return err
+		}
+		deployer := &agent.CommandDeployer{
+			Command:   cfg.Agent.DeployCommand,
+			Timeout:   cfg.Agent.DeployTimeout,
+			StopGrace: cfg.Agent.DeployStopGrace,
+			Env: []string{
+				"AZUD_SERVICE=" + cfg.Service,
+				"AZUD_AGENT_REF=" + ref,
+				"AZUD_DESTINATION=" + GetDestination(),
+				"AZUD_DEPLOY_LOCK=" + absoluteLock,
+			},
+			Output: out,
+		}
 		var deployErr error
 		if err := locker.WithRemoteLock(host, lockFile, lockTimeout, func() error {
 			deployErr = deployer.Deploy(ctx, image)
@@ -439,6 +463,71 @@ func commandDeploy(cfg *config.Config, locker remoteLocker, host, ref string, ou
 // remoteLocker is the part of the SSH client commandDeploy needs.
 type remoteLocker interface {
 	WithRemoteLock(host, lockFile string, timeout time.Duration, fn func() error) error
+}
+
+// releaseClient returns the client to deploy release with: the agent's own,
+// or one with the release's command timeout when that differs, so a longer
+// stop timeout in the release is not cut short. The returned function closes
+// what this call opened.
+func releaseClient(ctx context.Context, own *ssh.Client, server, release *config.Config, host string) (*ssh.Client, func()) {
+	if release.SSH.CommandTimeout == server.SSH.CommandTimeout {
+		return own, func() {}
+	}
+	client := ssh.NewClient(&ssh.Config{
+		Context:        ctx,
+		User:           server.SSH.User,
+		CommandTimeout: release.SSH.CommandTimeout,
+		LocalHost:      host,
+	})
+	return client, func() { _ = client.Close() }
+}
+
+// runningRoles returns a function listing the roles of a configuration with a
+// running container on host.
+func runningRoles(containers *podman.ContainerManager, host string) func(*config.Config) ([]string, error) {
+	return func(cfg *config.Config) ([]string, error) {
+		var running []string
+		for _, role := range cfg.GetRoles() {
+			ok, err := containers.IsRunning(host, deploy.RoleContainerName(cfg, role))
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				running = append(running, role)
+			}
+		}
+		return running, nil
+	}
+}
+
+// checkBundleSecretsPaths refuses a server whose own secrets file is also the
+// runtime secrets file. Every bundle replaces the runtime file with the
+// release's secrets, which would remove the registry password the agent needs.
+func checkBundleSecretsPaths(cfg *config.Config) error {
+	if !cfg.Agent.Bundles() {
+		return nil
+	}
+	if provider := strings.ToLower(strings.TrimSpace(cfg.SecretsProvider)); provider != "" && provider != "file" {
+		return nil
+	}
+	own, err := filepath.Abs(cfg.SecretsPath)
+	if err != nil {
+		return err
+	}
+	runtimeFile, err := localPath(config.RemoteSecretsPath(cfg))
+	if err != nil {
+		return err
+	}
+	same := filepath.Clean(own) == filepath.Clean(runtimeFile)
+	if ownInfo, err := os.Stat(own); err == nil {
+		if runtimeInfo, err := os.Stat(runtimeFile); err == nil {
+			same = same || os.SameFile(ownInfo, runtimeInfo)
+		}
+	}
+	if same {
+		return fmt.Errorf("secrets_path and the runtime secrets file are both %s: each release would overwrite this server's own secrets, including the registry password. Set secrets_path or secrets_remote_path to another file, or run the agent from another directory", runtimeFile)
+	}
+	return nil
 }
 
 func checkAgentUser(cfg *config.Config) error {

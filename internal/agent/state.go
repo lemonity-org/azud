@@ -26,6 +26,11 @@ type State struct {
 	FailedAt     time.Time `json:"failed_at,omitzero"`
 	LastError    string    `json:"last_error,omitempty"`
 
+	// RecoverTries counts failed attempts to undo an interrupted deploy, and
+	// RecoverAfter is when the next one may run.
+	RecoverTries int       `json:"recover_tries,omitempty"`
+	RecoverAfter time.Time `json:"recover_after,omitzero"`
+
 	// LastSeenDigest is what the tag pointed to at the last check.
 	LastSeenDigest string    `json:"last_seen_digest,omitempty"`
 	LastCheckAt    time.Time `json:"last_check_at,omitzero"`

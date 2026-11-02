@@ -334,3 +334,101 @@ func TestInterruptedDeployIsRedoneEvenIfTheTagDidNotMove(t *testing.T) {
 		t.Fatalf("Reconcile = %v, deploys %d; nothing to redo once it finished", outcome, deployed)
 	}
 }
+
+func TestFailedReleaseLeftInterruptedIsUndoneNotRedeployed(t *testing.T) {
+	store := NewStore(t.TempDir(), "app")
+	digest := "sha256:" + strings.Repeat("b", 64)
+	if err := store.Save(State{DeployedDigest: "sha256:" + strings.Repeat("a", 64), FailedDigest: digest}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1000, 0)
+	deployed, recovered := 0, 0
+	interrupted := true
+	var recoverErr error
+	a := &Agent{
+		Ref:         "ghcr.io/acme/app:production",
+		Repository:  "ghcr.io/acme/app",
+		Resolve:     func(context.Context) (string, error) { return digest, nil },
+		Deploy:      func(context.Context, string) error { deployed++; return nil },
+		Interrupted: func() bool { return interrupted },
+		Recover: func(context.Context) error {
+			recovered++
+			if recoverErr == nil {
+				interrupted = false
+			}
+			return recoverErr
+		},
+		State: store,
+		Now:   func() time.Time { return now },
+	}
+
+	recoverErr = errors.New("previous release failed too")
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Failed || err == nil || recovered != 1 {
+		t.Fatalf("Reconcile = %v, %v, recoveries %d", outcome, err, recovered)
+	}
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.RecoverTries != 1 || !st.RecoverAfter.Equal(now.Add(30*time.Second)) || !strings.Contains(st.LastError, "previous release failed too") {
+		t.Fatalf("state = %+v", st)
+	}
+
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Waiting || err != nil || recovered != 1 {
+		t.Fatalf("Reconcile during backoff = %v, %v, recoveries %d", outcome, err, recovered)
+	}
+
+	now = now.Add(31 * time.Second)
+	recoverErr = nil
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Recovered || err != nil || recovered != 2 {
+		t.Fatalf("Reconcile after backoff = %v, %v, recoveries %d", outcome, err, recovered)
+	}
+	if st, _ := store.Load(); st.RecoverTries != 0 || !st.RecoverAfter.IsZero() || st.FailedDigest != digest {
+		t.Fatalf("state after recovery = %+v; the release stays failed and the backoff resets", st)
+	}
+	if outcome, _, _ := a.Reconcile(context.Background(), false); outcome != SkippedFailed {
+		t.Fatalf("Reconcile after recovery = %v", outcome)
+	}
+	if deployed != 0 {
+		t.Fatalf("deploys = %d; a failed release must not be deployed again without a retry", deployed)
+	}
+}
+
+func TestRetryFailedStillDeploysAnInterruptedRelease(t *testing.T) {
+	store := NewStore(t.TempDir(), "app")
+	digest := "sha256:" + strings.Repeat("b", 64)
+	if err := store.Save(State{FailedDigest: digest, RecoverTries: 3, RecoverAfter: time.Unix(5000, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	deployed := 0
+	a := &Agent{
+		Ref:         "ghcr.io/acme/app:production",
+		Repository:  "ghcr.io/acme/app",
+		Resolve:     func(context.Context) (string, error) { return digest, nil },
+		Deploy:      func(context.Context, string) error { deployed++; return nil },
+		Interrupted: func() bool { return true },
+		Recover:     func(context.Context) error { t.Fatal("recovered instead of retrying"); return nil },
+		State:       store,
+		Now:         func() time.Time { return time.Unix(1000, 0) },
+	}
+	if outcome, _, err := a.Reconcile(context.Background(), true); outcome != Deployed || err != nil || deployed != 1 {
+		t.Fatalf("Reconcile = %v, %v, deploys %d", outcome, err, deployed)
+	}
+	if st, _ := store.Load(); st.RecoverTries != 0 || !st.RecoverAfter.IsZero() {
+		t.Fatalf("state = %+v; a deployed release ends the backoff", st)
+	}
+}
+
+func TestRecoverDelayDoublesToAQuarterHour(t *testing.T) {
+	for tries, want := range map[int]time.Duration{
+		0:  30 * time.Second,
+		1:  time.Minute,
+		4:  8 * time.Minute,
+		5:  15 * time.Minute,
+		40: 15 * time.Minute,
+	} {
+		if got := recoverDelay(tries); got != want {
+			t.Errorf("recoverDelay(%d) = %s, want %s", tries, got, want)
+		}
+	}
+}

@@ -45,6 +45,8 @@ type bundleApplier struct {
 	// stopRoles stops role containers on this server, for roles a failed
 	// release added and its rollback does not replace.
 	stopRoles func(cfg *config.Config, roles []string) error
+	// runningRoles returns the roles of cfg with a running container.
+	runningRoles func(cfg *config.Config) ([]string, error)
 	// accessoryEnv returns the environment an accessory container runs
 	// with, or nil when it is not running. Optional.
 	accessoryEnv func(name string) (map[string]string, error)
@@ -108,7 +110,7 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 		return err
 	}
 
-	envPath, err := localSecretsPath(config.RemoteSecretsPath(cfg))
+	envPath, err := localPath(config.RemoteSecretsPath(cfg))
 	if err != nil {
 		return err
 	}
@@ -124,7 +126,7 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 		// Recorded before anything changes and cleared only once the server
 		// runs one whole release again, so an agent that dies in between
 		// redeploys instead of trusting the recorded release (Interrupted).
-		if err := b.markPending(rel.Digest); err != nil {
+		if err := b.markPending(&deployCfg, rel.Digest, prev); err != nil {
 			return err
 		}
 		restore, err := b.swapEnv(envPath, secrets, prev)
@@ -135,35 +137,7 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 		if deployErr == nil {
 			return b.clearPending()
 		}
-		if err := restore(); err != nil {
-			return errors.Join(deployErr, fmt.Errorf("restoring the previous secrets file: %w", err))
-		}
-		if prev == nil {
-			b.log.Warn("Restored the secrets file. Roles that switched before the failure keep this release until the next deploy")
-			return deployErr
-		}
-		b.log.Warn("Rolling back to release %s", short(prev.Digest))
-		prevCfg, _, err := b.config(prev.Release)
-		if err != nil {
-			return errors.Join(deployErr, fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err))
-		}
-		prevDeploy := *prevCfg
-		prevDeploy.Deploy.RollbackOnFailure = false
-		if err := b.deploy(ctx, &prevDeploy, imageRepository(prevCfg.Image)+"@"+prev.Info.Image); err != nil {
-			return errors.Join(deployErr, fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err))
-		}
-		var added []string
-		for _, role := range deployCfg.GetRoles() {
-			if !prevCfg.HasRole(role) {
-				added = append(added, role)
-			}
-		}
-		if len(added) > 0 {
-			if err := b.stopRoles(&deployCfg, added); err != nil {
-				return errors.Join(deployErr, fmt.Errorf("stopping roles the failed release added (%s): %w", strings.Join(added, ", "), err))
-			}
-		}
-		if err := b.clearPending(); err != nil {
+		if err := b.undo(ctx, &deployCfg, prev, restore); err != nil {
 			return errors.Join(deployErr, err)
 		}
 		return deployErr
@@ -181,15 +155,173 @@ func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
 	return nil
 }
 
+// undo returns the server to one whole release after a deploy of failed did
+// not finish: the secrets file, then the previous release, then whatever only
+// the failed release started. The deploy stays marked interrupted unless all
+// of it succeeds, so the agent tries again. failed is nil when the failed
+// release can no longer be read; what only it started then keeps running.
+func (b *bundleApplier) undo(ctx context.Context, failed *config.Config, prev *storedRelease, restore func() error) error {
+	if err := restore(); err != nil {
+		return fmt.Errorf("restoring the previous secrets file: %w", err)
+	}
+	if prev == nil {
+		return b.undoFirstRelease(failed)
+	}
+
+	b.log.Warn("Rolling back to release %s", short(prev.Digest))
+	prevCfg, _, err := b.config(prev.Release)
+	if err != nil {
+		return fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err)
+	}
+	prevDeploy := *prevCfg
+	prevDeploy.Deploy.RollbackOnFailure = false
+	if err := b.deploy(ctx, &prevDeploy, imageRepository(prevCfg.Image)+"@"+prev.Info.Image); err != nil {
+		return fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err)
+	}
+	if failed != nil {
+		running, err := b.runningRoles(failed)
+		if err != nil {
+			return fmt.Errorf("finding roles the failed release added: %w", err)
+		}
+		added := slices.DeleteFunc(running, prevCfg.HasRole)
+		if len(added) > 0 {
+			if err := b.stopRoles(failed, added); err != nil {
+				return fmt.Errorf("stopping roles the failed release added (%s): %w", strings.Join(added, ", "), err)
+			}
+		}
+	}
+	return b.clearPending()
+}
+
+// undoFirstRelease cleans up a failed release with no earlier release to
+// return to. Its roles are stopped only if none of them ran before it: on a
+// server already running this service by other means, stopping a role that
+// switched could take the service down, so those roles keep running.
+func (b *bundleApplier) undoFirstRelease(failed *config.Config) error {
+	attempt, _, err := b.readPending()
+	if err != nil {
+		return err
+	}
+	if !attempt.first || failed == nil {
+		b.log.Warn("Restored the secrets file. Roles that switched before the failure keep this release until the next deploy")
+		return b.clearPending()
+	}
+	running, err := b.runningRoles(failed)
+	if err != nil {
+		return fmt.Errorf("finding roles the failed release started: %w", err)
+	}
+	if len(running) > 0 {
+		b.log.Warn("Stopping roles the failed first release started: %s", strings.Join(running, ", "))
+		if err := b.stopRoles(failed, running); err != nil {
+			return fmt.Errorf("stopping roles the failed release started (%s): %w", strings.Join(running, ", "), err)
+		}
+	}
+	return b.clearPending()
+}
+
+// Recover undoes a deploy that stayed marked interrupted: its rollback failed,
+// or the agent died during a retry of a release that had failed. The release
+// is not deployed again, and the agent's record of it as failed stays.
+func (b *bundleApplier) Recover(ctx context.Context) error {
+	return b.withLock(func() error {
+		attempt, ok, err := b.readPending()
+		if err != nil || !ok {
+			return err
+		}
+		prev, err := b.previous()
+		if err != nil {
+			return err
+		}
+		envPath, err := localPath(config.RemoteSecretsPath(b.server))
+		if err != nil {
+			return err
+		}
+		restore, err := b.envRestorer(envPath, prev)
+		if err != nil {
+			return err
+		}
+		return b.undo(ctx, b.failedConfig(attempt.digest), prev, restore)
+	})
+}
+
+// failedConfig returns the configuration a stored release deploys with, or
+// nil if it cannot be read, which must not stop the server from recovering.
+func (b *bundleApplier) failedConfig(digest string) *config.Config {
+	rel, err := b.load(digest)
+	if err == nil && rel == nil {
+		err = errors.New("it is not stored on this server")
+	}
+	if err != nil {
+		b.log.Warn("Cannot read failed release %s: %v", short(digest), err)
+		return nil
+	}
+	cfg, _, err := b.config(rel.Release)
+	if err != nil {
+		b.log.Warn("Cannot read failed release %s: %v", short(digest), err)
+		return nil
+	}
+	return cfg
+}
+
 func (b *bundleApplier) pendingPath() string {
 	return filepath.Join(b.dir, "pending")
 }
 
-func (b *bundleApplier) markPending(digest string) error {
+// pendingDeploy is what the pending file records: the release being deployed,
+// and whether it is the first thing of this service to run on the server.
+type pendingDeploy struct {
+	digest string
+	first  bool
+}
+
+const pendingFirstRelease = "first-release"
+
+func (b *bundleApplier) markPending(cfg *config.Config, digest string, prev *storedRelease) error {
 	if err := os.MkdirAll(b.dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(b.pendingPath(), []byte(digest+"\n"), 0o600)
+	first, err := b.isFirstRelease(cfg, prev)
+	if err != nil {
+		return err
+	}
+	content := digest + "\n"
+	if first {
+		content += pendingFirstRelease + "\n"
+	}
+	return os.WriteFile(b.pendingPath(), []byte(content), 0o600)
+}
+
+// isFirstRelease reports whether nothing of this service ran before this
+// deploy. An unfinished deploy keeps its answer, since the roles it started
+// are running now.
+func (b *bundleApplier) isFirstRelease(cfg *config.Config, prev *storedRelease) (bool, error) {
+	if prev != nil {
+		return false, nil
+	}
+	attempt, ok, err := b.readPending()
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		return attempt.first, nil
+	}
+	running, err := b.runningRoles(cfg)
+	if err != nil {
+		return false, fmt.Errorf("finding the roles running before this release: %w", err)
+	}
+	return len(running) == 0, nil
+}
+
+func (b *bundleApplier) readPending() (pendingDeploy, bool, error) {
+	data, err := os.ReadFile(b.pendingPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return pendingDeploy{}, false, nil
+	}
+	if err != nil {
+		return pendingDeploy{}, false, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	return pendingDeploy{digest: lines[0], first: slices.Contains(lines[1:], pendingFirstRelease)}, true, nil
 }
 
 func (b *bundleApplier) clearPending() error {
@@ -314,7 +446,7 @@ func (b *bundleApplier) decrypt(ciphertext []byte) ([]byte, error) {
 // <path>.pre-bundle), or no file at all. The previous state is read before
 // anything is written, so restoring cannot fail on a missing key later.
 func (b *bundleApplier) swapEnv(path string, secrets []byte, prev *storedRelease) (func() error, error) {
-	previous, absent, err := b.previousEnv(path, prev)
+	restore, err := b.envRestorer(path, prev)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +455,16 @@ func (b *bundleApplier) swapEnv(path string, secrets []byte, prev *storedRelease
 	}
 	if _, err := secretsfile.WriteFile(path, secrets); err != nil {
 		return nil, fmt.Errorf("failed to write the secrets file: %w", err)
+	}
+	return restore, nil
+}
+
+// envRestorer reads what the secrets file should hold without the release
+// being deployed, and returns a function that puts it back.
+func (b *bundleApplier) envRestorer(path string, prev *storedRelease) (func() error, error) {
+	previous, absent, err := b.previousEnv(path, prev)
+	if err != nil {
+		return nil, err
 	}
 	return func() error {
 		if absent {
@@ -377,9 +519,8 @@ func (b *bundleApplier) previousEnv(path string, prev *storedRelease) (contents 
 	return current, false, nil
 }
 
-// unapplied lists what a deploy leaves as it is: accessories, cron jobs and
-// Podman settings that differ from this server's configuration, and
-// accessories running with secret values other than the release's. They
+// unapplied lists what a deploy leaves as it is: accessories and cron jobs
+// that differ from this server's configuration, and accessories running with secret values other than the release's. They
 // stay listed with every release until they match.
 func (b *bundleApplier) unapplied(cfg *config.Config, values map[string]string) []string {
 	var changes []string
@@ -411,9 +552,6 @@ func (b *bundleApplier) unapplied(cfg *config.Config, values map[string]string) 
 	}
 	if !reflect.DeepEqual(cfg.Cron, b.server.Cron) {
 		changes = append(changes, "cron jobs differ from this server's configuration (azud cron boot)")
-	}
-	if !reflect.DeepEqual(cfg.Podman, b.server.Podman) {
-		changes = append(changes, "podman settings differ from this server's configuration (azud setup)")
 	}
 	return changes
 }
@@ -463,9 +601,9 @@ func readIdentity(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// localSecretsPath turns the remote secrets path, which may use $HOME or ~,
-// into a path on this machine.
-func localSecretsPath(path string) (string, error) {
+// localPath turns a path written for a remote shell, which may use $HOME,
+// ${HOME} or ~, into a path on this machine.
+func localPath(path string) (string, error) {
 	for _, prefix := range []string{"$HOME/", "${HOME}/"} {
 		if strings.HasPrefix(path, prefix) {
 			path = "~/" + strings.TrimPrefix(path, prefix)
@@ -583,7 +721,7 @@ func bundleStatusRows(stateDir string, cfg *config.Config, deployed string) [][]
 		rows = append(rows, []string{"Not applied (at deploy)", change})
 	}
 	if _, err := os.Stat(applier.pendingPath()); err == nil {
-		rows = append(rows, []string{"Interrupted", "a deploy did not finish; the agent redeploys on its next check"})
+		rows = append(rows, []string{"Interrupted", "a deploy did not finish; the agent finishes or undoes it on its next check"})
 	}
 	return rows
 }
