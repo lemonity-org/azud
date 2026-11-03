@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -231,14 +232,15 @@ func TranslateV1(base, dest []byte) (newBase, newDest []byte, notes []string, er
 	if len(hosts) > 1 {
 		return nil, nil, nil, fmt.Errorf("release runs on %d servers (%s), and Azud 2 runs a service on one", len(hosts), strings.Join(hosts, ", "))
 	}
+	leftOut := v1EntriesOnOtherHosts(baseFile, destFile, hosts)
 
-	newBase, notes, err = baseFile.translate(hosts)
+	newBase, notes, err = baseFile.translate(leftOut)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("release deploy.yml: %w", err)
 	}
 	if destFile != nil {
 		var destNotes []string
-		newDest, destNotes, err = destFile.translate(hosts)
+		newDest, destNotes, err = destFile.translate(leftOut)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("release destination file: %w", err)
 		}
@@ -251,11 +253,9 @@ func TranslateV1(base, dest []byte) (newBase, newDest []byte, notes []string, er
 	return newBase, newDest, notes, nil
 }
 
-// v1File is one parsed configuration file. References like ${VAR} are placeholders
-// in root until restore puts them back.
+// v1File is one parsed configuration file, with references like ${VAR} as written.
 type v1File struct {
-	root         *yaml.Node
-	placeholders *envPlaceholders
+	root *yaml.Node
 }
 
 func parseV1File(data []byte) (*v1File, error) {
@@ -272,38 +272,58 @@ func parseV1File(data []byte) (*v1File, error) {
 	}
 	root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	if document.Kind == yaml.DocumentNode && len(document.Content) == 1 {
-		root = expandYAMLAliases(document.Content[0], 0)
-		if root == nil {
-			return nil, fmt.Errorf("failed to parse YAML: aliases nest too deeply")
+		expander := yamlAliasExpander{placeholders: placeholders, budget: maxExpandedYAMLNodes}
+		if root, err = expander.expand(document.Content[0], 0); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML: %w", err)
 		}
 	}
 	if root.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("failed to parse YAML: the top level is not a mapping")
 	}
-	return &v1File{root: root, placeholders: placeholders}, nil
+	return &v1File{root: root}, nil
 }
 
-// expandYAMLAliases copies node with every alias replaced by what it names, so a key
-// can be removed even if something else refers to it. The depth limit stops a
-// document that refers to itself. It returns nil past that limit.
-func expandYAMLAliases(node *yaml.Node, depth int) *yaml.Node {
-	const maxAliasDepth = 64
-	if depth > maxAliasDepth {
-		return nil
+const (
+	// maxYAMLAliasDepth stops a document that refers to itself.
+	maxYAMLAliasDepth = 64
+	// maxExpandedYAMLNodes stops aliases that repeat each other, which grow
+	// exponentially. It is far past any real configuration.
+	maxExpandedYAMLNodes = 1 << 18
+)
+
+// yamlAliasExpander copies a document with every alias replaced by what it names, so
+// a key can be removed even if something else refers to it, and with references
+// like ${VAR} back as written, so two uses of one reference compare equal.
+type yamlAliasExpander struct {
+	placeholders *envPlaceholders
+	budget       int
+}
+
+func (e *yamlAliasExpander) expand(node *yaml.Node, depth int) (*yaml.Node, error) {
+	if depth > maxYAMLAliasDepth {
+		return nil, errors.New("aliases nest too deeply")
+	}
+	if e.budget--; e.budget < 0 {
+		return nil, errors.New("aliases expand to too many values")
 	}
 	if node.Kind == yaml.AliasNode {
-		return expandYAMLAliases(node.Alias, depth+1)
+		return e.expand(node.Alias, depth+1)
 	}
 	copied := *node
 	copied.Anchor = ""
 	copied.Alias = nil
+	value, err := e.placeholders.restore(node.Value)
+	if err != nil {
+		return nil, err
+	}
+	copied.Value = value
 	copied.Content = make([]*yaml.Node, len(node.Content))
 	for i, child := range node.Content {
-		if copied.Content[i] = expandYAMLAliases(child, depth+1); copied.Content[i] == nil {
-			return nil
+		if copied.Content[i], err = e.expand(child, depth+1); err != nil {
+			return nil, err
 		}
 	}
-	return &copied
+	return &copied, nil
 }
 
 // v1RoleHosts returns the distinct hosts of the release's roles, in order. A
@@ -333,9 +353,36 @@ func v1RoleHosts(base, dest *v1File) []string {
 	return hosts
 }
 
-func (f *v1File) translate(roleHosts []string) ([]byte, []string, error) {
-	t := v1Translator{}
-	if err := t.mapping(f.root, "", roleHosts); err != nil {
+// v1EntriesOnOtherHosts returns the accessories and cron jobs a server leaves out, as
+// "section.name". A destination file replaces an entry it names, as v1 merged them, so
+// the entry that decides is the destination's, and it is left out of both files:
+// otherwise the base's entry would come back when the two merge.
+func v1EntriesOnOtherHosts(base, dest *v1File, roleHosts []string) map[string]bool {
+	leftOut := map[string]bool{}
+	if len(roleHosts) == 0 {
+		return leftOut
+	}
+	for _, section := range []string{"accessories", "cron"} {
+		entries := map[string]*yaml.Node{}
+		for _, file := range []*v1File{base, dest} {
+			if file != nil {
+				forEachMappingEntry(mappingValue(file.root, section), func(name string, entry *yaml.Node) {
+					entries[name] = entry
+				})
+			}
+		}
+		for name, entry := range entries {
+			if onAnotherHost(entry, roleHosts) {
+				leftOut[section+"."+name] = true
+			}
+		}
+	}
+	return leftOut
+}
+
+func (f *v1File) translate(leftOut map[string]bool) ([]byte, []string, error) {
+	t := v1Translator{leftOut: leftOut}
+	if err := t.mapping(f.root, ""); err != nil {
 		return nil, nil, err
 	}
 	var encoded bytes.Buffer
@@ -347,20 +394,18 @@ func (f *v1File) translate(roleHosts []string) ([]byte, []string, error) {
 	if err := encoder.Close(); err != nil {
 		return nil, nil, fmt.Errorf("failed to write YAML: %w", err)
 	}
-	restored, err := f.placeholders.restore(encoded.String())
-	if err != nil {
-		return nil, nil, err
-	}
-	return []byte(restored), t.notes, nil
+	return encoded.Bytes(), t.notes, nil
 }
 
 type v1Translator struct {
-	notes []string
+	// leftOut holds the accessories and cron jobs on another host, as "section.name".
+	leftOut map[string]bool
+	notes   []string
 }
 
 // mapping removes from node what a release no longer sets and renames what moved.
 // parent is the table path of node, with wildcard segments as "*".
-func (t *v1Translator) mapping(node *yaml.Node, parent string, roleHosts []string) error {
+func (t *v1Translator) mapping(node *yaml.Node, parent string) error {
 	kept := make([]*yaml.Node, 0, len(node.Content))
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		keyNode, value := node.Content[i], node.Content[i+1]
@@ -372,11 +417,11 @@ func (t *v1Translator) mapping(node *yaml.Node, parent string, roleHosts []strin
 			t.remove(row)
 			continue
 		}
-		if onAnotherHost(row.path, value, roleHosts) {
+		if t.leftOut[parent+"."+keyNode.Value] {
 			t.notes = append(t.notes, fmt.Sprintf("%s.%s runs on another host, so it is left out", parent, keyNode.Value))
 			continue
 		}
-		if err := t.children(value, row.path, roleHosts); err != nil {
+		if err := t.children(value, row.path); err != nil {
 			return err
 		}
 		if row.newPath != "" {
@@ -388,16 +433,16 @@ func (t *v1Translator) mapping(node *yaml.Node, parent string, roleHosts []strin
 	return nil
 }
 
-func (t *v1Translator) children(value *yaml.Node, path string, roleHosts []string) error {
+func (t *v1Translator) children(value *yaml.Node, path string) error {
 	if !hasV1KeysUnder(path) {
 		return nil
 	}
 	switch value.Kind {
 	case yaml.MappingNode:
-		return t.mapping(value, path, roleHosts)
+		return t.mapping(value, path)
 	case yaml.SequenceNode:
 		for _, item := range value.Content {
-			if err := t.children(item, path, roleHosts); err != nil {
+			if err := t.children(item, path); err != nil {
 				return err
 			}
 		}
@@ -418,14 +463,11 @@ func (t *v1Translator) remove(row v1Key) {
 	}
 }
 
-// onAnotherHost reports whether path names an accessory or cron job that declares
-// hosts, none of them this server's.
-func onAnotherHost(path string, value *yaml.Node, roleHosts []string) bool {
-	if path != "accessories.*" && path != "cron.*" || len(roleHosts) == 0 {
-		return false
-	}
-	hosts := scalarValues(mappingValue(value, "host"))
-	hosts = append(hosts, scalarValues(mappingValue(value, "hosts"))...)
+// onAnotherHost reports whether an accessory or cron job declares hosts, none of them
+// this server's.
+func onAnotherHost(entry *yaml.Node, roleHosts []string) bool {
+	hosts := scalarValues(mappingValue(entry, "host"))
+	hosts = append(hosts, scalarValues(mappingValue(entry, "hosts"))...)
 	return len(hosts) > 0 && !slices.ContainsFunc(hosts, func(host string) bool {
 		return slices.Contains(roleHosts, host)
 	})
