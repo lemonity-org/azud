@@ -48,6 +48,8 @@ release notes for the corresponding signed tag.
   server's own secrets, including the registry password. To fix it, set either
   path to another file, or run the agent from another directory.
 
+- Azud 2.0 removes push mode. Commands that reach a server over SSH now print a
+  notice on stderr. 1.x gets security fixes for 12 months after 2.0.
 - A deploy, proxy boot, accessory boot or cron job now creates the `azud` network
   if it is missing. It used to fail with "network not found" unless `azud setup` or
   `azud systemd enable` had run first, which matters for a server that only runs

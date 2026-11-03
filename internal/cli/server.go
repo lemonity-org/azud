@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -145,7 +146,17 @@ func runServerExec(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// pullModeDocs explains the way of deploying that replaces push.
+const pullModeDocs = "https://github.com/lemonity-org/azud/blob/v1/docs/PULL_MODE.md"
+
+// pushNotice prints the notice once, however many clients a command creates.
+var pushNotice sync.Once
+
 func createSSHClient() *ssh.Client {
+	pushNotice.Do(func() {
+		output.DefaultLogger.WarnStderr("Azud 2.0 removes everything that reaches a server over SSH, and 1.x gets security fixes for 12 months after it. To deploy without SSH, see %s", pullModeDocs)
+	})
+
 	sshConfig := &ssh.Config{
 		Context:                    rootCmd.Context(),
 		User:                       cfg.SSH.User,
