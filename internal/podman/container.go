@@ -334,27 +334,64 @@ func (m *ContainerManager) HasHealthcheck(host, container string) (bool, error) 
 }
 
 // WaitRunning waits for a brief stabilization period and then verifies the
-// container is still running. This catches containers that crash immediately
-// on start (e.g., bad config, missing env vars).
+// container is still running and was not restarted during it. This catches
+// containers that crash on start (e.g., bad config, missing env vars). Roles and
+// accessories run with a restart policy, so a crashing container comes straight
+// back, and looking only at whether it is running can catch it between two
+// crashes. Restarts from before the period do not count: an accessory that is
+// already running may have crashed and recovered long ago.
 func (m *ContainerManager) WaitRunning(host, container string, stabilize time.Duration) error {
 	if stabilize <= 0 {
 		stabilize = 5 * time.Second
 	}
-	time.Sleep(stabilize)
-
-	running, err := m.IsRunning(host, container)
+	before, err := m.runState(host, container)
 	if err != nil {
 		return fmt.Errorf("failed to check container status: %w", err)
 	}
-	if !running {
-		result, inspectErr := m.client.Execute(host, "container", "inspect", container, "--format", "{{.State.ExitCode}}")
-		exitCode := "unknown"
-		if inspectErr == nil && result.ExitCode == 0 {
-			exitCode = strings.TrimSpace(result.Stdout)
-		}
-		return fmt.Errorf("container exited shortly after start (exit code: %s)", exitCode)
+	time.Sleep(stabilize)
+
+	after, err := m.runState(host, container)
+	if err != nil {
+		return fmt.Errorf("failed to check container status: %w", err)
+	}
+	if after == nil {
+		return fmt.Errorf("container exited shortly after start (exit code: unknown)")
+	}
+	if before != nil && after.restarts > before.restarts {
+		return fmt.Errorf("container crashed shortly after start and was restarted %d time(s) (last exit code: %s)", after.restarts-before.restarts, after.exitCode)
+	}
+	if !after.running {
+		return fmt.Errorf("container exited shortly after start (exit code: %s)", after.exitCode)
 	}
 	return nil
+}
+
+// containerRunState is what WaitRunning reads from an inspect.
+type containerRunState struct {
+	running  bool
+	restarts int
+	exitCode string
+}
+
+// runState returns nil if the container cannot be inspected, such as when it no
+// longer exists.
+func (m *ContainerManager) runState(host, container string) (*containerRunState, error) {
+	result, err := m.client.Execute(host, "container", "inspect", container, "--format", "{{.State.Running}} {{.RestartCount}} {{.State.ExitCode}}")
+	if err != nil {
+		return nil, err
+	}
+	if result.ExitCode != 0 {
+		return nil, nil
+	}
+	fields := strings.Fields(result.Stdout)
+	if len(fields) != 3 {
+		return nil, fmt.Errorf("unexpected inspect output %q", result.Stdout)
+	}
+	restarts, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf("unexpected inspect output %q", result.Stdout)
+	}
+	return &containerRunState{running: fields[0] == "true", restarts: restarts, exitCode: fields[2]}, nil
 }
 
 func (m *ContainerManager) Rename(host, oldName, newName string) error {
