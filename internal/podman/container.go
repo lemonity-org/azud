@@ -23,6 +23,9 @@ type Container struct {
 	Labels  map[string]string
 }
 
+// SharedNetwork is the network Azud's containers reach each other on.
+const SharedNetwork = "azud"
+
 // ContainerManager handles container lifecycle operations via Podman.
 type ContainerManager struct {
 	client *Client
@@ -47,6 +50,11 @@ func (m *ContainerManager) RunWithStdin(host string, config *ContainerConfig, st
 func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Reader) (string, error) {
 	if err := ValidateOptions(config.Options); err != nil {
 		return "", err
+	}
+	if config.Network == SharedNetwork {
+		if err := m.ensureSharedNetwork(host); err != nil {
+			return "", err
+		}
 	}
 	cmd := config.BuildRunCommand()
 	cmd = m.client.RewriteCommand(cmd)
@@ -331,6 +339,20 @@ func (m *ContainerManager) HasHealthcheck(host, container string) (bool, error) 
 	}
 	count := strings.TrimSpace(result.Stdout)
 	return count != "" && count != "0", nil
+}
+
+// ensureSharedNetwork creates the shared network if this Podman store lacks it.
+// Only `azud setup` and `azud systemd enable` used to create it, so a server set
+// up any other way failed its first deploy with "network not found".
+func (m *ContainerManager) ensureSharedNetwork(host string) error {
+	result, err := m.client.Execute(host, "network", "create", "--ignore", SharedNetwork)
+	if err != nil {
+		return fmt.Errorf("failed to create network %s: %w", SharedNetwork, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to create network %s: %s", SharedNetwork, result.Stderr)
+	}
+	return nil
 }
 
 // WaitRunning waits for a brief stabilization period and then verifies the

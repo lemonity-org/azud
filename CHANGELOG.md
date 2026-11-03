@@ -48,6 +48,10 @@ release notes for the corresponding signed tag.
   server's own secrets, including the registry password. To fix it, set either
   path to another file, or run the agent from another directory.
 
+- A deploy, proxy boot, accessory boot or cron job now creates the `azud` network
+  if it is missing. It used to fail with "network not found" unless `azud setup` or
+  `azud systemd enable` had run first, which matters for a server that only runs
+  `azud agent`.
 - Added `deploy.pull_timeout` (default 15m), which limits pulling one image.
   Pulls used to share `ssh.command_timeout`, so with the default of 35s a slow
   first pull failed the deploy. If `ssh.command_timeout` is longer, it applies
