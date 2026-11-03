@@ -74,7 +74,7 @@ func TestRemoteRuntimeSecretsWithNilConfigReturnsCopy(t *testing.T) {
 func TestSecretTargetHosts(t *testing.T) {
 	cfg := &config.Config{
 		Servers: map[string]config.RoleConfig{
-			"web": {Hosts: []string{"web-1", "shared-builder"}},
+			"web": {Hosts: []string{"web-1", "web-2"}},
 		},
 		Accessories: map[string]config.AccessoryConfig{
 			"db": {Host: "db-1"},
@@ -82,8 +82,7 @@ func TestSecretTargetHosts(t *testing.T) {
 		Cron: map[string]config.CronConfig{
 			"report": {Host: "cron-1"},
 		},
-		Builder: config.BuilderConfig{Remote: config.RemoteBuilderConfig{Host: "builder-1"}},
-		SSH:     config.SSHConfig{Proxy: config.SSHProxyConfig{Host: "bastion-1"}},
+		SSH: config.SSHConfig{Proxy: config.SSHProxyConfig{Host: "bastion-1"}},
 	}
 
 	tests := []struct {
@@ -92,12 +91,10 @@ func TestSecretTargetHosts(t *testing.T) {
 		want    []string
 		wantErr string
 	}{
-		{name: "default targets workload hosts", host: "", want: []string{"web-1", "shared-builder", "db-1", "cron-1"}},
+		{name: "default targets workload hosts", host: "", want: []string{"web-1", "web-2", "db-1", "cron-1"}},
 		{name: "server host", host: "web-1", want: []string{"web-1"}},
 		{name: "accessory host", host: "db-1", want: []string{"db-1"}},
 		{name: "cron host", host: "cron-1", want: []string{"cron-1"}},
-		{name: "builder that also runs the app", host: "shared-builder", want: []string{"shared-builder"}},
-		{name: "remote builder", host: "builder-1", wantErr: "does not run application containers"},
 		{name: "ssh bastion", host: "bastion-1", wantErr: "does not run application containers"},
 		{name: "unknown host", host: "elsewhere", wantErr: "is not configured"},
 	}

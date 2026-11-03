@@ -160,11 +160,6 @@ You can customize builds with the `builder` section:
 
 ```yaml
 builder:
-  # Local or remote build
-  remote:
-    host: 1.2.3.4
-    arch: amd64
-
   # Build target/platform
   target: production
   arch: amd64

@@ -20,6 +20,10 @@ release notes for the corresponding signed tag.
   a running canary. `azud proxy reconcile --repair` no longer refuses to run
   beside one: it routes all traffic to the stable container, and no command
   removes the `<service>-canary` container for you.
+- Removed the remote builder, for Azud 2.0. `azud build` now builds on the
+  machine it runs on, so build in CI or locally. A set `builder.remote.host` is
+  now a configuration error, and a stored release that sets it still loads with
+  the key ignored. `builder.remote.arch` does nothing.
 
 ## 1.7.0 - 2026-11-03
 

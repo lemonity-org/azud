@@ -169,8 +169,8 @@ func runRegistryLogout(cmd *cobra.Command, args []string) error {
 
 // registryTargetHosts returns the hosts for registry login/logout. By default
 // these are the server hosts. An explicit host must be a configured server,
-// accessory, cron, or remote builder host; registry credentials are never sent
-// to the SSH bastion or to a host that is not in the configuration.
+// accessory, or cron host; registry credentials are never sent to the SSH
+// bastion or to a host that is not in the configuration.
 func registryTargetHosts(cfg *config.Config, host string) ([]string, error) {
 	if host == "" {
 		hosts := cfg.GetAllHosts()
@@ -179,11 +179,11 @@ func registryTargetHosts(cfg *config.Config, host string) ([]string, error) {
 		}
 		return hosts, nil
 	}
-	if containsString(cfg.GetWorkloadHosts(), host) || host == cfg.Builder.Remote.Host {
+	if containsString(cfg.GetWorkloadHosts(), host) {
 		return []string{host}, nil
 	}
 	if host == cfg.SSH.Proxy.Host {
-		return nil, fmt.Errorf("host %s is the SSH bastion; registry credentials are only sent to server, accessory, cron, and builder hosts", host)
+		return nil, fmt.Errorf("host %s is the SSH bastion; registry credentials are only sent to server, accessory, and cron hosts", host)
 	}
 	return nil, fmt.Errorf("host %s is not configured", host)
 }

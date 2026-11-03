@@ -5,25 +5,6 @@ import (
 	"testing"
 )
 
-func TestBuildCommand_WithIgnoreFile(t *testing.T) {
-	cfg := &BuildConfig{
-		Context:    "app dir",
-		IgnoreFile: "/tmp/azud ignore/containerignore",
-	}
-
-	cmd := cfg.BuildCommand()
-
-	if !strings.Contains(cmd, "--ignorefile '/tmp/azud ignore/containerignore'") {
-		t.Errorf("expected a quoted --ignorefile flag, got: %s", cmd)
-	}
-	if !strings.HasSuffix(cmd, "'app dir'") {
-		t.Errorf("expected context last, got: %s", cmd)
-	}
-	if strings.Contains((&BuildConfig{}).BuildCommand(), "--ignorefile") {
-		t.Error("expected no --ignorefile flag when IgnoreFile is empty")
-	}
-}
-
 func TestManifestBuildCommands_WithIgnoreFile(t *testing.T) {
 	cfg := &ManifestBuildConfig{
 		BuildConfig: BuildConfig{

@@ -59,8 +59,7 @@ func TestGetWorkloadHostsExcludesBuilderAndSSHProxy(t *testing.T) {
 			"default":  {},
 			"explicit": {Host: "cron-host"},
 		},
-		Builder: BuilderConfig{Remote: RemoteBuilderConfig{Host: "builder-host"}},
-		SSH:     SSHConfig{Proxy: SSHProxyConfig{Host: "bastion-host"}},
+		SSH: SSHConfig{Proxy: SSHProxyConfig{Host: "bastion-host"}},
 	}
 
 	wantWorkload := []string{"web-a", "shared", "worker-a", "db-host", "redis-host", "cron-host"}
@@ -68,20 +67,8 @@ func TestGetWorkloadHostsExcludesBuilderAndSSHProxy(t *testing.T) {
 		t.Fatalf("GetWorkloadHosts() = %v, want %v", got, wantWorkload)
 	}
 
-	wantSSH := append(append([]string{}, wantWorkload...), "builder-host", "bastion-host")
+	wantSSH := append(append([]string{}, wantWorkload...), "bastion-host")
 	if got := cfg.GetAllSSHHosts(); !reflect.DeepEqual(got, wantSSH) {
 		t.Fatalf("GetAllSSHHosts() = %v, want %v", got, wantSSH)
-	}
-}
-
-func TestGetWorkloadHostsKeepsBuilderThatAlsoRunsWorkload(t *testing.T) {
-	cfg := &Config{
-		Servers: map[string]RoleConfig{"web": {Hosts: []string{"shared"}}},
-		Builder: BuilderConfig{Remote: RemoteBuilderConfig{Host: "shared"}},
-		SSH:     SSHConfig{Proxy: SSHProxyConfig{Host: "bastion-host"}},
-	}
-
-	if got, want := cfg.GetWorkloadHosts(), []string{"shared"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("GetWorkloadHosts() = %v, want %v", got, want)
 	}
 }

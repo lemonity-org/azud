@@ -14,8 +14,6 @@ import (
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
-	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 var buildCmd = &cobra.Command{
@@ -23,8 +21,8 @@ var buildCmd = &cobra.Command{
 	Short: "Build and push the application image",
 	Long: `Build the container image and push it to the registry.
 
-This command builds the container image locally (or on a remote builder) and
-pushes it to the configured registry.
+This command builds the container image on this machine and pushes it to the
+configured registry.
 
 Example:
   azud build                    # Build and push
@@ -79,19 +77,6 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	multiarch := isMultiarchBuild()
 
-	// Check if we should use remote builder
-	if cfg.Builder.Remote.Host != "" {
-		version := generateVersion()
-		if err := buildRemote(imageTag, latestTag, version, multiarch); err != nil {
-			return err
-		}
-		if err := hooks.Run(cmd.Context(), "post-build", hookCtx); err != nil {
-			log.Warn("post-build hook failed: %v", err)
-		}
-		return nil
-	}
-
-	// Build locally
 	if err := buildLocal(imageTag, latestTag, multiarch); err != nil {
 		return err
 	}
@@ -118,7 +103,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 func buildLocal(imageTag, latestTag string, multiarch bool) error {
 	log := output.DefaultLogger
 
-	platforms, err := resolveBuildPlatforms(false)
+	platforms, err := resolveBuildPlatforms()
 	if err != nil {
 		return err
 	}
@@ -155,7 +140,6 @@ func buildLocal(imageTag, latestTag string, multiarch bool) error {
 				SSH:        cfg.Builder.SSH,
 			},
 			Platforms: platforms,
-			Push:      false,
 		}
 
 		commands := buildConfig.ManifestBuildCommands()
@@ -202,8 +186,8 @@ func buildLocal(imageTag, latestTag string, multiarch bool) error {
 	}
 
 	// Platform
-	if arch := effectiveBuildArch(false); arch != "" {
-		args = append(args, "--platform", fmt.Sprintf("linux/%s", arch))
+	if cfg.Builder.Arch != "" {
+		args = append(args, "--platform", fmt.Sprintf("linux/%s", cfg.Builder.Arch))
 	}
 
 	if cfg.Builder.Target != "" {
@@ -258,97 +242,6 @@ func buildLocal(imageTag, latestTag string, multiarch bool) error {
 	return nil
 }
 
-func buildRemote(imageTag, latestTag, version string, multiarch bool) error {
-	log := output.DefaultLogger
-	log.Info("Building on remote builder: %s", cfg.Builder.Remote.Host)
-
-	// Create SSH client for remote builder
-	sshClient := createSSHClient()
-	defer func() { _ = sshClient.Close() }()
-
-	// Sync build context to remote builder
-	remoteContext, err := syncBuildContext(sshClient, cfg.Builder.Remote.Host, cfg.Builder.Context)
-	if err != nil {
-		return fmt.Errorf("failed to sync build context: %w", err)
-	}
-	defer cleanupBuildContext(sshClient, cfg.Builder.Remote.Host, remoteContext)
-
-	podmanClient := podman.NewClient(sshClient)
-	imageManager := podman.NewImageManager(podmanClient)
-
-	if cfg.Registry.Username != "" {
-		if err := loginToRegistryRemote(sshClient, cfg.Builder.Remote.Host); err != nil {
-			return fmt.Errorf("remote registry login failed: %w", err)
-		}
-	}
-
-	platforms, err := resolveBuildPlatforms(true)
-	if err != nil {
-		return err
-	}
-
-	cacheFrom, cacheTo := resolveCacheSpecs(cfg.Builder.Cache)
-
-	if !multiarch {
-		buildConfig := &podman.BuildConfig{
-			Context:    remoteContext,
-			Dockerfile: cfg.Builder.Dockerfile,
-			Tag:        imageTag,
-			Tags:       []string{latestTag},
-			Args:       cfg.Builder.Args,
-			NoCache:    buildNoCache,
-			Pull:       buildPull,
-			Secrets:    cfg.Builder.Secrets,
-			CacheFrom:  cacheFrom,
-			CacheTo:    cacheTo,
-			Target:     cfg.Builder.Target,
-			SSH:        cfg.Builder.SSH,
-		}
-		if arch := effectiveBuildArch(true); arch != "" {
-			buildConfig.Platform = fmt.Sprintf("linux/%s", arch)
-		}
-
-		if err := imageManager.Build(cfg.Builder.Remote.Host, buildConfig); err != nil {
-			return fmt.Errorf("remote build failed: %w", err)
-		}
-
-		if !buildNoPush {
-			if err := pushRemoteImage(sshClient, cfg.Builder.Remote.Host, imageTag, latestTag, false); err != nil {
-				return fmt.Errorf("remote push failed: %w", err)
-			}
-		}
-
-		log.Success("Remote build complete")
-		return nil
-	}
-
-	buildConfig := &podman.ManifestBuildConfig{
-		BuildConfig: podman.BuildConfig{
-			Context:    remoteContext,
-			Dockerfile: cfg.Builder.Dockerfile,
-			Tag:        imageTag,
-			Tags:       []string{latestTag},
-			Args:       cfg.Builder.Args,
-			NoCache:    buildNoCache,
-			Pull:       buildPull,
-			Secrets:    cfg.Builder.Secrets,
-			CacheFrom:  cacheFrom,
-			CacheTo:    cacheTo,
-			Target:     cfg.Builder.Target,
-			SSH:        cfg.Builder.SSH,
-		},
-		Platforms: platforms,
-		Push:      !buildNoPush,
-	}
-
-	if err := imageManager.ManifestBuild(cfg.Builder.Remote.Host, buildConfig); err != nil {
-		return fmt.Errorf("remote build failed: %w", err)
-	}
-
-	log.Success("Remote build complete")
-	return nil
-}
-
 func pushImage(imageTag, latestTag string, multiarch bool) error {
 	log := output.DefaultLogger
 
@@ -388,93 +281,21 @@ func pushImage(imageTag, latestTag string, multiarch bool) error {
 	return nil
 }
 
-func pushRemoteImage(sshClient *ssh.Client, host, imageTag, latestTag string, multiarch bool) error {
-	pushCmd := fmt.Sprintf("podman push %s", shell.Quote(imageTag))
-	if multiarch {
-		pushCmd = fmt.Sprintf("podman manifest push %s %s", shell.Quote(imageTag), shell.Quote(imageTag))
-	}
-	if result, err := sshClient.Execute(host, pushCmd); err != nil {
-		return err
-	} else if result.ExitCode != 0 {
-		return fmt.Errorf("failed to push %s: %s", imageTag, result.Stderr)
-	}
-
-	// Tag and push latest
-	tagCmd := fmt.Sprintf("podman tag %s %s", shell.Quote(imageTag), shell.Quote(latestTag))
-	if result, err := sshClient.Execute(host, tagCmd); err != nil {
-		return err
-	} else if result.ExitCode != 0 {
-		return fmt.Errorf("failed to tag %s: %s", latestTag, result.Stderr)
-	}
-
-	pushLatestCmd := fmt.Sprintf("podman push %s", shell.Quote(latestTag))
-	if result, err := sshClient.Execute(host, pushLatestCmd); err != nil {
-		return err
-	} else if result.ExitCode != 0 {
-		return fmt.Errorf("failed to push %s: %s", latestTag, result.Stderr)
-	}
-
-	return nil
-}
-
-func loginToRegistryRemote(sshClient *ssh.Client, host string) error {
-	server := cfg.Registry.Server
-	if server == "" {
-		server = "docker.io"
-	}
-
-	password := ""
-	if len(cfg.Registry.Password) > 0 {
-		secretKey := cfg.Registry.Password[0]
-		password = os.Getenv(secretKey)
-		if password == "" {
-			if p, ok := getSecret(secretKey); ok {
-				password = p
-			}
-		}
-	}
-
-	if password == "" {
-		return fmt.Errorf("registry password not found")
-	}
-
-	// "--" ends option parsing so the server is always the registry argument.
-	cmd := fmt.Sprintf("podman login --username %s --password-stdin -- %s", shell.Quote(cfg.Registry.Username), shell.Quote(server))
-	result, err := sshClient.ExecuteWithStdin(host, cmd, strings.NewReader(password+"\n"))
-	if err != nil {
-		return err
-	}
-	if result.ExitCode != 0 {
-		return fmt.Errorf("podman login failed: %s", result.Stderr)
-	}
-	return nil
-}
-
 func isMultiarchBuild() bool {
 	return cfg.Builder.Multiarch || len(cfg.Builder.Platforms) > 0
 }
 
-func resolveBuildPlatforms(remote bool) ([]string, error) {
+func resolveBuildPlatforms() ([]string, error) {
 	if len(cfg.Builder.Platforms) > 0 {
 		return cfg.Builder.Platforms, nil
 	}
-	if arch := effectiveBuildArch(remote); arch != "" {
-		return []string{fmt.Sprintf("linux/%s", arch)}, nil
+	if cfg.Builder.Arch != "" {
+		return []string{fmt.Sprintf("linux/%s", cfg.Builder.Arch)}, nil
 	}
 	if cfg.Builder.Multiarch {
 		return []string{"linux/amd64", "linux/arm64"}, nil
 	}
 	return nil, nil
-}
-
-func effectiveBuildArch(remote bool) string {
-	if cfg.Builder.Arch != "" {
-		return cfg.Builder.Arch
-	}
-	if remote && cfg.Builder.Remote.Arch != "" {
-		return cfg.Builder.Remote.Arch
-	}
-	return ""
 }
 
 func resolveCacheSpecs(cache config.CacheConfig) ([]string, string) {
