@@ -8,16 +8,16 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // CaddyClient manages the Caddy proxy through its admin API. The API listens
 // only on a unix socket inside the proxy container, so every request runs the
 // image's curl through `podman exec`.
 type CaddyClient struct {
-	sshClient *ssh.Client
+	sshClient local.Runner
 	podmanCmd string
 	container string
 	log       *output.Logger
@@ -26,7 +26,7 @@ type CaddyClient struct {
 // NewCaddyClient creates a Caddy client. podmanCmd is the command prefix used
 // to reach the proxy container, for example "sudo -n podman" for a rootful
 // proxy managed by a non-root SSH user.
-func NewCaddyClient(sshClient *ssh.Client, podmanCmd string, log *output.Logger) *CaddyClient {
+func NewCaddyClient(sshClient local.Runner, podmanCmd string, log *output.Logger) *CaddyClient {
 	podmanCmd = strings.TrimSpace(podmanCmd)
 	if podmanCmd == "" {
 		podmanCmd = "podman"
@@ -303,7 +303,7 @@ func (c *CaddyClient) apiRequest(host, method, path string, body interface{}) ([
 
 	// The body is piped via stdin so configuration content, including TLS
 	// keys, never appears in a remote command line.
-	var result *ssh.Result
+	var result *local.Result
 	if len(bodyJSON) > 0 {
 		result, err = c.sshClient.ExecuteWithStdin(host, cmd, bytes.NewReader(bodyJSON))
 	} else {
@@ -391,7 +391,7 @@ var errProxyNotRunning = fmt.Errorf("proxy container %s is not running", CaddyCo
 // adminRequestError maps the failure modes of `podman exec ... curl` to
 // actionable errors. Older Azud releases served the admin API on TCP, so a
 // proxy container they created has no socket until it is recreated.
-func adminRequestError(result *ssh.Result) error {
+func adminRequestError(result *local.Result) error {
 	stderr := strings.TrimSpace(result.Stderr)
 	lower := strings.ToLower(stderr)
 	switch {

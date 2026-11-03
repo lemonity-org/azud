@@ -1,6 +1,6 @@
 //go:build !windows
 
-package ssh
+package local
 
 import (
 	"bytes"
@@ -13,16 +13,16 @@ import (
 	"time"
 )
 
-func newLocalTestClient(t *testing.T, commandTimeout time.Duration) *Client {
+func newTestShell(t *testing.T, commandTimeout time.Duration) *Shell {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	client := NewClient(&Config{LocalHost: "app-1", CommandTimeout: commandTimeout})
+	client := New(Options{Host: "app-1", CommandTimeout: commandTimeout})
 	t.Cleanup(func() { _ = client.Close() })
 	return client
 }
 
 func TestLocalTransportRefusesOtherHosts(t *testing.T) {
-	client := newLocalTestClient(t, 0)
+	client := newTestShell(t, 0)
 
 	if _, err := client.Execute("app-2", "true"); err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Fatalf("Execute on another host error = %v, want refusal", err)
@@ -33,7 +33,7 @@ func TestLocalTransportRefusesOtherHosts(t *testing.T) {
 }
 
 func TestLocalExecuteMatchesSSHResultSemantics(t *testing.T) {
-	client := newLocalTestClient(t, 0)
+	client := newTestShell(t, 0)
 
 	result, err := client.Execute("app-1", `printf out; printf err >&2; exit 3`)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestLocalExecuteMatchesSSHResultSemantics(t *testing.T) {
 }
 
 func TestLocalExecuteRunsFromHomeDirectory(t *testing.T) {
-	client := newLocalTestClient(t, 0)
+	client := newTestShell(t, 0)
 
 	result, err := client.Execute("app-1", `pwd -P; printf '%s\n' "${HOME}"`)
 	if err != nil || !result.Success() {
@@ -62,7 +62,7 @@ func TestLocalExecuteRunsFromHomeDirectory(t *testing.T) {
 }
 
 func TestLocalExecuteWithStdin(t *testing.T) {
-	client := newLocalTestClient(t, 0)
+	client := newTestShell(t, 0)
 
 	result, err := client.ExecuteWithStdin("app-1", "cat", strings.NewReader("secret=value\n"))
 	if err != nil || !result.Success() {
@@ -74,7 +74,7 @@ func TestLocalExecuteWithStdin(t *testing.T) {
 }
 
 func TestLocalExecuteTimesOut(t *testing.T) {
-	client := newLocalTestClient(t, 200*time.Millisecond)
+	client := newTestShell(t, 200*time.Millisecond)
 
 	start := time.Now()
 	result, err := client.Execute("app-1", "sleep 30")
@@ -92,7 +92,7 @@ func TestLocalExecuteTimesOut(t *testing.T) {
 func TestLocalExecuteHonorsCancellation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
-	client := NewClient(&Config{Context: ctx, LocalHost: "app-1"})
+	client := New(Options{Context: ctx, Host: "app-1"})
 	defer func() { _ = client.Close() }()
 
 	time.AfterFunc(100*time.Millisecond, cancel)
@@ -106,7 +106,7 @@ func TestLocalExecuteHonorsCancellation(t *testing.T) {
 }
 
 func TestLocalExecuteStream(t *testing.T) {
-	client := newLocalTestClient(t, 0)
+	client := newTestShell(t, 0)
 
 	var stdout, stderr bytes.Buffer
 	if err := client.ExecuteStream("app-1", "echo one; echo two >&2", &stdout, &stderr); err != nil {
@@ -120,8 +120,8 @@ func TestLocalExecuteStream(t *testing.T) {
 	}
 }
 
-func TestLocalUploadAndDownloadResolveRelativePathsFromHome(t *testing.T) {
-	client := newLocalTestClient(t, 0)
+func TestUploadResolvesRelativePathsFromHome(t *testing.T) {
+	client := newTestShell(t, 0)
 	home := os.Getenv("HOME")
 
 	source := filepath.Join(t.TempDir(), "source.env")
@@ -138,33 +138,13 @@ func TestLocalUploadAndDownloadResolveRelativePathsFromHome(t *testing.T) {
 	if info.Mode().Perm() != 0o640 {
 		t.Fatalf("uploaded mode = %o, want 640", info.Mode().Perm())
 	}
-
-	conn, err := client.Connect("app-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.UploadContent([]byte("B=2\n"), "content.env", 0o600); err != nil {
-		t.Fatalf("UploadContent: %v", err)
-	}
-	info, err = os.Stat(filepath.Join(home, "content.env"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("content file = %v, %v; want mode 600", info, err)
-	}
-
-	downloaded := filepath.Join(t.TempDir(), "downloaded.env")
-	if err := client.Download("app-1", "content.env", downloaded); err != nil {
-		t.Fatalf("Download: %v", err)
-	}
-	if got, _ := os.ReadFile(downloaded); string(got) != "B=2\n" {
-		t.Fatalf("downloaded = %q", got)
-	}
 }
 
 func TestLocalLockExcludesConcurrentHolders(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("flock is not installed")
 	}
-	client := newLocalTestClient(t, 0)
+	client := newTestShell(t, 0)
 	lockFile := "${HOME}/.local/share/azud-locks/svc.deploy.lock"
 
 	held := make(chan struct{})
@@ -203,7 +183,7 @@ func TestLocalLockExcludesConcurrentHolders(t *testing.T) {
 }
 
 func TestLocalTransportErrorsReachStderr(t *testing.T) {
-	client := newLocalTestClient(t, 200*time.Millisecond)
+	client := newTestShell(t, 200*time.Millisecond)
 
 	silent, err := client.Execute("app-1", "sleep 30")
 	if err != nil {
@@ -223,10 +203,10 @@ func TestLocalTransportErrorsReachStderr(t *testing.T) {
 }
 
 func TestLocalCommandLeavingAProcessBehindKeepsItsResult(t *testing.T) {
-	original := localWaitDelay
-	localWaitDelay = 100 * time.Millisecond
-	t.Cleanup(func() { localWaitDelay = original })
-	client := newLocalTestClient(t, 0)
+	original := waitDelay
+	waitDelay = 100 * time.Millisecond
+	t.Cleanup(func() { waitDelay = original })
+	client := newTestShell(t, 0)
 
 	// The background sleep inherits the command's stdout and stderr.
 	result, err := client.Execute("app-1", "sleep 5 & echo started")
@@ -266,7 +246,7 @@ func TestExecuteLongGetsTheLongerLimit(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			client := NewClient(&Config{LocalHost: "app-1", CommandTimeout: test.command, LongCommandTimeout: test.long})
+			client := New(Options{Host: "app-1", CommandTimeout: test.command, LongCommandTimeout: test.long})
 			defer func() { _ = client.Close() }()
 
 			result, err := client.ExecuteLong("app-1", slow)
@@ -286,7 +266,7 @@ func TestExecuteLongGetsTheLongerLimit(t *testing.T) {
 
 func TestOnlyExecuteLongGetsTheLongerLimit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	client := NewClient(&Config{LocalHost: "app-1", CommandTimeout: 100 * time.Millisecond, LongCommandTimeout: time.Minute})
+	client := New(Options{Host: "app-1", CommandTimeout: 100 * time.Millisecond, LongCommandTimeout: time.Minute})
 	defer func() { _ = client.Close() }()
 
 	result, err := client.Execute("app-1", "sleep 1")

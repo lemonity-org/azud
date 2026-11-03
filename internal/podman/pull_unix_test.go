@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/local"
 )
 
 // A pull outlasts the command timeout through both ways of pulling, while the
@@ -20,7 +20,7 @@ func TestPullsGetTheLongTimeout(t *testing.T) {
 	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sshClient := ssh.NewClient(&ssh.Config{LocalHost: "app-1", CommandTimeout: 100 * time.Millisecond, LongCommandTimeout: time.Minute})
+	sshClient := local.New(local.Options{Host: "app-1", CommandTimeout: 100 * time.Millisecond, LongCommandTimeout: time.Minute})
 	defer func() { _ = sshClient.Close() }()
 	client := NewClientWithCommand(sshClient, slow)
 	images := NewImageManager(client)
@@ -42,7 +42,7 @@ func TestAPullThatTimesOutSaysSo(t *testing.T) {
 	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sshClient := ssh.NewClient(&ssh.Config{LocalHost: "app-1", CommandTimeout: 100 * time.Millisecond})
+	sshClient := local.New(local.Options{Host: "app-1", CommandTimeout: 100 * time.Millisecond})
 	defer func() { _ = sshClient.Close() }()
 	images := NewImageManager(NewClientWithCommand(sshClient, slow))
 

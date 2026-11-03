@@ -5,23 +5,23 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // Client executes Podman commands on remote hosts via SSH.
 type Client struct {
-	ssh     *ssh.Client
+	ssh     local.Runner
 	command string
 }
 
-func NewClient(sshClient *ssh.Client) *Client {
+func NewClient(sshClient local.Runner) *Client {
 	return NewClientWithCommand(sshClient, "podman")
 }
 
 // NewClientWithCommand creates a Podman client with a custom command prefix.
 // Example: "sudo -n podman" for rootful operations via passwordless sudo.
-func NewClientWithCommand(sshClient *ssh.Client, command string) *Client {
+func NewClientWithCommand(sshClient local.Runner, command string) *Client {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		command = "podman"
@@ -32,24 +32,24 @@ func NewClientWithCommand(sshClient *ssh.Client, command string) *Client {
 	}
 }
 
-func (c *Client) Execute(host string, args ...string) (*ssh.Result, error) {
+func (c *Client) Execute(host string, args ...string) (*local.Result, error) {
 	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.Execute(host, cmd)
 }
 
-func (c *Client) ExecuteAll(hosts []string, args ...string) []*ssh.Result {
+func (c *Client) ExecuteAll(hosts []string, args ...string) []*local.Result {
 	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.ExecuteParallel(hosts, cmd)
 }
 
 // ExecuteLong is Execute for commands that can outlast the command timeout.
-func (c *Client) ExecuteLong(host string, args ...string) (*ssh.Result, error) {
+func (c *Client) ExecuteLong(host string, args ...string) (*local.Result, error) {
 	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.ExecuteLong(host, cmd)
 }
 
 // ExecuteLongAll is ExecuteAll for commands that can outlast the command timeout.
-func (c *Client) ExecuteLongAll(hosts []string, args ...string) []*ssh.Result {
+func (c *Client) ExecuteLongAll(hosts []string, args ...string) []*local.Result {
 	cmd := c.command + " " + strings.Join(shell.QuoteAll(args), " ")
 	return c.ssh.ExecuteLongParallel(hosts, cmd)
 }

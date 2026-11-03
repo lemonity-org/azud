@@ -4,26 +4,26 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // QuadletDeployer writes systemd quadlet unit files to remote hosts and
 // manages their lifecycle via systemctl.
 type QuadletDeployer struct {
-	ssh  *ssh.Client
+	ssh  local.Runner
 	log  *output.Logger
 	path string // e.g., /etc/containers/systemd/
 	user bool
 	sudo bool
 }
 
-func NewQuadletDeployer(sshClient *ssh.Client, log *output.Logger, path string, userMode bool) *QuadletDeployer {
+func NewQuadletDeployer(sshClient local.Runner, log *output.Logger, path string, userMode bool) *QuadletDeployer {
 	return NewQuadletDeployerWithOptions(sshClient, log, path, userMode, false)
 }
 
-func NewQuadletDeployerWithOptions(sshClient *ssh.Client, log *output.Logger, path string, userMode bool, useSudo bool) *QuadletDeployer {
+func NewQuadletDeployerWithOptions(sshClient local.Runner, log *output.Logger, path string, userMode bool, useSudo bool) *QuadletDeployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}
@@ -148,7 +148,7 @@ func (q *QuadletDeployer) Status(host, service string) (string, error) {
 	return result.Stdout, nil
 }
 
-func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*ssh.Result, error) {
+func (q *QuadletDeployer) Logs(host, service string, follow bool, lines int) (*local.Result, error) {
 	cmd := fmt.Sprintf("journalctl -u %s --no-pager", shell.Quote(service))
 	if q.user {
 		cmd = "journalctl --user-unit " + shell.Quote(service) + " --no-pager"

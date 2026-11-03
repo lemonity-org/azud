@@ -11,10 +11,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
 
@@ -637,7 +637,7 @@ func cronLockPrepareCommand(user, service, job string) string {
 
 // prepareCronLock makes sure the per-job lock directory and file exist with
 // the expected modes before a container mounts them or a manual run locks.
-func prepareCronLock(sshClient *ssh.Client, host, name string) error {
+func prepareCronLock(sshClient local.Runner, host, name string) error {
 	result, err := sshClient.Execute(host, cronLockPrepareCommand(cfg.SSH.User, cfg.Service, name))
 	if err != nil {
 		return fmt.Errorf("failed to prepare cron lock for %s on %s: %w", name, host, err)

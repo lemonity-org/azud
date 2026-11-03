@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/podman"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // shellMetacharacters is the set of characters that indicate a command
@@ -182,7 +182,7 @@ func NewAppContainerConfig(cfg *config.Config, image, name, role string) *podman
 // When a readiness path is configured, only that readiness probe can admit
 // the container to traffic. Liveness remains an independent hard-failure
 // signal and cannot make a not-yet-ready container pass.
-func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, sshClient *ssh.Client, host, container string) error {
+func waitForContainerHealthy(cfg *config.Config, podmanClient *podman.Client, sshClient local.Runner, host, container string) error {
 	timeout := cfg.Deploy.DeployTimeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
@@ -252,7 +252,7 @@ func probeAdmitsTraffic(readinessConfigured, readinessHealthy, livenessHealthy b
 	return livenessHealthy
 }
 
-func readinessProbe(sshClient *ssh.Client, host string, candidates []string, helperCmd string) bool {
+func readinessProbe(sshClient local.Runner, host string, candidates []string, helperCmd string) bool {
 	unsupported := true
 
 	for _, cmd := range candidates {
@@ -333,7 +333,7 @@ func outputIndicatesCommandNotFound(output string) bool {
 	return false
 }
 
-func commandNotFound(result *ssh.Result) bool {
+func commandNotFound(result *local.Result) bool {
 	if result == nil {
 		return false
 	}

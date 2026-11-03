@@ -8,10 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/shell"
 	"golang.org/x/crypto/ssh"
 )
@@ -31,8 +31,6 @@ type Connection struct {
 	// active counts the sessions running or waiting for a slot. The pool never
 	// closes a connection while it is above zero.
 	active int
-	// local runs commands on this machine instead of over SSH (see local.go).
-	local bool
 }
 
 // beginSession marks the connection as in use until the returned func runs, and
@@ -89,37 +87,8 @@ func (g *outputGate) close() {
 	g.w = nil
 }
 
-// Result holds the result of a command execution
-type Result struct {
-	Host     string
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Duration time.Duration
-	Error    error
-}
-
-// Success returns true if the command executed successfully
-func (r *Result) Success() bool {
-	return r.ExitCode == 0 && r.Error == nil
-}
-
-// setError records that the command could not run or finish. Most callers
-// report only Stderr, so it carries the reason too, after any output the command
-// wrote: the last lines of an interrupted pull do not say why it stopped.
-func (r *Result) setError(err error) {
-	r.ExitCode = -1
-	r.Error = err
-	r.Stderr = strings.TrimLeft(strings.TrimRight(r.Stderr, "\n")+"\n"+err.Error(), "\n")
-}
-
-// Output returns stdout if successful, stderr otherwise
-func (r *Result) Output() string {
-	if r.Stdout != "" {
-		return r.Stdout
-	}
-	return r.Stderr
-}
+// Result holds the result of a command execution.
+type Result = local.Result
 
 // Execute runs a command on the remote host
 func (c *Connection) Execute(cmd string) (*Result, error) {
@@ -129,22 +98,10 @@ func (c *Connection) Execute(cmd string) (*Result, error) {
 // ExecuteLong runs a command that can outlast the command timeout, such as an
 // image pull.
 func (c *Connection) ExecuteLong(cmd string) (*Result, error) {
-	return c.execute(cmd, c.longTimeout())
-}
-
-// longTimeout is the limit for ExecuteLong. It never shortens the command
-// timeout, and no limit stays no limit.
-func (c *Connection) longTimeout() time.Duration {
-	if c.commandTimeout <= 0 {
-		return c.commandTimeout
-	}
-	return max(c.commandTimeout, c.longCommandTimeout)
+	return c.execute(cmd, local.LongLimit(c.commandTimeout, c.longCommandTimeout))
 }
 
 func (c *Connection) execute(cmd string, timeout time.Duration) (*Result, error) {
-	if c.local {
-		return c.localExecute(cmd, nil, timeout)
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -173,7 +130,7 @@ func (c *Connection) execute(cmd string, timeout time.Duration) (*Result, error)
 		if exitErr, ok := err.(*ssh.ExitError); ok {
 			result.ExitCode = exitErr.ExitStatus()
 		} else {
-			result.setError(err)
+			result.SetError(err)
 		}
 	}
 
@@ -182,9 +139,6 @@ func (c *Connection) execute(cmd string, timeout time.Duration) (*Result, error)
 
 // ExecuteWithStdin runs a command on the remote host with provided stdin.
 func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, error) {
-	if c.local {
-		return c.localExecute(cmd, stdin, c.commandTimeout)
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -214,7 +168,7 @@ func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, err
 		if exitErr, ok := err.(*ssh.ExitError); ok {
 			result.ExitCode = exitErr.ExitStatus()
 		} else {
-			result.setError(err)
+			result.SetError(err)
 		}
 	}
 
@@ -223,9 +177,6 @@ func (c *Connection) ExecuteWithStdin(cmd string, stdin io.Reader) (*Result, err
 
 // ExecuteWithPty runs a command with a pseudo-terminal
 func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if c.local {
-		return errLocalPTY
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -260,9 +211,6 @@ func (c *Connection) ExecuteWithPty(cmd string, stdin io.Reader, stdout, stderr 
 
 // ExecuteStream runs a command and streams output to the provided writers
 func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
-	if c.local {
-		return c.runLocal(cmd, nil, stdout, stderr, c.commandTimeout)
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -283,9 +231,6 @@ func (c *Connection) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 func (c *Connection) ExecuteIO(cmd string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
 	if tty {
 		return c.ExecuteWithPty(cmd, stdin, stdout, stderr)
-	}
-	if c.local {
-		return c.runLocal(cmd, stdin, stdout, stderr, c.commandTimeout)
 	}
 	release := c.beginSession()
 	defer release()
@@ -348,9 +293,6 @@ func (c *Connection) runWithLimit(session *ssh.Session, cmd string, timeout time
 
 // Upload copies a local file to the remote host using SCP
 func (c *Connection) Upload(localPath, remotePath string) error {
-	if c.local {
-		return c.localUpload(localPath, remotePath)
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -409,9 +351,6 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 
 // UploadContent uploads content directly to a remote file
 func (c *Connection) UploadContent(content []byte, remotePath string, mode os.FileMode) error {
-	if c.local {
-		return c.localWriteFile(remotePath, bytes.NewReader(content), mode)
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -450,9 +389,6 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 
 // Download copies a remote file to the local host
 func (c *Connection) Download(remotePath, localPath string) error {
-	if c.local {
-		return c.localDownload(remotePath, localPath)
-	}
 	release := c.beginSession()
 	defer release()
 
@@ -494,9 +430,6 @@ func (c *Connection) Download(remotePath, localPath string) error {
 // calls fn (which may use c.Execute() etc. through separate sessions). When
 // fn returns, closing stdin causes cat to exit, which releases the flock.
 func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn func() error) error {
-	if c.local {
-		return c.localLock(lockFile, timeout, fn)
-	}
 	release := c.beginSession()
 	defer release()
 	// Create a dedicated session — bypass c.mu so the lock session can
@@ -517,7 +450,7 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 		return fmt.Errorf("failed to get lock session stdout: %w", err)
 	}
 
-	if err := session.Start(lockCommand(lockFile, timeout)); err != nil {
+	if err := session.Start(local.LockCommand(lockFile, timeout)); err != nil {
 		return fmt.Errorf("failed to start lock command: %w", err)
 	}
 
@@ -565,35 +498,6 @@ func (c *Connection) WithRemoteLock(lockFile string, timeout time.Duration, fn f
 	return fnErr
 }
 
-// lockCommand builds the shell command WithRemoteLock runs: it prints LOCKED
-// once flock holds lockFile and keeps holding it until stdin closes.
-func lockCommand(lockFile string, timeout time.Duration) string {
-	dir := filepath.Dir(lockFile)
-	secs := int(timeout.Seconds())
-	if secs < 1 {
-		secs = 1
-	}
-	// Quote paths safely. A leading ${HOME}/ (non-root users) is preserved
-	// unquoted so the shell expands it, while the remainder is single-quoted
-	// and thus immune to injection. All other paths are fully single-quoted.
-	quotedDir := quoteRemotePath(dir)
-	quotedLockFile := quoteRemotePath(lockFile)
-	return fmt.Sprintf("mkdir -p %s && flock -x -w %d %s sh -c 'echo LOCKED; cat'", // safe: paths are quoteRemotePath output and timeout is numeric
-		quotedDir, secs, quotedLockFile)
-}
-
-// quoteRemotePath quotes a remote path for safe use in a shell command. A
-// leading ${HOME}/ is preserved unquoted so the shell expands it (non-root
-// users), while the rest of the path is single-quoted and therefore immune to
-// injection. All other paths are fully single-quoted.
-func quoteRemotePath(path string) string {
-	const homePrefix = "${HOME}/"
-	if strings.HasPrefix(path, homePrefix) {
-		return `"${HOME}/"` + shell.Quote(strings.TrimPrefix(path, homePrefix))
-	}
-	return shell.Quote(path)
-}
-
 // Close closes the SSH connection and any underlying proxy connection.
 func (c *Connection) Close() error {
 	c.mu.Lock()
@@ -624,9 +528,6 @@ func (c *Connection) LastUsed() time.Time {
 
 // IsAlive checks if the connection is still alive
 func (c *Connection) IsAlive() bool {
-	if c.local {
-		return true
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

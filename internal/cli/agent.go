@@ -15,10 +15,10 @@ import (
 	"github.com/lemonity-org/azud/internal/agent"
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/registry"
-	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 	"github.com/lemonity-org/azud/pkg/version"
 )
@@ -159,12 +159,12 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	// Deploy commands outlive a stop request: the agent finishes the deploy
 	// it started instead of leaving the server between releases.
 	commandContext := context.WithoutCancel(cmd.Context())
-	sshClient := ssh.NewClient(&ssh.Config{
+	sshClient := local.New(local.Options{
 		Context:            commandContext,
 		User:               cfg.SSH.User,
 		CommandTimeout:     cfg.SSH.CommandTimeout,
 		LongCommandTimeout: cfg.Deploy.PullTimeout,
-		LocalHost:          host,
+		Host:               host,
 	})
 	defer func() { _ = sshClient.Close() }()
 
@@ -470,16 +470,16 @@ type remoteLocker interface {
 // or one with the release's timeouts when they differ, so a longer stop or pull
 // timeout in the release is not cut short. The returned function closes what
 // this call opened.
-func releaseClient(ctx context.Context, own *ssh.Client, server, release *config.Config, host string) (*ssh.Client, func()) {
+func releaseClient(ctx context.Context, own local.Runner, server, release *config.Config, host string) (local.Runner, func()) {
 	if release.SSH.CommandTimeout == server.SSH.CommandTimeout && release.Deploy.PullTimeout == server.Deploy.PullTimeout {
 		return own, func() {}
 	}
-	client := ssh.NewClient(&ssh.Config{
+	client := local.New(local.Options{
 		Context:            ctx,
 		User:               server.SSH.User,
 		CommandTimeout:     release.SSH.CommandTimeout,
 		LongCommandTimeout: release.Deploy.PullTimeout,
-		LocalHost:          host,
+		Host:               host,
 	})
 	return client, func() { _ = client.Close() }
 }

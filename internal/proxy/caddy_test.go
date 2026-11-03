@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/local"
 )
 
 func TestCaddyAdminCommandUsesPrivateSocket(t *testing.T) {
@@ -139,32 +139,32 @@ func TestNormalizeAdminConfigAddsMissingAdminAndRejectsNonObjects(t *testing.T) 
 func TestAdminRequestErrorExplainsLegacyAndStoppedProxies(t *testing.T) {
 	tests := []struct {
 		name   string
-		result *ssh.Result
+		result *local.Result
 		want   string
 	}{
 		{
 			name:   "legacy proxy without socket",
-			result: &ssh.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect to localhost over /run/azud-admin/admin.sock after 0 ms: Could not connect to server"},
+			result: &local.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect to localhost over /run/azud-admin/admin.sock after 0 ms: Could not connect to server"},
 			want:   "run 'azud proxy reboot'",
 		},
 		{
 			name:   "moved listener leaves the socket unanswered",
-			result: &ssh.Result{ExitCode: 28, Stderr: "curl: (28) Operation timed out after 30000 milliseconds with 0 bytes received"},
+			result: &local.Result{ExitCode: 28, Stderr: "curl: (28) Operation timed out after 30000 milliseconds with 0 bytes received"},
 			want:   "run 'azud proxy reboot'",
 		},
 		{
 			name:   "stopped proxy",
-			result: &ssh.Result{ExitCode: 255, Stderr: "Error: can only create exec sessions on running containers: container state improper"},
+			result: &local.Result{ExitCode: 255, Stderr: "Error: can only create exec sessions on running containers: container state improper"},
 			want:   "proxy container azud-proxy is not running",
 		},
 		{
 			name:   "missing proxy",
-			result: &ssh.Result{ExitCode: 125, Stderr: `Error: no container with name or ID "azud-proxy" found: no such container`},
+			result: &local.Result{ExitCode: 125, Stderr: `Error: no container with name or ID "azud-proxy" found: no such container`},
 			want:   "proxy container azud-proxy is not running",
 		},
 		{
 			name:   "rejected request",
-			result: &ssh.Result{ExitCode: 22, Stderr: "curl: (22) The requested URL returned error: 400"},
+			result: &local.Result{ExitCode: 22, Stderr: "curl: (22) The requested URL returned error: 400"},
 			want:   "API request failed: curl: (22)",
 		},
 	}

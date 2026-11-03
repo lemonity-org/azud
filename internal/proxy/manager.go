@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
 
@@ -101,7 +101,7 @@ func CaddyLockFile(user string) string {
 
 // Manager provisions and configures Caddy reverse proxies on remote hosts.
 type Manager struct {
-	sshClient   *ssh.Client
+	sshClient   local.Runner
 	caddyClient *CaddyClient
 	podman      *podman.ContainerManager
 	images      *podman.ImageManager
@@ -113,17 +113,17 @@ type Manager struct {
 }
 
 // NewManager creates a new proxy manager. Defaults to root user for state paths.
-func NewManager(sshClient *ssh.Client, log *output.Logger) *Manager {
+func NewManager(sshClient local.Runner, log *output.Logger) *Manager {
 	return NewManagerWithOptions(sshClient, log, "root", false, false)
 }
 
 // NewManagerWithUser creates a new proxy manager with a specific SSH user.
-func NewManagerWithUser(sshClient *ssh.Client, log *output.Logger, user string) *Manager {
+func NewManagerWithUser(sshClient local.Runner, log *output.Logger, user string) *Manager {
 	return NewManagerWithOptions(sshClient, log, user, false, false)
 }
 
 // NewManagerWithOptions creates a proxy manager with explicit runtime options.
-func NewManagerWithOptions(sshClient *ssh.Client, log *output.Logger, user string, rootful bool, hostPortUpstreams bool) *Manager {
+func NewManagerWithOptions(sshClient local.Runner, log *output.Logger, user string, rootful bool, hostPortUpstreams bool) *Manager {
 	if log == nil {
 		log = output.DefaultLogger
 	}
@@ -1719,7 +1719,7 @@ type ProxyStatus struct {
 }
 
 // Logs retrieves proxy logs
-func (m *Manager) Logs(host string, follow bool, tail string) (*ssh.Result, error) {
+func (m *Manager) Logs(host string, follow bool, tail string) (*local.Result, error) {
 	if err := m.ensureRootfulAccess(host); err != nil {
 		return nil, err
 	}
