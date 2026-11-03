@@ -124,16 +124,15 @@ func (a *Agent) forwardLocked(ctx context.Context, st *State, candidate *Candida
 	// A journal that was already open means an earlier attempt may have switched
 	// roles, whatever this attempt manages to do.
 	fresh := st.Journal == nil
-	abandoned := st.Journal
-	if abandoned != nil && abandoned.Target == rec.ID {
-		abandoned = nil
-	}
 	if err := a.openJournal(st, candidate, previous); err != nil {
 		_, _, err := a.recordFailure(st, rec.Digest, fmt.Errorf("deploy of %s failed: %w", image, err))
 		return Failed, err
 	}
-	if abandoned != nil {
-		a.stopAbandoned(abandoned, candidate.Config)
+	if a.stopAbandoned(st.Journal, candidate.Config.HasRole) {
+		if err := a.State.Save(*st); err != nil {
+			_, _, err := a.recordFailure(st, rec.Digest, fmt.Errorf("deploy of %s failed: %w", image, err))
+			return Failed, err
+		}
 	}
 
 	err := a.Source.Activate(rec, previous)
@@ -183,6 +182,9 @@ func (a *Agent) openJournal(st *State, candidate *Candidate, previous *Record) e
 	if previous != nil {
 		j.Previous, j.PreviousDigest = previous.ID, previous.Digest
 	}
+	if replaced := st.Journal; replaced != nil {
+		j.Abandoned = append(slices.Clone(replaced.Abandoned), replaced.Target)
+	}
 	st.Journal = j
 	return a.State.Save(*st)
 }
@@ -204,27 +206,45 @@ func (a *Agent) isFirstRelease(st *State, cfg *config.Config, previous *Record) 
 	return len(running) == 0, nil
 }
 
-// stopAbandoned stops roles only the release a replaced journal was applying has,
-// so a role it added does not keep running it beside the release replacing it.
-// What it cannot do stays as it is: the new release must not wait on the old one.
-func (a *Agent) stopAbandoned(j *Journal, next *config.Config) {
-	failed := a.failedConfig(j)
+// stopAbandoned stops the roles of the releases j replaced, except those keep names,
+// so a role one of them added does not keep running it beside what replaced it. A
+// release stays listed until that worked, so a crash or a failure tries again. Nothing
+// else waits on it: the release going forward must not wait on the one it replaced.
+// It reports whether the list changed.
+func (a *Agent) stopAbandoned(j *Journal, keep func(role string) bool) bool {
+	var remaining []string
+	for _, id := range j.Abandoned {
+		if !a.stopAbandonedRelease(id, keep) {
+			remaining = append(remaining, id)
+		}
+	}
+	changed := len(remaining) != len(j.Abandoned)
+	j.Abandoned = remaining
+	return changed
+}
+
+// stopAbandonedRelease reports whether nothing is left to do for the release. One
+// that cannot be read never will be.
+func (a *Agent) stopAbandonedRelease(id string, keep func(role string) bool) bool {
+	failed := a.failedConfig(&Journal{Target: id, Digest: id})
 	if failed == nil {
-		return
+		return true
 	}
 	running, err := a.RunningRoles(failed)
 	if err != nil {
-		a.log().Warn("Cannot find roles the unfinished deploy of %s added: %v", short(j.Digest), err)
-		return
+		a.log().Warn("Cannot find roles the unfinished deploy of %s added: %v", short(id), err)
+		return false
 	}
-	stale := slices.DeleteFunc(running, next.HasRole)
+	stale := slices.DeleteFunc(running, keep)
 	if len(stale) == 0 {
-		return
+		return true
 	}
-	a.log().Warn("Stopping roles the unfinished deploy of %s added: %s", short(j.Digest), strings.Join(stale, ", "))
+	a.log().Warn("Stopping roles the unfinished deploy of %s added: %s", short(id), strings.Join(stale, ", "))
 	if err := a.StopRoles(failed, stale); err != nil {
-		a.log().Warn("Cannot stop roles the unfinished deploy of %s added: %v", short(j.Digest), err)
+		a.log().Warn("Cannot stop roles the unfinished deploy of %s added: %v", short(id), err)
+		return false
 	}
+	return true
 }
 
 // fail records that the journal's target failed and undoes it. The deploy lock is
@@ -313,6 +333,7 @@ func (a *Agent) undo(ctx context.Context, j *Journal) error {
 	if err := a.deploy(ctx, cfg, previous, DeployOptions{Undo: true, Local: true}); err != nil {
 		return fmt.Errorf("rolling back to %s: %w", short(previous.Digest), err)
 	}
+	a.stopAbandoned(j, cfg.HasRole)
 	if failed == nil {
 		return nil
 	}
@@ -334,6 +355,9 @@ func (a *Agent) undo(ctx context.Context, j *Journal) error {
 // already running this service by other means, stopping a role that switched
 // could take the service down, so those roles keep running.
 func (a *Agent) undoFirstRelease(j *Journal, failed *config.Config) error {
+	if j.First {
+		a.stopAbandoned(j, func(string) bool { return false })
+	}
 	if !j.First || failed == nil {
 		a.log().Warn("Roles that switched before the failure keep this release until the next deploy")
 		return nil

@@ -50,6 +50,24 @@ func TestRunCreatesTheSharedNetworkFirst(t *testing.T) {
 	}
 }
 
+// A stop_first role creates its container rather than running it.
+func TestCreateCreatesTheSharedNetworkFirst(t *testing.T) {
+	containers, calls := fakePodmanLog(t, false)
+
+	if _, err := containers.Create("app-1", &ContainerConfig{Name: "app", Image: "app:v1", Network: SharedNetwork}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(got)), "\n")
+	if len(lines) != 2 || lines[0] != "network create --ignore azud" || !strings.HasPrefix(lines[1], "create ") {
+		t.Fatalf("podman calls = %q", lines)
+	}
+}
+
 func TestRunLeavesOtherNetworksAlone(t *testing.T) {
 	for _, network := range []string{"", "host", "other"} {
 		t.Run("network="+network, func(t *testing.T) {

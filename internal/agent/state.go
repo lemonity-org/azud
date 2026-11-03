@@ -77,6 +77,9 @@ type Journal struct {
 	// First reports that nothing of this service ran before Target, so an undo
 	// may stop everything Target started.
 	First bool `json:"first,omitempty"`
+	// Abandoned lists records of unfinished deploys this journal replaced, until the
+	// roles only they have are stopped, so a crash does not lose track of them.
+	Abandoned []string `json:"abandoned,omitempty"`
 	// Tries counts failed undos, and NextTry is when the next one may run.
 	Tries     int       `json:"tries,omitempty"`
 	NextTry   time.Time `json:"next_try,omitzero"`

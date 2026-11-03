@@ -463,11 +463,11 @@ func TestImageRecordIDNamesTheDigestAndItsConfiguration(t *testing.T) {
 func TestReadConfigFiles(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "deploy.yaml")
-	if err := os.WriteFile(base, []byte("base"), 0o600); err != nil {
+	if err := os.WriteFile(base, []byte("service: base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	files, err := ReadConfigFiles(base, "")
-	if err != nil || len(files) != 1 || files[0].Name != "deploy.yml" || string(files[0].Data) != "base" {
+	if err != nil || len(files) != 1 || files[0].Name != "deploy.yml" || string(files[0].Data) != "service: base\n" {
 		t.Fatalf("files = %+v, %v", files, err)
 	}
 	// A destination with no file of its own is allowed, as it is for the loader.
@@ -475,11 +475,11 @@ func TestReadConfigFiles(t *testing.T) {
 	if err != nil || len(files) != 1 {
 		t.Fatalf("files = %+v, %v", files, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "deploy.agent.yaml"), []byte("dest"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "deploy.agent.yaml"), []byte("service: dest\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	files, err = ReadConfigFiles(base, "agent")
-	if err != nil || len(files) != 2 || files[1].Name != "deploy.agent.yml" || string(files[1].Data) != "dest" {
+	if err != nil || len(files) != 2 || files[1].Name != "deploy.agent.yml" || string(files[1].Data) != "service: dest\n" {
 		t.Fatalf("files = %+v, %v", files, err)
 	}
 	if _, err := ReadConfigFiles(filepath.Join(dir, "nothing"), ""); !errors.Is(err, os.ErrNotExist) {
