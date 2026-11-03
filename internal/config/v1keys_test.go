@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -330,7 +331,99 @@ func TestTranslateV1RefusesAliasesThatNestWithoutEnd(t *testing.T) {
 	}
 	loop := nested.Content[0].Content[1]
 	loop.Content = append(loop.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "c"}, &yaml.Node{Kind: yaml.AliasNode, Alias: loop})
-	if got := expandYAMLAliases(loop, 0); got != nil {
+	expander := yamlAliasExpander{placeholders: &envPlaceholders{}, budget: maxExpandedYAMLNodes}
+	if _, err := expander.expand(loop, 0); err == nil {
 		t.Error("an alias naming its own parent did not stop")
+	}
+}
+
+func TestTranslateV1RefusesAliasesThatRepeatEachOther(t *testing.T) {
+	var doc strings.Builder
+	doc.WriteString("env:\n  clear:\n    a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n")
+	for i := 1; i < 12; i++ {
+		fmt.Fprintf(&doc, "    a%d: &a%d [*a%d, *a%d, *a%d, *a%d, *a%d, *a%d, *a%d, *a%d, *a%d, *a%d]\n", i, i, i-1, i-1, i-1, i-1, i-1, i-1, i-1, i-1, i-1, i-1)
+	}
+	if _, _, _, err := TranslateV1([]byte(doc.String()), nil); err == nil || !strings.Contains(err.Error(), "too many values") {
+		t.Fatalf("TranslateV1 = %v", err)
+	}
+}
+
+func TestTranslateV1ComparesAReferenceAsWritten(t *testing.T) {
+	base := []byte(`servers:
+  web:
+    hosts: [${HOST}]
+  worker:
+    hosts: [${HOST}]
+accessories:
+  cache:
+    image: valkey:8
+    host: ${HOST}
+env:
+  clear:
+    KEPT: ${KEPT}
+`)
+	newBase, _, notes, err := TranslateV1(base, nil)
+	if err != nil {
+		t.Fatalf("two roles on one reference are one host: %v", err)
+	}
+	got := decodeYAML(t, newBase)
+	if _, ok := got["accessories"].(map[string]any)["cache"]; !ok {
+		t.Errorf("an accessory on the roles' reference was left out: %v", notes)
+	}
+	if got["env"].(map[string]any)["clear"].(map[string]any)["KEPT"] != "${KEPT}" {
+		t.Errorf("translation =\n%s", newBase)
+	}
+}
+
+func TestTranslateV1DecidesPlacementFromTheDestinationFile(t *testing.T) {
+	base := []byte(`servers:
+  web:
+    hosts: [app-1]
+accessories:
+  moved:
+    image: postgres:17
+    host: app-1
+  here:
+    image: valkey:8
+    host: db-1
+cron:
+  moved:
+    schedule: "@hourly"
+    command: a
+    host: app-1
+`)
+	dest := []byte(`accessories:
+  moved:
+    image: postgres:17
+    host: db-1
+  here:
+    image: valkey:8
+    host: app-1
+cron:
+  moved:
+    schedule: "@hourly"
+    command: a
+    host: db-1
+`)
+	newBase, newDest, notes, err := TranslateV1(base, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range [][]byte{newBase, newDest} {
+		if strings.Contains(string(file), "moved") {
+			t.Errorf("an entry the destination moved away came back:\n%s", file)
+		}
+	}
+	if !strings.Contains(string(newDest), "here") {
+		t.Errorf("an entry the destination moved here was left out:\n%s", newDest)
+	}
+	count := 0
+	for _, note := range notes {
+		if strings.HasPrefix(note, "accessories.moved") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("notes = %q; want accessories.moved noted once", notes)
 	}
 }
