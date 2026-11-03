@@ -28,22 +28,65 @@ type Connection struct {
 	context            context.Context
 	mu                 sync.Mutex
 	sessions           chan struct{}
+	// active counts the sessions running or waiting for a slot. The pool never
+	// closes a connection while it is above zero.
+	active int
 	// local runs commands on this machine instead of over SSH (see local.go).
 	local bool
 }
 
+// beginSession marks the connection as in use until the returned func runs, and
+// waits for a session slot. Both ends count as use, so idle time starts when the
+// last command finishes rather than when it started.
 func (c *Connection) beginSession() func() {
+	c.mu.Lock()
+	c.active++
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
 	if c.sessions != nil {
 		c.sessions <- struct{}{}
 	}
-	c.mu.Lock()
-	c.lastUsed = time.Now()
-	c.mu.Unlock()
 	return func() {
 		if c.sessions != nil {
 			<-c.sessions
 		}
+		c.mu.Lock()
+		c.active--
+		c.lastUsed = time.Now()
+		c.mu.Unlock()
 	}
+}
+
+// idleLongerThan reports whether the connection has no sessions and has had none
+// for longer than limit.
+func (c *Connection) idleLongerThan(limit time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active == 0 && time.Since(c.lastUsed) > limit
+}
+
+// outputGate passes writes to w until it is closed, then discards them. A nil w
+// discards everything. It lets a session that was given up on keep draining its
+// output without touching a writer the caller owns again.
+type outputGate struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (g *outputGate) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.w == nil {
+		return len(p), nil
+	}
+	return g.w.Write(p)
+}
+
+// close waits for any write in progress and stops later ones.
+func (g *outputGate) close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.w = nil
 }
 
 // Result holds the result of a command execution
@@ -274,6 +317,12 @@ func (c *Connection) runWithLimit(session *ssh.Session, cmd string, timeout time
 		defer cancel()
 	}
 
+	// Closing a session does not stop its output at once: the session copies it
+	// until the server closes the channel, which can be after this returns. The
+	// gates keep that output away from the caller's writers.
+	stdout, stderr := &outputGate{w: session.Stdout}, &outputGate{w: session.Stderr}
+	session.Stdout, session.Stderr = stdout, stderr
+
 	if err := session.Start(cmd); err != nil {
 		return err
 	}
@@ -288,6 +337,8 @@ func (c *Connection) runWithLimit(session *ssh.Session, cmd string, timeout time
 		return err
 	case <-ctx.Done():
 		_ = session.Close()
+		stdout.close()
+		stderr.close()
 		if ctx.Err() == context.DeadlineExceeded && timeout > 0 {
 			return fmt.Errorf("command timed out after %s: %w", timeout, ctx.Err())
 		}
