@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/registry"
 	"github.com/lemonity-org/azud/internal/release"
@@ -285,6 +287,24 @@ func TestFailedReleaseRestoresThePreviousReleasesSecrets(t *testing.T) {
 	}
 	if e.env() != "DATABASE_URL=release-1\n" {
 		t.Fatalf("secrets file = %q, want release 1's secrets back", e.env())
+	}
+}
+
+func TestReleaseThatSwitchedNothingStillRestoresTheSecrets(t *testing.T) {
+	e := newBundleEnv(t)
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=release-1\n", day)); err != nil {
+		t.Fatal(err)
+	}
+	deploysBefore := len(e.deploys)
+	e.failNext = fmt.Errorf("failed to pull image: %w", deploy.ErrNothingSwitched)
+	if err := e.apply(e.publish(webOnApp1, "DATABASE_URL=release-2\n", day.Add(time.Hour))); err == nil {
+		t.Fatal("Deploy succeeded")
+	}
+	if e.env() != "DATABASE_URL=release-1\n" {
+		t.Fatalf("secrets file = %q, want release 1's secrets back", e.env())
+	}
+	if got := len(e.deploys) - deploysBefore; got != 1 {
+		t.Fatalf("%d deploys after the failure began; the previous release still runs whole", got)
 	}
 }
 

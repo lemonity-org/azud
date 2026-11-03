@@ -43,11 +43,13 @@ to stop.
 The agent keeps a record of each release it accepts, and saves a journal before
 it changes anything. Both work the same for images and for release bundles.
 
-- **Failure.** It marks the release failed and returns the whole server to the
-  previous release, whichever role failed, so no role keeps running the failed
-  release. The previous release's containers are replaced by new ones of the same
-  release, with zero downtime for a rolling role and a short stop for a
-  `stop_first` role. `deploy.pre_deploy_command` does not run for this: an older
+- **Failure.** It marks the release failed and stops at the first role that fails.
+  If no role had switched, as when a pull or the first role's readiness check
+  fails, the previous release still runs whole, so nothing restarts. Otherwise it
+  returns the whole server to the previous release, whichever role failed, so no
+  role keeps running the failed release. The previous release's containers are
+  then replaced by new ones of the same release, with zero downtime for a rolling
+  role and a short stop for a `stop_first` role. `deploy.pre_deploy_command` does not run for this: an older
   image's migration against a newer schema is at best a no-op. Hooks run as for
   any deploy, except that `post-rollback` runs in place of `pre-deploy` and
   `post-deploy`. Roles the failed release added are stopped. With images, the

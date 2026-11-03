@@ -157,6 +157,21 @@ func (d *Deployer) hookContext(opts *DeployOptions, image, version string) *Hook
 	}
 }
 
+// ErrNothingSwitched marks a failed deploy that left every running container as it
+// was, so whatever ran before it still runs whole. A pre-deploy command may have run.
+var ErrNothingSwitched = errors.New("no container switched")
+
+// nothingSwitched is a failure that matches ErrNothingSwitched and reads as its cause.
+type nothingSwitched struct {
+	cause error
+}
+
+func (e nothingSwitched) Error() string { return e.cause.Error() }
+
+func (e nothingSwitched) Unwrap() error { return e.cause }
+
+func (e nothingSwitched) Is(target error) bool { return target == ErrNothingSwitched }
+
 type DeployOptions struct {
 	// Image tag to deploy (default: latest)
 	Version string
@@ -187,6 +202,11 @@ type DeployOptions struct {
 	// pre-deploy and post-deploy hooks and runs post-rollback instead, so a hook
 	// meant for a new release cannot stop the server from returning to an old one.
 	Undo bool
+
+	// StopOnFailure stops at the first role that fails, without the rollback of
+	// deploy.rollback_on_failure. The pull agent sets it for a release going forward,
+	// because a later role must not switch to a release that already failed.
+	StopOnFailure bool
 }
 
 // DeployLock returns the lock file and timeout that serialize deploys of a
@@ -208,7 +228,14 @@ type deploymentTarget struct {
 
 // Deploy pulls the image, starts new containers, health-checks them,
 // registers them with the proxy, and drains old containers.
-func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
+func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) (err error) {
+	switched := false
+	defer func() {
+		if err != nil && !switched {
+			err = nothingSwitched{err}
+		}
+	}()
+
 	deployStart := time.Now()
 	timer := d.log.NewTimer("Deployment")
 	defer timer.Stop()
@@ -313,16 +340,26 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	}
 
 	// Deploy to each host, tracking successes for potential fleet rollback.
-	_, deployErrors := d.runFleetDeployment(
-		targets,
-		d.cfg.Deploy.RollbackOnFailure,
-		func(target deploymentTarget) error {
-			return d.deployToTarget(ctx, target, image, version, opts)
-		},
-		func(succeeded []deploymentTarget) error {
+	var rollback func(succeeded []deploymentTarget) error
+	if d.cfg.Deploy.RollbackOnFailure && !opts.StopOnFailure {
+		rollback = func(succeeded []deploymentTarget) error {
 			return d.rollbackTargets(ctx, succeeded, record.PreviousVersion, opts.LockHeld)
+		}
+	}
+	touched := false
+	succeeded, deployErrors := d.runFleetDeployment(
+		targets,
+		d.cfg.Deploy.RollbackOnFailure || opts.StopOnFailure,
+		func(target deploymentTarget) error {
+			err := d.deployToTarget(ctx, target, image, version, opts)
+			if err != nil && !errors.Is(err, ErrNothingSwitched) {
+				touched = true
+			}
+			return err
 		},
+		rollback,
 	)
+	switched = len(succeeded) > 0 || touched
 
 	if len(deployErrors) > 0 {
 		err := fmt.Errorf("deployment failed on %d host(s): %s", len(deployErrors), strings.Join(deployErrors, "; "))
@@ -355,7 +392,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 // that already succeeded is handed to the rollback callback exactly once.
 func (d *Deployer) runFleetDeployment(
 	targets []deploymentTarget,
-	rollbackOnFailure bool,
+	stopOnFailure bool,
 	deployTarget func(deploymentTarget) error,
 	rollbackTargets func([]deploymentTarget) error,
 ) ([]deploymentTarget, []string) {
@@ -365,8 +402,8 @@ func (d *Deployer) runFleetDeployment(
 		if err := deployTarget(target); err != nil {
 			d.log.HostError(target.Host, "%s role deployment failed: %v", target.Role, err)
 			deployErrors = append(deployErrors, fmt.Sprintf("%s/%s: %v", target.Host, target.Role, err))
-			if rollbackOnFailure {
-				if len(succeededTargets) > 0 {
+			if stopOnFailure {
+				if len(succeededTargets) > 0 && rollbackTargets != nil {
 					d.log.Warn("Rolling back %d already-deployed target(s) due to failure on %s/%s...", len(succeededTargets), target.Host, target.Role)
 					if rollbackErr := rollbackTargets(append([]deploymentTarget(nil), succeededTargets...)); rollbackErr != nil {
 						deployErrors = append(deployErrors, fmt.Sprintf("automatic rollback: %v", rollbackErr))
@@ -463,7 +500,7 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	// Deploy refused this before doing any work, but the unit may have started since,
 	// and an automatic rollback reaches here without passing through Deploy.
 	if err := d.ensureRoleUnitInactive(host, oldContainerName); err != nil {
-		return err
+		return nothingSwitched{err}
 	}
 	var oldExists bool
 	var err error
@@ -475,7 +512,7 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	} else {
 		oldExists, err = d.containers.Exists(host, oldContainerName)
 		if err != nil {
-			return fmt.Errorf("failed to determine whether current container exists: %w", err)
+			return nothingSwitched{fmt.Errorf("failed to determine whether current container exists: %w", err)}
 		}
 	}
 	newContainerName := d.generateContainerName(oldContainerName, "new")
@@ -486,7 +523,7 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	bootCtx.Hosts = host
 	bootCtx.Role = role
 	if err := d.hooks.Run(ctx, "pre-app-boot", bootCtx); err != nil {
-		return fmt.Errorf("pre-app-boot hook failed: %w", err)
+		return nothingSwitched{fmt.Errorf("pre-app-boot hook failed: %w", err)}
 	}
 
 	if stopFirst {
@@ -509,13 +546,13 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	d.log.Host(host, "Starting new container...")
 	_, err = d.containers.Run(host, containerConfig)
 	if err != nil {
-		return fmt.Errorf("failed to start container: %w", err)
+		return nothingSwitched{fmt.Errorf("failed to start container: %w", err)}
 	}
 	removeNewContainer := func(cause error) error {
 		if removeErr := d.containers.Remove(host, newContainerName, true); removeErr != nil {
 			return fmt.Errorf("%w (failed to remove new container %s: %v)", cause, newContainerName, removeErr)
 		}
-		return cause
+		return nothingSwitched{cause}
 	}
 
 	// Wait for container to pass readiness check

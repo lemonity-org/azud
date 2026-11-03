@@ -74,8 +74,9 @@ func TestBadReleaseKeepsThePreviousOneServing(t *testing.T) {
 	s.deploys()
 	s.waitServes("v1")
 
-	// The undo replaces the serving container with one of the same release, so what
-	// must hold is that the bad release never takes a request and none fails.
+	// The bad release never became ready, so nothing switched: the same container
+	// keeps serving, and no request fails or reaches the bad release.
+	serving := s.inspect("{{.Id}}")
 	watch := s.watchRequests("v1")
 	bad := s.publishBroken("v2")
 	s.sign(bad)
@@ -89,6 +90,9 @@ func TestBadReleaseKeepsThePreviousOneServing(t *testing.T) {
 	s.waitServes("v1")
 	if got, want := s.inspect("{{.ImageName}}"), s.repo+"@"+good; got != want {
 		t.Errorf("after a release that failed readiness, the container runs %q, want %q", got, want)
+	}
+	if after := s.inspect("{{.Id}}"); after != serving {
+		t.Errorf("a release that never became ready replaced the serving container: %s to %s", serving, after)
 	}
 	st := s.agentState()
 	if st.DeployedDigest != good || st.FailedDigest != bad {

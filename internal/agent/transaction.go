@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/deploy"
 )
 
 // apply verifies digest, stores what it names, and runs it forward.
@@ -84,7 +85,7 @@ func (a *Agent) resumeFailed(ctx context.Context, st *State, cause error) (Outco
 	var outcome Outcome
 	var result error
 	if err := a.lock(func() error {
-		outcome, result = a.fail(ctx, st, cause)
+		outcome, result = a.fail(ctx, st, nil, false, cause)
 		return nil
 	}); err != nil {
 		return Failed, digest, fmt.Errorf("%w: failed to acquire deployment lock: %w", cause, err)
@@ -120,6 +121,9 @@ func (a *Agent) forwardLocked(ctx context.Context, st *State, candidate *Candida
 	rec := candidate.Record
 	image := a.Image(rec.Digest)
 
+	// A journal that was already open means an earlier attempt may have switched
+	// roles, whatever this attempt manages to do.
+	fresh := st.Journal == nil
 	abandoned := st.Journal
 	if abandoned != nil && abandoned.Target == rec.ID {
 		abandoned = nil
@@ -133,11 +137,13 @@ func (a *Agent) forwardLocked(ctx context.Context, st *State, candidate *Candida
 	}
 
 	err := a.Source.Activate(rec, previous)
+	nothingSwitched := err != nil
 	if err == nil {
 		err = a.deploy(ctx, candidate.Config, rec, opts)
+		nothingSwitched = errors.Is(err, deploy.ErrNothingSwitched)
 	}
 	if err != nil {
-		return a.fail(ctx, st, fmt.Errorf("deploy of %s failed: %w", image, err))
+		return a.fail(ctx, st, previous, fresh && nothingSwitched, fmt.Errorf("deploy of %s failed: %w", image, err))
 	}
 
 	a.recordDeployed(st, rec, candidate.Config.Deploy.RetainHistory)
@@ -222,9 +228,11 @@ func (a *Agent) stopAbandoned(j *Journal, next *config.Config) {
 }
 
 // fail records that the journal's target failed and undoes it. The deploy lock is
-// held. An undo that fails leaves the journal open with a backoff, so the next
-// check tries again without the tag moving.
-func (a *Agent) fail(ctx context.Context, st *State, cause error) (Outcome, error) {
+// held. When no container switched, the previous release still runs whole, so only
+// the secrets file goes back: redeploying would restart every role for nothing, and
+// stop a stop_first role. An undo that fails leaves the journal open with a backoff,
+// so the next check tries again without the tag moving, as a full undo.
+func (a *Agent) fail(ctx context.Context, st *State, previous *Record, nothingSwitched bool, cause error) (Outcome, error) {
 	j := st.Journal
 	st.FailedDigest = j.Digest
 	st.FailedAt = a.now()
@@ -238,8 +246,17 @@ func (a *Agent) fail(ctx context.Context, st *State, cause error) (Outcome, erro
 	if err := a.State.Save(*st); err != nil {
 		return Failed, errors.Join(cause, err)
 	}
-	if err := a.undo(ctx, j); err != nil {
-		cause = errors.Join(cause, err)
+	var undoErr error
+	if nothingSwitched {
+		a.log().Warn("No role switched to this release, so nothing is rolled back")
+		if err := a.Source.Restore(previous); err != nil {
+			undoErr = fmt.Errorf("restoring the previous secrets file: %w", err)
+		}
+	} else {
+		undoErr = a.undo(ctx, j)
+	}
+	if undoErr != nil {
+		cause = errors.Join(cause, undoErr)
 		a.backOff(st, cause)
 		return Failed, a.saved(st, cause)
 	}

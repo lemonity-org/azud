@@ -877,3 +877,19 @@ func TestRoleLifecycleCommandsUseRoleStopTimeout(t *testing.T) {
 		t.Fatalf("role restart timeout was not used: %v", fake.operations)
 	}
 }
+
+func TestRunFleetDeploymentCanStopWithoutARollback(t *testing.T) {
+	targets := []deploymentTarget{{Host: "one", Role: "web"}, {Host: "two", Role: "web"}, {Host: "three", Role: "web"}}
+	d := &Deployer{log: output.DefaultLogger}
+	var attempted []string
+	succeeded, failures := d.runFleetDeployment(targets, true, func(target deploymentTarget) error {
+		attempted = append(attempted, target.Host)
+		if target.Host == "two" {
+			return errors.New("injected host failure")
+		}
+		return nil
+	}, nil)
+	if !reflect.DeepEqual(attempted, []string{"one", "two"}) || len(succeeded) != 1 || len(failures) != 1 {
+		t.Fatalf("attempted %v, succeeded %v, failures %v", attempted, succeeded, failures)
+	}
+}

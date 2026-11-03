@@ -197,7 +197,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 				Destination: GetDestination(),
 				LockHeld:    true,
 				Undo:        opts.Undo,
-				SkipPull:    opts.Local && imagePresent(podman.NewClient(client), host, image),
+				// A later role must not switch to a release that failed. An undo
+				// keeps going, to return as many roles as it can.
+				StopOnFailure: !opts.Undo,
+				SkipPull:      opts.Local && imagePresent(podman.NewClient(client), host, image),
 			})
 		},
 		Lock: deployLock(cfg, sshClient, host),

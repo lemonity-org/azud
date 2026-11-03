@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/deploy"
 )
 
 const digestC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -790,5 +792,56 @@ func TestEditedConfigurationIsANewRecordOfTheSameDigest(t *testing.T) {
 		if err != nil || rec == nil || string(rec.Files[0].Data) != want {
 			t.Fatalf("record %s = %+v, %v", id, rec, err)
 		}
+	}
+}
+
+func TestReleaseThatSwitchedNothingRestartsNothing(t *testing.T) {
+	f := &fakeServer{}
+	a := deployedAOnce(t, f)
+	f.tag = digestB
+	f.deployErrs = map[string]error{digestB: fmt.Errorf("failed to pull image: %w", deploy.ErrNothingSwitched)}
+
+	outcome, err := reconcile(t, a, false)
+	if outcome != Failed || err == nil || !strings.Contains(err.Error(), "failed to pull image") {
+		t.Fatalf("Reconcile = %s, %v", outcome, err)
+	}
+	if want := []string{imageOf(digestA), imageOf(digestB)}; !slices.Equal(f.deployed, want) {
+		t.Fatalf("deployed = %v, want %v; the previous release still runs whole", f.deployed, want)
+	}
+	st := loadState(t, a)
+	if st.Journal != nil || st.DeployedDigest != digestA || st.FailedDigest != digestB {
+		t.Fatalf("state = %+v, journal %+v", st, st.Journal)
+	}
+	if outcome, err := reconcile(t, a, false); outcome != SkippedFailed || err != nil {
+		t.Fatalf("next check = %s, %v", outcome, err)
+	}
+}
+
+func TestFirstReleaseThatSwitchedNothingStopsNothing(t *testing.T) {
+	f := &fakeServer{tag: digestA, deployErrs: map[string]error{digestA: fmt.Errorf("pull: %w", deploy.ErrNothingSwitched)}}
+	a := f.agent(t)
+	if outcome, err := reconcile(t, a, false); outcome != Failed || err == nil {
+		t.Fatalf("Reconcile = %s, %v", outcome, err)
+	}
+	if len(f.stopped) != 0 || len(f.deployed) != 1 {
+		t.Fatalf("stopped %v, deployed %v", f.stopped, f.deployed)
+	}
+	if st := loadState(t, a); st.Journal != nil || st.FailedDigest != digestA {
+		t.Fatalf("state = %+v", st)
+	}
+}
+
+// An earlier attempt may have switched roles before the agent died, whatever this
+// attempt manages to do.
+func TestResumeThatSwitchesNothingStillUndoes(t *testing.T) {
+	f := &fakeServer{tag: digestB, deployErrs: map[string]error{digestB: fmt.Errorf("pull: %w", deploy.ErrNothingSwitched)}}
+	a := f.agent(t)
+	seed(t, a, State{DeployedDigest: digestA}, &Journal{Digest: digestB, PreviousDigest: digestA, Phase: PhaseForward})
+
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Failed || err == nil {
+		t.Fatalf("Reconcile = %s, %v", outcome, err)
+	}
+	if !slices.Equal(f.deployed, []string{imageOf(digestB), imageOf(digestA)}) {
+		t.Fatalf("deployed = %v; want the undo", f.deployed)
 	}
 }
