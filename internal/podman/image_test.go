@@ -327,3 +327,14 @@ func TestManifestBuildCommands_WithDockerfile(t *testing.T) {
 		t.Errorf("expected dockerfile flag in build command, got: %s", cmds[1])
 	}
 }
+
+func TestManifestBuildCommandsPassCacheTo(t *testing.T) {
+	config := &ManifestBuildConfig{
+		BuildConfig: BuildConfig{Context: ".", Tag: "app:v1", CacheTo: "type=registry,ref=cache"},
+		Platforms:   []string{"linux/amd64", "linux/arm64"},
+	}
+	got := strings.Join(config.ManifestBuildCommands(), "\n")
+	if count := strings.Count(got, "--cache-to"); count != 2 {
+		t.Fatalf("--cache-to appears %d times, want once per platform:\n%s", count, got)
+	}
+}
