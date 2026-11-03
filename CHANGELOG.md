@@ -52,6 +52,9 @@ release notes for the corresponding signed tag.
   if it is missing. It used to fail with "network not found" unless `azud setup` or
   `azud systemd enable` had run first, which matters for a server that only runs
   `azud agent`.
+- `install.sh` no longer needs the GitHub CLI. Without it, it verifies the release's
+  signed checksums with `cosign`, downloading a pinned copy if there is none. A
+  release before this one has no signed checksums, so it still needs the GitHub CLI.
 - Added `deploy.pull_timeout` (default 15m), which limits pulling one image.
   Pulls used to share `ssh.command_timeout`, so with the default of 35s a slow
   first pull failed the deploy. If `ssh.command_timeout` is longer, it applies

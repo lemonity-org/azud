@@ -14,6 +14,10 @@ REPO="lemonity-org/azud"
 INSTALL_DIR="${AZUD_INSTALL_DIR:-$HOME/.azud/bin}"
 VERSION="${AZUD_VERSION:-latest}"
 
+# Verifies a release on a machine without the GitHub CLI. Keep in step with
+# .github/workflows/release.yml, which signs with the same version.
+COSIGN_VERSION="v3.1.4"
+
 main() {
   detect_platform
   resolve_version
@@ -81,27 +85,71 @@ download_and_verify() {
     fatal "Checksum not found for ${BINARY_NAME}"
   fi
 
-  if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL=$(sha256sum "${AZUD_INSTALL_TMP}/${BINARY_NAME}" | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    ACTUAL=$(shasum -a 256 "${AZUD_INSTALL_TMP}/${BINARY_NAME}" | awk '{print $1}')
-  else
-    fatal "No sha256sum or shasum found - cannot verify checksum"
-  fi
-
+  ACTUAL=$(sha256_of "${AZUD_INSTALL_TMP}/${BINARY_NAME}")
   if [ "$EXPECTED" != "$ACTUAL" ]; then
     fatal "Checksum mismatch: expected ${EXPECTED}; got ${ACTUAL}"
   fi
   log "Checksum verified."
 
-  if ! command -v gh >/dev/null 2>&1; then
-    fatal "GitHub CLI (gh) is required to verify release provenance: https://cli.github.com/"
-  fi
   log "Verifying GitHub/Sigstore build provenance..."
-  if ! gh attestation verify "${AZUD_INSTALL_TMP}/${BINARY_NAME}" --repo "$REPO" >/dev/null; then
-    fatal "Release provenance verification failed for ${BINARY_NAME}"
+  if command -v gh >/dev/null 2>&1; then
+    if ! gh attestation verify "${AZUD_INSTALL_TMP}/${BINARY_NAME}" --repo "$REPO" >/dev/null; then
+      fatal "Release provenance verification failed for ${BINARY_NAME}"
+    fi
+  else
+    verify_signed_checksums
   fi
   log "Build provenance verified."
+}
+
+# The binary already matches checksums.txt, so a valid signature over that file
+# from this repository's release workflow vouches for the binary too.
+verify_signed_checksums() {
+  BUNDLE="${AZUD_INSTALL_TMP}/checksums.txt.sigstore.json"
+  if ! curl -fsSL -o "$BUNDLE" "${BASE_URL}/checksums.txt.sigstore.json" 2>/dev/null; then
+    fatal "${VERSION} has no signed checksums, so verifying it needs the GitHub CLI (gh): https://cli.github.com/"
+  fi
+
+  if ! COSIGN=$(command -v cosign); then
+    fetch_cosign
+  fi
+
+  if ! "$COSIGN" verify-blob "${AZUD_INSTALL_TMP}/checksums.txt" \
+    --bundle "$BUNDLE" \
+    --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    >/dev/null 2>"${AZUD_INSTALL_TMP}/cosign.log"; then
+    cat "${AZUD_INSTALL_TMP}/cosign.log" >&2
+    fatal "Signature verification failed for checksums.txt (this needs cosign 3 or later)"
+  fi
+}
+
+fetch_cosign() {
+  case "${OS}-${ARCH}" in
+    linux-amd64)  COSIGN_SHA256="424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa" ;;
+    linux-arm64)  COSIGN_SHA256="ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2" ;;
+    darwin-amd64) COSIGN_SHA256="9d1e4abe2b6be279ed0d2ff706fde1ccd738747c834e3e6d44039c238867334f" ;;
+    darwin-arm64) COSIGN_SHA256="9f9b8cd557cf2e5b3df3373a00baa005a86b02391e3e06dd0ce37b3a1533d3a4" ;;
+    *)            fatal "No cosign pinned for ${OS}-${ARCH}" ;;
+  esac
+
+  log "Neither gh nor cosign found, downloading cosign ${COSIGN_VERSION} to verify this release..."
+  COSIGN="${AZUD_INSTALL_TMP}/cosign"
+  curl -fsSL -o "$COSIGN" "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${OS}-${ARCH}"
+  if [ "$(sha256_of "$COSIGN")" != "$COSIGN_SHA256" ]; then
+    fatal "Checksum mismatch for the downloaded cosign"
+  fi
+  chmod +x "$COSIGN"
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    fatal "No sha256sum or shasum found - cannot verify checksum"
+  fi
 }
 
 install_binary() {

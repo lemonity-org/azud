@@ -181,6 +181,16 @@ jobs:
         with:
           subject-checksums: bin/release/checksums.txt
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4 # keep in step with scripts/install.sh
+
+      # Lets install.sh verify a release on a server without the GitHub CLI.
+      - name: Sign checksums
+        working-directory: bin/release
+        run: cosign sign-blob --yes --bundle checksums.txt.sigstore.json checksums.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
@@ -189,6 +199,7 @@ jobs:
           files: |
             bin/release/azud-*
             bin/release/checksums.txt
+            bin/release/checksums.txt.sigstore.json
 
   container:
     if: github.ref_name != 'v1'

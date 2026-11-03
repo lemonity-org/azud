@@ -124,8 +124,8 @@ If you prefer not to use the composite action, you can install Azud directly:
     ssh-keyscan -H your-server-ip >> ~/.ssh/known_hosts
 ```
 
-The installer requires the GitHub CLI so it can verify the binary's signed
-build provenance before installation.
+The installer verifies the binary's signed build provenance before installing,
+using the GitHub CLI that GitHub's runners already have.
 
 Azud detects the runner's non-TTY output and emits deterministic ASCII framing
 without ANSI escapes while preserving UTF-8 values. Setting `NO_COLOR: "1"` on
