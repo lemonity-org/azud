@@ -91,8 +91,8 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 	if cfg.Service != server.Service {
 		return nil, nil, fmt.Errorf("release is for service %q, not %q", cfg.Service, server.Service)
 	}
-	if repositoryOf(cfg.Image) != repositoryOf(server.Image) {
-		return nil, nil, fmt.Errorf("release deploys %s, not %s", repositoryOf(cfg.Image), repositoryOf(server.Image))
+	if RepositoryOf(cfg.Image) != RepositoryOf(server.Image) {
+		return nil, nil, fmt.Errorf("release deploys %s, not %s", RepositoryOf(cfg.Image), RepositoryOf(server.Image))
 	}
 	serverHosts := server.GetAllHosts()
 	for _, host := range cfg.GetAllHosts() {
@@ -150,8 +150,8 @@ func applySharedProxy(dst *ProxyConfig, src ProxyConfig) {
 	dst.Logging = src.Logging
 }
 
-// repositoryOf returns an image name without its tag or digest.
-func repositoryOf(image string) string {
+// RepositoryOf returns an image name without its tag or digest.
+func RepositoryOf(image string) string {
 	if at := strings.Index(image, "@"); at >= 0 {
 		image = image[:at]
 	}

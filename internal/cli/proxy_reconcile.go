@@ -18,9 +18,10 @@ var (
 )
 
 var proxyReconcileCmd = &cobra.Command{
-	Use:   "reconcile",
-	Short: "Check or repair the service proxy route",
-	Args:  cobra.NoArgs,
+	Use:         "reconcile",
+	Annotations: map[string]string{writesWithFlagAnnotation: "repair", readsSecretsAnnotation: "true"},
+	Short:       "Check or repair the service proxy route",
+	Args:        cobra.NoArgs,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		if proxyReconcileCheck == proxyReconcileRepair {
 			return fmt.Errorf("exactly one of --check or --repair is required")
@@ -48,8 +49,13 @@ func runProxyReconcile(cmd *cobra.Command, args []string) error {
 	defer func() { _ = sshClient.Close() }()
 	cm := podman.NewContainerManager(podman.NewClient(sshClient))
 	manager := proxy.NewManagerWithOptions(sshClient, output.DefaultLogger, cfg.SSH.User, cfg.Proxy.Rootful, cfg.UseHostPortUpstreams())
-	proxyConfig := buildProxyConfig(output.DefaultLogger)
-	manager.SetProxyConfig(proxyConfig)
+	// Only a repair boots the proxy. A check compares routes, and loads no secrets
+	// for a certificate.
+	var proxyConfig *proxy.ProxyConfig
+	if proxyReconcileRepair {
+		proxyConfig = buildProxyConfig(output.DefaultLogger)
+		manager.SetProxyConfig(proxyConfig)
+	}
 	var failures []string
 	for _, host := range hosts {
 		upstreams, err := desiredProxyUpstreams(cm, host)

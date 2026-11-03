@@ -332,3 +332,61 @@ func TestGetCronHostsRejectsUnconfiguredSelection(t *testing.T) {
 		t.Fatalf("unconfigured selected host = %v", got)
 	}
 }
+
+func TestCronSpecDiffers(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "same spec", raw: `[{"Config":{"Labels":{"azud.spec":"one"}},"Mounts":[]}]`},
+		{name: "another spec", raw: `[{"Config":{"Labels":{"azud.spec":"two"}},"Mounts":[]}]`, want: true},
+		{name: "no label, so an earlier Azud made it", raw: `[{"Config":{"Labels":{"azud.cron":"backup"}},"Mounts":[]}]`, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			containerState, err := parseCronContainerInspect(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := containerState.specDiffers("one"); got != tt.want {
+				t.Errorf("specDiffers = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if (cronContainerState{}).specDiffers("one") {
+		t.Error("no container has nothing to recreate")
+	}
+}
+
+func TestCronContainerCarriesItsSpecOnlyWithAnAgent(t *testing.T) {
+	job := config.CronConfig{Schedule: "0 2 * * *", Command: "bin/backup"}
+	testConfig := &config.Config{
+		Service: "shop",
+		Image:   "registry.test/shop@sha256:aa11",
+		SSH:     config.SSHConfig{User: "deploy"},
+		Cron:    map[string]config.CronConfig{"backup": job},
+	}
+	withCronTestConfig(t, testConfig)
+	if labels := buildCronContainerConfig("backup", job).Labels; labels[config.SpecLabel] != "" {
+		t.Errorf("with no agent section, labels = %v, want them as they were", labels)
+	}
+
+	testConfig.Agent.Track = "production"
+	got := buildCronContainerConfig("backup", job).Labels[config.SpecLabel]
+	if got != testConfig.CronSpec("backup") || got == "" {
+		t.Errorf("spec label = %q, want %q", got, testConfig.CronSpec("backup"))
+	}
+}
+
+func TestCronContainersRunThePinnedImage(t *testing.T) {
+	job := config.CronConfig{Schedule: "0 2 * * *", Command: "bin/backup"}
+	const pinned = "registry.test/shop@sha256:aa11"
+	withCronTestConfig(t, &config.Config{Service: "shop", Image: pinned, SSH: config.SSHConfig{User: "deploy"}})
+	if got := buildCronContainerConfig("backup", job).Image; got != pinned {
+		t.Errorf("scheduled image = %q", got)
+	}
+	if got := buildCronRunContainerConfig("backup", "shop-cron-backup-run", job).Image; got != pinned {
+		t.Errorf("manual run image = %q", got)
+	}
+}

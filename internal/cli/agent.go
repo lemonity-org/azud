@@ -24,8 +24,9 @@ import (
 )
 
 var agentCmd = &cobra.Command{
-	Use:   "agent",
-	Short: "Deploy from the server by following a registry tag",
+	Use:         "agent",
+	Annotations: scopedServer,
+	Short:       "Deploy from the server by following a registry tag",
 	Long: `Run Azud on the server in pull mode.
 
 The agent follows the registry tag in agent.track. When the tag moves to a new
@@ -255,20 +256,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		a.DeployUndoes = true
 		log.Info("Releases deploy through agent.deploy_command")
 	}
-	if cfg.Agent.InsecureSkipVerify {
-		log.Warn("agent.insecure_skip_verify is set: images are deployed without verification")
-	} else {
-		verifier := &agent.CommandVerifier{
-			Command: cfg.Agent.VerifyCommand,
-			Timeout: cfg.Agent.VerifyTimeout,
-			Env: []string{
-				"AZUD_SERVICE=" + cfg.Service,
-				"AZUD_AGENT_REF=" + a.Ref,
-				"AZUD_DESTINATION=" + GetDestination(),
-			},
-		}
-		a.Verify = verifier.Verify
-	}
+	a.Verify = agentVerifier(cfg, a.Ref, log)
 
 	if !agentOnce {
 		return a.Run(cmd.Context(), cfg.Agent.Interval)
@@ -425,6 +413,25 @@ func systemdQuote(value string) string {
 	return `"` + replacer.Replace(value) + `"`
 }
 
+// agentVerifier returns the check an image must pass before anything uses it, for
+// the tag ref. It is nil when agent.insecure_skip_verify is set.
+func agentVerifier(cfg *config.Config, ref string, log *output.Logger) func(context.Context, string) error {
+	if cfg.Agent.InsecureSkipVerify {
+		log.Warn("agent.insecure_skip_verify is set: images are deployed without verification")
+		return nil
+	}
+	verifier := &agent.CommandVerifier{
+		Command: cfg.Agent.VerifyCommand,
+		Timeout: cfg.Agent.VerifyTimeout,
+		Env: []string{
+			"AZUD_SERVICE=" + cfg.Service,
+			"AZUD_AGENT_REF=" + ref,
+			"AZUD_DESTINATION=" + GetDestination(),
+		},
+	}
+	return verifier.Verify
+}
+
 // commandDeploy runs agent.deploy_command for an image. The agent holds the host's
 // deploy lock around it, the lock a pushed `azud deploy` takes, so the two never
 // overlap. The command learns the lock's absolute path from AZUD_DEPLOY_LOCK and
@@ -573,13 +580,7 @@ func agentHost(cfg *config.Config) (string, error) {
 
 // imageRepository strips the tag or digest from an image reference.
 func imageRepository(image string) string {
-	if at := strings.Index(image, "@"); at >= 0 {
-		image = image[:at]
-	}
-	if idx := strings.LastIndex(image, ":"); idx > strings.LastIndex(image, "/") {
-		image = image[:idx]
-	}
-	return image
+	return config.RepositoryOf(image)
 }
 
 // registryCredentials returns the configured registry credentials when

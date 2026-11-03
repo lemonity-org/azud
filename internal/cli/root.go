@@ -70,38 +70,36 @@ func ExecuteContext(ctx context.Context) error {
 	return rootCmd.ExecuteContext(ctx)
 }
 
-// skipSecretsAnnotation marks a command, and its subcommands, that loads the
-// configuration but never reads secrets, so secrets_command is not executed.
-const skipSecretsAnnotation = "azud.skip-secrets"
+// Secrets load only for commands that read them, so a hostile or slow
+// secrets_command cannot run for a command that has no use for it. Effective
+// commands load none unless they carry readsSecretsAnnotation. Commands in other
+// scopes load them unless they carry skipSecretsAnnotation. Both apply to a command
+// and its subcommands.
+const (
+	readsSecretsAnnotation = "azud.reads-secrets"
+	skipSecretsAnnotation  = "azud.skip-secrets"
+)
 
-// commandSkipsConfig reports whether cmd runs without loading the
-// configuration. Shell completion is included so that pressing TAB never
-// executes secrets_command from the current directory's configuration.
+// commandSkipsConfig reports whether cmd runs without loading the configuration.
 func commandSkipsConfig(cmd *cobra.Command) bool {
-	for c := cmd; c != nil; c = c.Parent() {
-		switch c.Name() {
-		case "version", "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
-			return true
-		case "init":
-			// `azud init` creates the configuration; a subcommand named init,
-			// such as `azud agent init`, needs it.
-			if c.Parent() != nil && !c.Parent().HasParent() {
-				return true
-			}
-		}
-	}
-	return false
+	return commandScope(cmd) == scopeNone
 }
 
-// commandSkipsSecrets reports whether cmd or one of its parents carries
-// skipSecretsAnnotation.
+// commandSkipsSecrets reports whether cmd loads the configuration without its
+// secrets, so secrets_command is not executed.
 func commandSkipsSecrets(cmd *cobra.Command) bool {
+	if commandOnlyReads(cmd) {
+		return true
+	}
 	for c := cmd; c != nil; c = c.Parent() {
 		if c.Annotations[skipSecretsAnnotation] == "true" {
 			return true
 		}
+		if c.Annotations[readsSecretsAnnotation] == "true" {
+			return false
+		}
 	}
-	return false
+	return commandScope(cmd) == scopeEffective
 }
 
 func loadConfig(cmd *cobra.Command) (*config.Config, error) {
@@ -124,6 +122,9 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	}
 	if err := config.ValidateMinimumVersion(loaded, version.Version); err != nil {
 		return nil, err
+	}
+	if commandScope(cmd) == scopeEffective && loaded.Agent.Configured() {
+		return effectiveConfig(cmd, loaded)
 	}
 	return loaded, nil
 }

@@ -17,8 +17,9 @@ import (
 )
 
 var buildCmd = &cobra.Command{
-	Use:   "build",
-	Short: "Build and push the application image",
+	Use:         "build",
+	Annotations: scopedRepo,
+	Short:       "Build and push the application image",
 	Long: `Build the container image and push it to the registry.
 
 This command builds the container image on this machine and pushes it to the

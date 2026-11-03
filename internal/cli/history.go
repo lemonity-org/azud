@@ -25,8 +25,9 @@ Examples:
 }
 
 var historyListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List recent deployments",
+	Use:         "list",
+	Annotations: anyState,
+	Short:       "List recent deployments",
 	Long: `List deployment history for the configured service.
 
 Examples:
@@ -36,8 +37,9 @@ Examples:
 }
 
 var historyShowCmd = &cobra.Command{
-	Use:   "show <id>",
-	Short: "Show deployment details",
+	Use:         "show <id>",
+	Annotations: anyState,
+	Short:       "Show deployment details",
 	Long: `Show full details for a deployment record by ID.
 
 Example:

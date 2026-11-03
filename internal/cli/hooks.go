@@ -14,9 +14,10 @@ import (
 )
 
 var hooksCmd = &cobra.Command{
-	Use:   "hooks",
-	Short: "Manage deployment hooks",
-	Long:  `Commands for listing and testing deployment hooks.`,
+	Use:         "hooks",
+	Annotations: map[string]string{scopeAnnotation: scopeEither, skipSecretsAnnotation: "true"},
+	Short:       "Manage deployment hooks",
+	Long:        `Commands for listing and testing deployment hooks.`,
 }
 
 var hooksListCmd = &cobra.Command{

@@ -23,8 +23,9 @@ import (
 )
 
 var preflightCmd = &cobra.Command{
-	Use:   "preflight",
-	Short: "Verify readiness of hosts and configuration",
+	Use:         "preflight",
+	Annotations: scopedServer,
+	Short:       "Verify readiness of hosts and configuration",
 	Long: `Run a preflight checklist before deploying.
 
 Checks:

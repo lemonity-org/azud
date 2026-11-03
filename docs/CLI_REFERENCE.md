@@ -505,7 +505,18 @@ Manage accessory services (databases, caches, etc.) defined in `config/deploy.ym
 
 #### `azud accessory boot`
 Start an accessory.
-**Usage:** `azud accessory boot <name>`
+**Usage:** `azud accessory boot <name> [--release <tag>]`
+**Flags:** `--host`, `--release`
+
+`--release` takes a tag or a bundle digest. Run on the server with
+`agent.source: bundle`, it verifies that release with `agent.verify_command` and boots
+the accessory from the release's spec and secrets, so a database can exist before the
+first deploy. It applies nothing else: the agent's state and the runtime secrets file
+do not change, and the first deploy finds the server as it was. It refuses an accessory
+the release places on another server, or one with `files`, which a release cannot carry.
+With `agent.source: image` it refuses and explains: a release is then only an image,
+which says nothing about an accessory, so run `azud accessory boot <name>`, which reads
+this server's configuration and needs no release.
 
 #### `azud accessory stop`
 Stop an accessory.
@@ -531,9 +542,18 @@ Manage scheduled tasks defined in `config/deploy.yml`.
 Start the scheduler for cron jobs.
 **Usage:** `azud cron boot [name]`
 
+With an `agent` section, jobs run the deployed digest. A job whose image or spec differs
+from the release is recreated, as is one created by an earlier version, which has no
+`azud.spec` label. A deploy does not change cron jobs, so run this after a release. It
+refuses while a deploy has not finished. See [Commands on a server with an
+agent](PULL_MODE.md#commands-on-a-server-with-an-agent).
+
 #### `azud cron run`
 Run a cron job immediately (manual trigger).
 **Usage:** `azud cron run <name>`
+
+With an `agent` section, it runs the deployed digest. While a deploy has not finished,
+that is the last whole release.
 
 #### `azud cron list`
 List configured cron jobs and their status.
@@ -605,6 +625,11 @@ Display the resolved configuration (merging destination-specific configs).
 not run `secrets_command` or read the secrets file. Use `azud env list` to
 check that secrets load. Shell completion (`azud completion <shell>` and the
 completion requests your shell sends) does not load the configuration at all.
+
+These commands do not load secrets either: `azud app *`, `azud accessory stop`,
+`logs`, `exec` and `remove`, `azud cron *`, `azud proxy stop`, `logs`, `status` and
+`remove`, `azud proxy reconcile --check`, `azud history *`, `azud hooks *`,
+`azud agent status`, `unit` and `init`, and `azud release promote` and `inspect`.
 
 #### `azud version`
 Show the Azud CLI version.

@@ -6,6 +6,41 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- On a configuration with an `agent` section, `azud app`, `accessory`, `cron`,
+  `proxy` and `history` commands now read what is running: the agent's current
+  release, with its image pinned by digest and every trust setting from this
+  server's configuration. Run them on the server. A configuration with no `agent`
+  section works as before, apart from the secrets change below.
+  - `azud cron boot` and `azud cron run` run the deployed digest, not the configured
+    tag. `azud cron boot` recreates a job whose image or spec differs from the
+    release.
+  - Before the first deploy, a command that needs a release fails and says what to
+    do. One that only reads says nothing is deployed, and runs.
+  - While a deploy has not finished, `azud cron boot`, `azud accessory boot` and
+    `azud proxy reconcile --repair` refuse, and name `azud agent run --once`. A
+    `deploy_command` script is not refused for the release it is deploying, and its
+    commands read that release.
+  - With `agent.source: image`, an edit to the configuration on disk applies with
+    the next release. Commands that write from the release warn when the file differs.
+  - An accessory's `files` are refused when they come from a bundle, because they
+    name paths on the machine running Azud.
+- Added `azud accessory boot <name> --release <tag>`, which verifies a release with
+  `agent.verify_command` and boots one accessory from its spec and secrets, so a
+  database can exist before the first deploy. It applies nothing else: the agent's
+  state and the runtime secrets file do not change. It needs `agent.source: bundle`,
+  and refuses an accessory the release places on another server.
+- Commands that do not read secrets no longer load them, so a slow or hostile
+  `secrets_command` cannot run for them, a failing one cannot fail them, and they no
+  longer warn about the secrets file's permissions. They are `azud app *`,
+  `azud accessory stop`, `logs`, `exec` and `remove`, `azud cron *`, `azud proxy stop`,
+  `logs`, `status` and `remove`, `azud proxy reconcile --check`, `azud history *` and
+  `azud hooks *`.
+- With an `agent` section, accessory and cron containers carry an `azud.spec` label
+  holding a hash of their spec. A container without it was made by an earlier
+  version, and counts as unknown rather than as changed.
+- The note the agent keeps when an accessory differs from a release now names
+  `azud accessory remove`. `azud accessory stop` and `boot` only restart the
+  same container, so they never applied the change.
 - Removed `azud scale` and `azud scale status`, for Azud 2.0. In 2.0 a service
   runs on one server with one instance per role, so there is nothing to scale.
   Before you upgrade, run `azud scale <role>=1` with 1.x for every role you

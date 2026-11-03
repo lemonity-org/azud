@@ -286,6 +286,15 @@ func (s *BundleSource) previousEnv(previous *Record) (contents []byte, absent bo
 	return current, false, nil
 }
 
+// Secrets returns rec's decrypted secrets by name.
+func (s *BundleSource) Secrets(rec *Record) (map[string]string, error) {
+	plaintext, err := s.open(rec.Sealed)
+	if err != nil {
+		return nil, err
+	}
+	return parseSecrets(plaintext), nil
+}
+
 // open decrypts a release's secrets, and returns nil for a release without any.
 func (s *BundleSource) open(sealed []byte) ([]byte, error) {
 	if sealed == nil {
@@ -318,7 +327,7 @@ func (s *BundleSource) unapplied(cfg *config.Config, values map[string]string) [
 	for _, name := range names {
 		now, ok := cfg.Accessories[name]
 		if !reflect.DeepEqual(now, s.Server.Accessories[name]) {
-			changes = append(changes, fmt.Sprintf("accessory %s differs from this server's configuration (azud accessory stop %s, then azud accessory boot %s, from a workstation)", name, name, name))
+			changes = append(changes, fmt.Sprintf("accessory %s differs from this server's configuration (azud accessory remove %s, then azud accessory boot %s)", name, name, name))
 		}
 		if !ok || s.AccessoryEnv == nil {
 			continue

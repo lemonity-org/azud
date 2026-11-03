@@ -13,9 +13,10 @@ import (
 )
 
 var serverCmd = &cobra.Command{
-	Use:   "server",
-	Short: "Manage deployment servers",
-	Long:  `Commands for managing and interacting with deployment servers.`,
+	Use:         "server",
+	Annotations: scopedServer,
+	Short:       "Manage deployment servers",
+	Long:        `Commands for managing and interacting with deployment servers.`,
 }
 
 var serverBootstrapCmd = &cobra.Command{

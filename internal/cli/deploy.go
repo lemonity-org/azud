@@ -10,8 +10,9 @@ import (
 )
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Deploy the application",
+	Use:         "deploy",
+	Annotations: scopedServer,
+	Short:       "Deploy the application",
 	Long: `Deploy the application to all configured servers.
 
 This command performs a zero-downtime deployment:
@@ -29,8 +30,9 @@ Example:
 }
 
 var redeployCmd = &cobra.Command{
-	Use:   "redeploy",
-	Short: "Redeploy the application",
+	Use:         "redeploy",
+	Annotations: scopedServer,
+	Short:       "Redeploy the application",
 	Long: `Quickly redeploy the application without building.
 
 This is useful when you want to restart the application with the same image,
@@ -42,8 +44,9 @@ Example:
 }
 
 var rollbackCmd = &cobra.Command{
-	Use:   "rollback <version>",
-	Short: "Rollback to a previous version",
+	Use:         "rollback <version>",
+	Annotations: scopedServer,
+	Short:       "Rollback to a previous version",
 	Long: `Rollback the application to a previous version.
 
 Example:
