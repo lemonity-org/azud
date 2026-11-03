@@ -1,5 +1,5 @@
 # Stage 1: Build static binary
-FROM docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS builder
+FROM docker.io/library/golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown
@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build \
     -o /azud ./cmd/azud
 
 # Stage 2: Minimal runtime image
-FROM docker.io/library/alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+FROM docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN apk add --no-cache openssh-client ca-certificates curl \
     && adduser -D -h /home/azud azud
