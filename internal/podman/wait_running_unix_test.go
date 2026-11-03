@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/local"
 )
 
 func TestWaitRunning(t *testing.T) {
@@ -37,7 +37,7 @@ func TestWaitRunning(t *testing.T) {
 			if err := os.WriteFile(podman, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			sshClient := ssh.NewClient(&ssh.Config{LocalHost: "app-1"})
+			sshClient := local.New(local.Options{Host: "app-1"})
 			defer func() { _ = sshClient.Close() }()
 			containers := NewContainerManager(NewClientWithCommand(sshClient, podman))
 

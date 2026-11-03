@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
-func enableLinger(sshClient *ssh.Client, host, user string) error {
+func enableLinger(sshClient local.Runner, host, user string) error {
 	cmd := lingerCommand(user)
 	result, err := sshClient.Execute(host, cmd)
 	if err != nil {

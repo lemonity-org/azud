@@ -2,26 +2,18 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	gossh "golang.org/x/crypto/ssh"
-
+	"github.com/lemonity-org/azud/internal/local"
+	"github.com/lemonity-org/azud/internal/localtest"
 	"github.com/lemonity-org/azud/internal/output"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // fakeProxyContainer is one container on a fakeProxyHost.
@@ -31,7 +23,7 @@ type fakeProxyContainer struct {
 	id      string
 }
 
-// fakeProxyHost simulates the Podman state Boot drives over SSH: proxy
+// fakeProxyHost simulates the Podman state Boot drives: proxy
 // containers by name, the caddy_config autosave, the admin socket, files in
 // the Azud state directory and the host-wide Caddy flock.
 type fakeProxyHost struct {
@@ -73,12 +65,10 @@ func (h *fakeProxyHost) newID() string {
 	return fmt.Sprintf("%064x", h.nextID)
 }
 
-// lock serves a WithRemoteLock session like flock -x -w: it confirms with
-// LOCKED once the lock is free, holds it until the client closes stdin and
-// gives up after a timeout. The lock is not re-entrant: a nested
-// WithRemoteLock from the same command times out instead of deadlocking
-// the test.
-func (h *fakeProxyHost) lock(channel gossh.Channel) int {
+// lock serves WithRemoteLock like flock -x -w: it holds the lock while fn runs and
+// gives up after a timeout. The lock is not re-entrant: a nested WithRemoteLock from
+// the same command times out instead of deadlocking the test.
+func (h *fakeProxyHost) lock(_ string, _ time.Duration, fn func() error) error {
 	h.mu.Lock()
 	h.commands = append(h.commands, "flock caddy.lock")
 	h.lockWaiters++
@@ -93,12 +83,10 @@ func (h *fakeProxyHost) lock(channel gossh.Channel) int {
 	h.lockWaiters--
 	h.mu.Unlock()
 	if !acquired {
-		return 1
+		return errors.New("failed to acquire remote lock: timed out")
 	}
 	defer func() { <-h.caddyLock }()
-	_, _ = io.WriteString(channel, "LOCKED\n")
-	_, _ = io.Copy(io.Discard, channel)
-	return 0
+	return fn()
 }
 
 func (h *fakeProxyHost) waitingForLock() bool {
@@ -271,105 +259,13 @@ func (h *fakeProxyHost) podmanCommands() []string {
 	return out
 }
 
-// startFakeProxySSH serves h over SSH on loopback and returns a Manager
-// connected to it, plus the buffer that receives the Manager's stderr.
-func startFakeProxySSH(t *testing.T, h *fakeProxyHost) (*Manager, *bytes.Buffer) {
+// startFakeProxy returns a Manager whose commands h answers, plus the buffer that
+// receives the Manager's stderr.
+func startFakeProxy(t *testing.T, h *fakeProxyHost) (*Manager, *bytes.Buffer) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	_, hostKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := gossh.NewSignerFromKey(hostKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config := &gossh.ServerConfig{
-		PublicKeyCallback: func(gossh.ConnMetadata, gossh.PublicKey) (*gossh.Permissions, error) { return nil, nil },
-	}
-	config.AddHostKey(signer)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go serveFakeProxySSH(conn, config, h)
-		}
-	}()
-
-	_, clientKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyBytes, err := x509.MarshalPKCS8PrivateKey(clientKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SSH_AUTH_SOCK", "")
-	client := ssh.NewClient(&ssh.Config{
-		User:                  "root",
-		Port:                  listener.Addr().(*net.TCPAddr).Port,
-		Keys:                  []string{keyPath},
-		ConnectTimeout:        5 * time.Second,
-		InsecureIgnoreHostKey: true,
-	})
-	t.Cleanup(func() { _ = client.Close() })
 	var stderr bytes.Buffer
-	return NewManagerWithOptions(client, output.NewLogger(io.Discard, &stderr, false), "root", false, false), &stderr
-}
-
-func serveFakeProxySSH(conn net.Conn, config *gossh.ServerConfig, h *fakeProxyHost) {
-	defer func() { _ = conn.Close() }()
-	server, channels, requests, err := gossh.NewServerConn(conn, config)
-	if err != nil {
-		return
-	}
-	defer func() { _ = server.Close() }()
-	go gossh.DiscardRequests(requests)
-	for newChannel := range channels {
-		if newChannel.ChannelType() != "session" {
-			_ = newChannel.Reject(gossh.UnknownChannelType, "session only")
-			continue
-		}
-		channel, channelRequests, err := newChannel.Accept()
-		if err != nil {
-			continue
-		}
-		go func() {
-			defer func() { _ = channel.Close() }()
-			for request := range channelRequests {
-				if request.Type != "exec" {
-					_ = request.Reply(request.Type == "env", nil)
-					continue
-				}
-				var payload struct{ Command string }
-				if err := gossh.Unmarshal(request.Payload, &payload); err != nil {
-					_ = request.Reply(false, nil)
-					return
-				}
-				_ = request.Reply(true, nil)
-				if strings.Contains(payload.Command, "echo LOCKED") {
-					exit := h.lock(channel)
-					_, _ = channel.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)}))
-					return
-				}
-				stdout, stderr, exit := h.handle(payload.Command, channel)
-				_, _ = io.WriteString(channel, stdout)
-				_, _ = io.WriteString(channel.Stderr(), stderr)
-				_, _ = channel.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)}))
-				return
-			}
-		}()
-	}
+	runner := &localtest.Fake{Handle: h.handle, Lock: h.lock, UserName: "root"}
+	return NewManagerWithOptions(runner, output.NewLogger(io.Discard, &stderr, false), "root", false, false), &stderr
 }
 
 const legacyTestAutosave = `{"admin":{"listen":"0.0.0.0:2019"},"apps":{"http":{"servers":{"srv0":{"routes":[{"@id":"azud-route-shop"}]}}}}}`
@@ -378,7 +274,7 @@ func TestBootMigrationRemovesLegacyContainerOnlyAfterReplacementAnswers(t *testi
 	h := newFakeProxyHost(legacyTestAutosave, map[string]*fakeProxyContainer{
 		CaddyContainerName: {legacy: true, running: true},
 	})
-	manager, _ := startFakeProxySSH(t, h)
+	manager, _ := startFakeProxy(t, h)
 
 	if err := manager.Boot("127.0.0.1", nil); err != nil {
 		t.Fatalf("Boot() error = %v", err)
@@ -415,7 +311,7 @@ func TestBootMigrationClearsRollbackStateBeforeRemovingLegacyContainer(t *testin
 		CaddyContainerName: {legacy: true, running: true},
 	})
 	h.interruptAt = "podman rm -f azud-proxy-legacy"
-	manager, _ := startFakeProxySSH(t, h)
+	manager, _ := startFakeProxy(t, h)
 	if err := manager.Boot("127.0.0.1", nil); err == nil {
 		t.Fatal("interrupted Boot() succeeded")
 	}
@@ -438,7 +334,7 @@ func TestRebootMigratesOutdatedProxyUnderOneLock(t *testing.T) {
 	h := newFakeProxyHost(legacyTestAutosave, map[string]*fakeProxyContainer{
 		CaddyContainerName: {legacy: true, running: true},
 	})
-	manager, _ := startFakeProxySSH(t, h)
+	manager, _ := startFakeProxy(t, h)
 
 	if err := manager.Reboot("127.0.0.1", nil); err != nil {
 		t.Fatalf("Reboot() error = %v", err)
@@ -466,8 +362,8 @@ func TestBootMigrationExcludesConcurrentBoot(t *testing.T) {
 	h := newFakeProxyHost(legacyTestAutosave, map[string]*fakeProxyContainer{
 		CaddyContainerName: {legacy: true, running: true},
 	})
-	first, _ := startFakeProxySSH(t, h)
-	second, _ := startFakeProxySSH(t, h)
+	first, _ := startFakeProxy(t, h)
+	second, _ := startFakeProxy(t, h)
 
 	secondErr := make(chan error, 1)
 	h.beforeRun = func() {
@@ -518,7 +414,7 @@ func TestBootMigrationRollsBackWhenReplacementFails(t *testing.T) {
 				CaddyContainerName: {legacy: true, running: true},
 			})
 			h.runFails, h.crashes = tt.runFails, tt.crashes
-			manager, stderr := startFakeProxySSH(t, h)
+			manager, stderr := startFakeProxy(t, h)
 
 			started := time.Now()
 			err := manager.Boot("127.0.0.1", nil)
@@ -588,7 +484,7 @@ func TestBootRetriesInterruptedMigrationWithDurableRollbackState(t *testing.T) {
 					CaddyContainerName: {legacy: true, running: true},
 				})
 				h.interruptAt = interruption.at
-				manager, _ := startFakeProxySSH(t, h)
+				manager, _ := startFakeProxy(t, h)
 				if err := manager.Boot("127.0.0.1", nil); err == nil {
 					t.Fatal("interrupted Boot() succeeded")
 				}
@@ -638,7 +534,7 @@ func TestBootMigrationIgnoresRollbackStateOfAnotherContainer(t *testing.T) {
 	})
 	h.files[proxyRollbackFileName] = `{"container":"0123","running":false,"snapshotted":true,"autosave":"{\"apps\":{}}"}`
 	h.runFails = true
-	manager, _ := startFakeProxySSH(t, h)
+	manager, _ := startFakeProxy(t, h)
 
 	if err := manager.Boot("127.0.0.1", nil); err == nil || !strings.Contains(err.Error(), "rolled back") {
 		t.Fatalf("Boot() error = %v, want the rollback reported", err)
@@ -698,7 +594,7 @@ func TestBootRestoresProxyLeftByInterruptedMigration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newFakeProxyHost(legacyTestAutosave, tt.containers)
-			manager, _ := startFakeProxySSH(t, h)
+			manager, _ := startFakeProxy(t, h)
 
 			if err := manager.Boot("127.0.0.1", nil); err != nil {
 				t.Fatalf("Boot() error = %v", err)
@@ -717,7 +613,7 @@ func TestBootMigrationRestartsPreviousProxyWhenAutosaveSnapshotFails(t *testing.
 	h := newFakeProxyHost(`[]`, map[string]*fakeProxyContainer{
 		CaddyContainerName: {legacy: true, running: true},
 	})
-	manager, _ := startFakeProxySSH(t, h)
+	manager, _ := startFakeProxy(t, h)
 
 	err := manager.Boot("127.0.0.1", nil)
 	if err == nil || !strings.Contains(err.Error(), "restarted the previous container") {
@@ -733,7 +629,7 @@ func TestBootMigrationRestartsPreviousProxyWhenAutosaveSnapshotFails(t *testing.
 }
 
 func TestWaitForAdminReportsLastProbeError(t *testing.T) {
-	probeErr := adminRequestError(&ssh.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect"})
+	probeErr := adminRequestError(&local.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect"})
 	calls := 0
 	err := waitForAdmin(20*time.Millisecond, time.Millisecond, func() error {
 		calls++
@@ -751,7 +647,7 @@ func TestWaitForAdminStopsWhenProxyIsNotRunning(t *testing.T) {
 	calls := 0
 	err := waitForAdmin(time.Minute, time.Millisecond, func() error {
 		calls++
-		return adminRequestError(&ssh.Result{ExitCode: 255, Stderr: "Error: can only create exec sessions on running containers: container state improper"})
+		return adminRequestError(&local.Result{ExitCode: 255, Stderr: "Error: can only create exec sessions on running containers: container state improper"})
 	})
 	if !errors.Is(err, errProxyNotRunning) || calls != 1 {
 		t.Fatalf("waitForAdmin() = %v after %d probes, want an immediate not-running error", err, calls)
@@ -761,7 +657,7 @@ func TestWaitForAdminStopsWhenProxyIsNotRunning(t *testing.T) {
 	err = waitForAdmin(time.Minute, time.Millisecond, func() error {
 		calls++
 		if calls < 3 {
-			return adminRequestError(&ssh.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect"})
+			return adminRequestError(&local.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect"})
 		}
 		return nil
 	})
@@ -775,11 +671,11 @@ func TestAdminRequestErrorMarksStoppedProxy(t *testing.T) {
 		"Error: can only create exec sessions on running containers: container state improper",
 		`Error: no container with name or ID "azud-proxy" found: no such container`,
 	} {
-		if err := adminRequestError(&ssh.Result{ExitCode: 125, Stderr: stderr}); !errors.Is(err, errProxyNotRunning) {
+		if err := adminRequestError(&local.Result{ExitCode: 125, Stderr: stderr}); !errors.Is(err, errProxyNotRunning) {
 			t.Fatalf("adminRequestError(%q) = %v, want errProxyNotRunning", stderr, err)
 		}
 	}
-	if err := adminRequestError(&ssh.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect"}); errors.Is(err, errProxyNotRunning) {
+	if err := adminRequestError(&local.Result{ExitCode: 7, Stderr: "curl: (7) Failed to connect"}); errors.Is(err, errProxyNotRunning) {
 		t.Fatalf("refused socket reported as a stopped container: %v", err)
 	}
 }

@@ -15,11 +15,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/proxy"
 	"github.com/lemonity-org/azud/internal/secretsfile"
 	"github.com/lemonity-org/azud/internal/server"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 var preflightCmd = &cobra.Command{
@@ -314,7 +314,7 @@ func getPreflightHosts() []string {
 	return cfg.GetAllSSHHosts()
 }
 
-func preflightHostRow(sshClient *ssh.Client, host string, bootstrapper *server.Bootstrapper, proxyManager *proxy.Manager) []string {
+func preflightHostRow(sshClient local.Runner, host string, bootstrapper *server.Bootstrapper, proxyManager *proxy.Manager) []string {
 	sshStatus := "ok"
 	trustStatus := "n/a"
 	rootlessStatus := "n/a"

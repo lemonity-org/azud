@@ -12,12 +12,12 @@ import (
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/proxy"
 	"github.com/lemonity-org/azud/internal/server"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 var setupCmd = &cobra.Command{
@@ -260,11 +260,11 @@ func getRegistryPassword() string {
 	return ""
 }
 
-func deployAccessories(sshClient *ssh.Client, log *output.Logger, selectedNames ...string) error {
+func deployAccessories(sshClient local.Runner, log *output.Logger, selectedNames ...string) error {
 	return deployAccessoriesOnHost(sshClient, log, "", selectedNames...)
 }
 
-func deployAccessoriesOnHost(sshClient *ssh.Client, log *output.Logger, selectedHost string, selectedNames ...string) error {
+func deployAccessoriesOnHost(sshClient local.Runner, log *output.Logger, selectedHost string, selectedNames ...string) error {
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
 	imageManager := podman.NewImageManager(podmanClient)
@@ -451,7 +451,7 @@ func accessoryHosts(accessory config.AccessoryConfig) []string {
 	return hosts
 }
 
-func provisionAccessoryDirectories(sshClient *ssh.Client, host string, directories []string) error {
+func provisionAccessoryDirectories(sshClient local.Runner, host string, directories []string) error {
 	for _, directory := range directories {
 		result, err := sshClient.Execute(host, fmt.Sprintf("mkdir -p %s", shell.QuoteRemotePath(directory)))
 		if err != nil {
@@ -504,7 +504,7 @@ func verifyAccessoryHealth(
 	return nil
 }
 
-func uploadAccessoryFiles(sshClient *ssh.Client, host, name string, accessory *config.AccessoryConfig, log *output.Logger) error {
+func uploadAccessoryFiles(sshClient local.Runner, host, name string, accessory *config.AccessoryConfig, log *output.Logger) error {
 	for _, f := range accessory.Files {
 		dir := filepath.Dir(f.Remote)
 		result, err := sshClient.Execute(host, fmt.Sprintf("mkdir -p %s", shell.QuoteRemotePath(dir)))

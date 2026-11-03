@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/local"
 )
 
 type Container struct {
@@ -56,7 +56,7 @@ func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Re
 	}
 	cmd := config.BuildRunCommand()
 	cmd = m.client.RewriteCommand(cmd)
-	var result *ssh.Result
+	var result *local.Result
 	var err error
 	if stdin == nil {
 		result, err = m.client.ssh.Execute(host, cmd)
@@ -181,13 +181,13 @@ func (m *ContainerManager) Kill(host, container, signal string) error {
 	return nil
 }
 
-func (m *ContainerManager) Exec(host string, config *ExecConfig) (*ssh.Result, error) {
+func (m *ContainerManager) Exec(host string, config *ExecConfig) (*local.Result, error) {
 	cmd := config.BuildExecCommand()
 	cmd = m.client.RewriteCommand(cmd)
 	return m.client.ssh.Execute(host, cmd)
 }
 
-func (m *ContainerManager) Logs(host string, config *LogsConfig) (*ssh.Result, error) {
+func (m *ContainerManager) Logs(host string, config *LogsConfig) (*local.Result, error) {
 	cmd := config.BuildLogsCommand()
 	cmd = m.client.RewriteCommand(cmd)
 	return m.client.ssh.Execute(host, cmd)

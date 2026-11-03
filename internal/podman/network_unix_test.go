@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/local"
 )
 
 // fakePodmanLog runs a fake podman that appends its arguments to the returned
@@ -28,7 +28,7 @@ func fakePodmanLog(t *testing.T, networkCreateFails bool) (*ContainerManager, st
 	if err := os.WriteFile(podman, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sshClient := ssh.NewClient(&ssh.Config{LocalHost: "app-1"})
+	sshClient := local.New(local.Options{Host: "app-1"})
 	t.Cleanup(func() { _ = sshClient.Close() })
 	return NewContainerManager(NewClientWithCommand(sshClient, podman)), calls
 }

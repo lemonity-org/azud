@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -73,12 +74,6 @@ type Config struct {
 
 	// Skip host key verification (not recommended for production)
 	InsecureIgnoreHostKey bool
-
-	// LocalHost, when set, runs commands addressed to that host on this
-	// machine through /bin/sh instead of over SSH. Every other host is
-	// refused, so a local run can never act on a different server. Used by
-	// `azud agent`, which deploys the server it runs on.
-	LocalHost string
 }
 
 // ProxyConfig holds SSH proxy/bastion configuration
@@ -88,6 +83,8 @@ type ProxyConfig struct {
 	Port int
 	Keys []string
 }
+
+var _ local.Runner = (*Client)(nil)
 
 // NewClient creates a new SSH client with the given configuration
 func NewClient(cfg *Config) *Client {
@@ -148,15 +145,6 @@ func (c *Client) connect(host string) (*Connection, error) {
 	// Another completed connection may have entered the pool before this call
 	// was registered.
 	if conn := c.pool.Get(host); conn != nil {
-		return conn, nil
-	}
-
-	if c.config.LocalHost != "" {
-		conn, err := newLocalConnection(c.config.LocalHost, host, c.config.Context, c.config.CommandTimeout, c.config.LongCommandTimeout)
-		if err != nil {
-			return nil, err
-		}
-		c.pool.Put(host, conn)
 		return conn, nil
 	}
 
@@ -604,40 +592,13 @@ func (c *Client) ExecuteIO(host, cmd string, stdin io.Reader, stdout, stderr io.
 
 // ExecuteParallel runs a command on multiple hosts concurrently
 func (c *Client) ExecuteParallel(hosts []string, cmd string) []*Result {
-	return c.executeParallel(hosts, cmd, c.Execute)
+	return local.RunParallel(hosts, cmd, c.Execute)
 }
 
 // ExecuteLongParallel is ExecuteParallel for commands that can outlast the
 // command timeout.
 func (c *Client) ExecuteLongParallel(hosts []string, cmd string) []*Result {
-	return c.executeParallel(hosts, cmd, c.ExecuteLong)
-}
-
-func (c *Client) executeParallel(hosts []string, cmd string, execute func(host, cmd string) (*Result, error)) []*Result {
-	results := make([]*Result, len(hosts))
-	var wg sync.WaitGroup
-
-	for i, host := range hosts {
-		wg.Add(1)
-		go func(idx int, h string) {
-			defer wg.Done()
-			result, err := execute(h, cmd)
-			if err != nil {
-				results[idx] = &Result{
-					Host:     h,
-					ExitCode: -1,
-					Stderr:   err.Error(),
-					Error:    err,
-				}
-				return
-			}
-			result.Host = h
-			results[idx] = result
-		}(i, host)
-	}
-
-	wg.Wait()
-	return results
+	return local.RunParallel(hosts, cmd, c.ExecuteLong)
 }
 
 // Upload copies a local file to the remote host

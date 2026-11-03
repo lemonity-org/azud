@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lemonity-org/azud/internal/ssh"
+	"github.com/lemonity-org/azud/internal/local"
 )
 
 const remotePayload = "\x1b]52;c;ZXZpbA==\x07\x1b[2J\x1b[31mFORGED\x1b[0m\n"
@@ -62,7 +62,7 @@ func TestRemoteExecToPipeKeepsBinaryOutput(t *testing.T) {
 	stubTerminalWriter(t, false)
 	binary := "PGDMP\x00\x01\x1b\r\n\xff\xfe"
 	var stdout, stderr bytes.Buffer
-	printRemoteResult(&stdout, &stderr, &ssh.Result{Stdout: binary}, remoteExecStream, false)
+	printRemoteResult(&stdout, &stderr, &local.Result{Stdout: binary}, remoteExecStream, false)
 	if stdout.String() != binary {
 		t.Fatalf("binary exec output changed: %q", stdout.String())
 	}
@@ -71,7 +71,7 @@ func TestRemoteExecToPipeKeepsBinaryOutput(t *testing.T) {
 func TestPrintRemoteResultSanitizesStdoutAndStderr(t *testing.T) {
 	stubTerminalWriter(t, false)
 	var stdout, stderr bytes.Buffer
-	printRemoteResult(&stdout, &stderr, &ssh.Result{Stdout: remotePayload, Stderr: remotePayload}, remoteLogStream, false)
+	printRemoteResult(&stdout, &stderr, &local.Result{Stdout: remotePayload, Stderr: remotePayload}, remoteLogStream, false)
 
 	for name, got := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String()} {
 		if strings.Contains(got, "\x1b") {

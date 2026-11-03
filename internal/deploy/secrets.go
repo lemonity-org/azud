@@ -6,12 +6,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/shell"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // ValidateRemoteSecrets ensures the remote secrets file exists and includes all required keys.
-func ValidateRemoteSecrets(sshClient *ssh.Client, hosts []string, secretsPath string, requiredKeys []string) error {
+func ValidateRemoteSecrets(sshClient local.Runner, hosts []string, secretsPath string, requiredKeys []string) error {
 	required := normalizeSecretKeys(requiredKeys)
 	if len(required) == 0 || len(hosts) == 0 {
 		return nil
@@ -142,7 +142,7 @@ func formatSecretErrors(missingByHost, emptyByHost map[string][]string) error {
 	}
 }
 
-func validateSecretsPermissions(sshClient *ssh.Client, hosts []string, secretsPath string) error {
+func validateSecretsPermissions(sshClient local.Runner, hosts []string, secretsPath string) error {
 	if len(hosts) == 0 || strings.TrimSpace(secretsPath) == "" {
 		return nil
 	}

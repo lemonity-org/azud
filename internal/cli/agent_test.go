@@ -13,9 +13,9 @@ import (
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/registry"
-	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
 
@@ -138,7 +138,7 @@ func TestRunningDigestRequiresEveryRoleOnTheSameDigest(t *testing.T) {
 			"worker": {Hosts: []string{"app-1"}},
 		},
 	}
-	client := ssh.NewClient(&ssh.Config{LocalHost: "app-1"})
+	client := local.New(local.Options{Host: "app-1"})
 	defer func() { _ = client.Close() }()
 	running := runningDigest(podman.NewClientWithCommand(client, fakePodman), cfg, "app-1", "ghcr.io/o/app")
 
@@ -305,7 +305,7 @@ func TestBundleAgentRefusesSecretsPathsThatCollide(t *testing.T) {
 func TestReleaseClientUsesTheReleasesCommandTimeout(t *testing.T) {
 	host := "app-1"
 	server := &config.Config{SSH: config.SSHConfig{User: "deploy", CommandTimeout: 200 * time.Millisecond}}
-	own := ssh.NewClient(&ssh.Config{Context: context.Background(), User: "deploy", CommandTimeout: server.SSH.CommandTimeout, LocalHost: host})
+	own := local.New(local.Options{Context: context.Background(), User: "deploy", CommandTimeout: server.SSH.CommandTimeout, Host: host})
 	defer func() { _ = own.Close() }()
 
 	same, closeSame := releaseClient(context.Background(), own, server, server, host)
@@ -331,7 +331,7 @@ func TestReleaseClientUsesTheReleasesPullTimeout(t *testing.T) {
 		SSH:    config.SSHConfig{User: "deploy", CommandTimeout: 200 * time.Millisecond},
 		Deploy: config.DeployConfig{PullTimeout: 200 * time.Millisecond},
 	}
-	own := ssh.NewClient(&ssh.Config{Context: context.Background(), User: "deploy", CommandTimeout: server.SSH.CommandTimeout, LongCommandTimeout: server.Deploy.PullTimeout, LocalHost: host})
+	own := local.New(local.Options{Context: context.Background(), User: "deploy", CommandTimeout: server.SSH.CommandTimeout, LongCommandTimeout: server.Deploy.PullTimeout, Host: host})
 	defer func() { _ = own.Close() }()
 
 	longer := *server

@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/proxy"
 	"github.com/lemonity-org/azud/internal/quadlet"
-	"github.com/lemonity-org/azud/internal/ssh"
 	"github.com/lemonity-org/azud/internal/state"
 )
 
@@ -53,7 +53,7 @@ type deploymentProxy interface {
 // Deployer orchestrates zero-downtime application deployments across hosts.
 type Deployer struct {
 	cfg         *config.Config
-	sshClient   *ssh.Client
+	sshClient   local.Runner
 	podman      *podman.Client
 	containers  containerLifecycle
 	images      *podman.ImageManager
@@ -97,7 +97,7 @@ func newProxyConfigFromCfg(cfg *config.Config) *proxy.ProxyConfig {
 	return pc
 }
 
-func NewDeployer(cfg *config.Config, sshClient *ssh.Client, log *output.Logger) *Deployer {
+func NewDeployer(cfg *config.Config, sshClient local.Runner, log *output.Logger) *Deployer {
 	if log == nil {
 		log = output.DefaultLogger
 	}

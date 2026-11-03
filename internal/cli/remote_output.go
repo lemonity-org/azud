@@ -3,8 +3,8 @@ package cli
 import (
 	"io"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // remoteStreamKind selects how untrusted remote output is neutralized before
@@ -51,7 +51,7 @@ func remoteStreams(stdout, stderr io.Writer, kind remoteStreamKind, raw bool) (i
 
 // printRemoteResult writes a buffered remote result's stdout and stderr.
 // Write errors are ignored, as with direct printing.
-func printRemoteResult(stdout, stderr io.Writer, result *ssh.Result, kind remoteStreamKind, raw bool) {
+func printRemoteResult(stdout, stderr io.Writer, result *local.Result, kind remoteStreamKind, raw bool) {
 	safeStdout, safeStderr, flush := remoteStreams(stdout, stderr, kind, raw)
 	_, _ = io.WriteString(safeStdout, result.Stdout)
 	_, _ = io.WriteString(safeStderr, result.Stderr)

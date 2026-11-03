@@ -4,18 +4,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lemonity-org/azud/internal/local"
 	"github.com/lemonity-org/azud/internal/output"
-	"github.com/lemonity-org/azud/internal/ssh"
 )
 
 // Bootstrapper installs Podman and configures remote servers for deployment.
 type Bootstrapper struct {
-	sshClient *ssh.Client
+	sshClient local.Runner
 	log       *output.Logger
 	backend   string
 }
 
-func NewBootstrapper(sshClient *ssh.Client, log *output.Logger, networkBackend string) *Bootstrapper {
+func NewBootstrapper(sshClient local.Runner, log *output.Logger, networkBackend string) *Bootstrapper {
 	if log == nil {
 		log = output.DefaultLogger
 	}
@@ -332,6 +332,6 @@ type PodmanStatus struct {
 	ContainerCount int
 }
 
-func (b *Bootstrapper) ExecuteOnAll(hosts []string, cmd string) []*ssh.Result {
+func (b *Bootstrapper) ExecuteOnAll(hosts []string, cmd string) []*local.Result {
 	return b.sshClient.ExecuteParallel(hosts, cmd)
 }
