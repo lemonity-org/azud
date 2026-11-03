@@ -377,9 +377,14 @@ func (c *Connection) Upload(localPath, remotePath string) error {
 	remoteDir := filepath.Dir(remotePath)
 	remoteFile := filepath.Base(remotePath)
 
+	// The pipe has to exist before the session starts.
+	w, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to open stdin: %w", err)
+	}
+
 	// Start SCP in sink mode
 	go func() {
-		w, _ := session.StdinPipe()
 		defer func() { _ = w.Close() }()
 
 		// Send file info - remoteFile is sanitized to prevent protocol injection
@@ -419,8 +424,13 @@ func (c *Connection) UploadContent(content []byte, remotePath string, mode os.Fi
 	remoteDir := filepath.Dir(remotePath)
 	remoteFile := filepath.Base(remotePath)
 
+	// The pipe has to exist before the session starts.
+	w, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to open stdin: %w", err)
+	}
+
 	go func() {
-		w, _ := session.StdinPipe()
 		defer func() { _ = w.Close() }()
 
 		// Sanitize filename to prevent SCP protocol injection
