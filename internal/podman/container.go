@@ -51,10 +51,8 @@ func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Re
 	if err := ValidateOptions(config.Options); err != nil {
 		return "", err
 	}
-	if config.Network == SharedNetwork {
-		if err := m.ensureSharedNetwork(host); err != nil {
-			return "", err
-		}
+	if err := m.ensureNetworkFor(host, config); err != nil {
+		return "", err
 	}
 	cmd := config.BuildRunCommand()
 	cmd = m.client.RewriteCommand(cmd)
@@ -77,6 +75,9 @@ func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Re
 // Create validates and creates a container without starting it.
 func (m *ContainerManager) Create(host string, config *ContainerConfig) (string, error) {
 	if err := ValidateOptions(config.Options); err != nil {
+		return "", err
+	}
+	if err := m.ensureNetworkFor(host, config); err != nil {
 		return "", err
 	}
 	cmd := config.BuildCreateCommand()
@@ -341,10 +342,13 @@ func (m *ContainerManager) HasHealthcheck(host, container string) (bool, error) 
 	return count != "" && count != "0", nil
 }
 
-// ensureSharedNetwork creates the shared network if this Podman store lacks it.
-// Only `azud setup` and `azud systemd enable` used to create it, so a server set
-// up any other way failed its first deploy with "network not found".
-func (m *ContainerManager) ensureSharedNetwork(host string) error {
+// ensureNetworkFor creates the shared network if config joins it and this Podman
+// store lacks it. Only `azud setup` and `azud systemd enable` used to create it, so
+// a server set up any other way failed its first deploy with "network not found".
+func (m *ContainerManager) ensureNetworkFor(host string, config *ContainerConfig) error {
+	if config.Network != SharedNetwork {
+		return nil
+	}
 	result, err := m.client.Execute(host, "network", "create", "--ignore", SharedNetwork)
 	if err != nil {
 		return fmt.Errorf("failed to create network %s: %w", SharedNetwork, err)
