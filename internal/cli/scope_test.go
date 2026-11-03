@@ -230,6 +230,12 @@ func (s *effectiveServer) deployed(digest string, edit func(string) string) {
 	if edit != nil {
 		files = edit(files)
 	}
+	// A record holds its files as ReadConfigFiles returns them.
+	resolved, err := config.ResolveEnvReferences([]byte(files))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	files = string(resolved)
 	id := strings.TrimPrefix(digest, "sha256:") + "-abcd1234"
 	rec := &agent.Record{ID: id, Source: agent.SourceImage, Origin: agent.OriginVerified, Digest: digest, Image: "registry.test/shop@" + digest, Files: []release.File{{Name: "deploy.yml", Data: []byte(files)}}}
 	if err := s.store.Records("registry.test/shop").Store(rec); err != nil {
