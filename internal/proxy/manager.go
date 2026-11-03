@@ -2178,10 +2178,6 @@ type ServiceConfig struct {
 	// Upstream addresses (host:port)
 	Upstreams []string
 
-	// Optional weighted upstreams. When set, these replace Upstreams and use
-	// Caddy's stock random policy with reduced repeated entries.
-	UpstreamWeights []UpstreamWeight
-
 	// Protocol used to communicate with upstreams: http, h2c, or https.
 	UpstreamProtocol string
 
@@ -2230,11 +2226,6 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 	for i, addr := range service.Upstreams {
 		upstreams[i] = &Upstream{Dial: addr}
 	}
-	policy := "round_robin"
-	if len(service.UpstreamWeights) > 0 {
-		upstreams = weightedUpstreams(service.UpstreamWeights...)
-		policy = "random"
-	}
 
 	handler := &Handler{
 		ID:        serviceHandlerID(service.Name),
@@ -2242,7 +2233,7 @@ func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
 		Upstreams: upstreams,
 		LoadBalancing: &LoadBalancing{
 			SelectionPolicy: &SelectionPolicy{
-				Policy: policy,
+				Policy: "round_robin",
 			},
 			// A deploy can leave a sub-second window in which the route has no
 			// available upstream, and passive health checking can extend that
@@ -2373,7 +2364,7 @@ const (
 // A host-only route is considered only as an adoption candidate when upstreams exist.
 func (m *Manager) ReconcileService(host string, service *ServiceConfig, repair bool) (ReconcileStatus, error) {
 	desired := m.buildServiceRoute(service)
-	hasDesiredUpstreams := len(service.Upstreams)+len(service.UpstreamWeights) > 0
+	hasDesiredUpstreams := len(service.Upstreams) > 0
 	routesPath := "/config/apps/http/servers/srv0/routes"
 	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
 	if err != nil {
@@ -2501,6 +2492,8 @@ func routesEquivalent(actual, desired *Route) bool {
 		}
 		sort.Slice(actualHandler.Upstreams, func(i, j int) bool { return actualHandler.Upstreams[i].Dial < actualHandler.Upstreams[j].Dial })
 		sort.Slice(desiredHandler.Upstreams, func(i, j int) bool { return desiredHandler.Upstreams[i].Dial < desiredHandler.Upstreams[j].Dial })
+		// A live route can carry the random policy Azud 1.x canaries set. Over
+		// uniform upstreams it selects like round robin, so it is not drift.
 		if selectionPolicy(actualHandler) == "random" && selectionPolicy(desiredHandler) == "round_robin" && uniformUpstreamMultiplicity(actualHandler.Upstreams) {
 			actualHandler.LoadBalancing.SelectionPolicy.Policy = "round_robin"
 		}
@@ -2962,239 +2955,6 @@ func (m *Manager) BootAll(hosts []string, config *ProxyConfig) error {
 	}
 
 	return nil
-}
-
-// SetCanaryWeights atomically replaces a two-upstream route with the requested
-// stable/canary percentages and reads it back before success. It rejects extra
-// upstreams so the route cannot silently produce misleading weights.
-func (m *Manager) SetCanaryWeights(host, serviceHost, stable string, stableWeight int, canary string, canaryWeight int) error {
-	if stable == "" || canary == "" || stable == canary {
-		return fmt.Errorf("stable and canary upstreams must be distinct and non-empty")
-	}
-	if stableWeight < 0 || canaryWeight < 0 || stableWeight+canaryWeight != 100 {
-		return fmt.Errorf("stable and canary weights must be non-negative and total 100")
-	}
-
-	return m.withPersistedMutation(host, func() error {
-		var transformErr error
-		if err := m.modifyRoute(host, serviceHost, func(handler *Handler) {
-			stableFound := false
-			for _, upstream := range handler.Upstreams {
-				switch upstream.Dial {
-				case stable:
-					stableFound = true
-				case canary:
-				default:
-					transformErr = fmt.Errorf("route contains unexpected upstream %s; remove it before canary deployment", upstream.Dial)
-					return
-				}
-			}
-			if !stableFound {
-				transformErr = fmt.Errorf("stable upstream %s not found for service %s", stable, serviceHost)
-				return
-			}
-			handler.Upstreams = weightedUpstreams(
-				UpstreamWeight{Dial: stable, Weight: stableWeight},
-				UpstreamWeight{Dial: canary, Weight: canaryWeight},
-			)
-			setStockWeightedPolicy(handler)
-		}); err != nil {
-			return err
-		}
-		if transformErr != nil {
-			return transformErr
-		}
-		return m.verifyUpstreamWeights(host, serviceHost, map[string]int{
-			stable: stableWeight,
-			canary: canaryWeight,
-		})
-	})
-}
-
-func setStockWeightedPolicy(handler *Handler) {
-	if handler.LoadBalancing == nil {
-		handler.LoadBalancing = &LoadBalancing{}
-	}
-	handler.LoadBalancing.SelectionPolicy = &SelectionPolicy{Policy: "random"}
-}
-
-func weightedUpstreams(weights ...UpstreamWeight) []*Upstream {
-	divisor := 0
-	for _, weighted := range weights {
-		if weighted.Weight > 0 {
-			if divisor == 0 {
-				divisor = weighted.Weight
-			} else {
-				divisor = greatestCommonDivisor(divisor, weighted.Weight)
-			}
-		}
-	}
-	if divisor == 0 {
-		return nil
-	}
-	var upstreams []*Upstream
-	for _, weighted := range weights {
-		for i := 0; i < weighted.Weight/divisor; i++ {
-			upstreams = append(upstreams, &Upstream{Dial: weighted.Dial})
-		}
-	}
-	return upstreams
-}
-
-func greatestCommonDivisor(a, b int) int {
-	for b != 0 {
-		a, b = b, a%b
-	}
-	return a
-}
-
-// modifyRoute finds the route for serviceHost and applies a transformation to
-// only its Azud-owned reverse_proxy handler.
-func (m *Manager) modifyRoute(host, serviceHost string, transform func(*Handler)) error {
-	routesPath := "/config/apps/http/servers/srv0/routes"
-	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
-	if err != nil {
-		return fmt.Errorf("failed to read routes: %w", err)
-	}
-	rawRoutes, routes, err := parseRouteIdentities(data)
-	if err != nil {
-		return err
-	}
-	for i, route := range routes {
-		if !routeMatchesHost(route, serviceHost) {
-			continue
-		}
-		if !isAzudOwnedRoute(route) {
-			return fmt.Errorf("refusing to update canary weights on foreign route for host %s", serviceHost)
-		}
-		handler, handlerIndex, err := parseReverseProxyIdentity(rawRoutes[i])
-		if err != nil {
-			return err
-		}
-		rawRoute, err := decodeJSONObject(rawRoutes[i])
-		if err != nil {
-			return err
-		}
-		rawHandlers, err := jsonObjectSlice(rawRoute["handle"])
-		if err != nil || handlerIndex >= len(rawHandlers) {
-			return fmt.Errorf("failed to locate owned reverse_proxy handler")
-		}
-		rawHandler := rawHandlers[handlerIndex]
-		transform(handler)
-		if handler.LoadBalancing == nil || handler.LoadBalancing.SelectionPolicy == nil {
-			return fmt.Errorf("canary route has no selection policy")
-		}
-		desiredUpstreamsData, err := json.Marshal(handler.Upstreams)
-		if err != nil {
-			return err
-		}
-		desiredUpstreams, err := decodeJSONValue(desiredUpstreamsData)
-		if err != nil {
-			return err
-		}
-		mergedUpstreams := mergeRawUpstreamValues(rawHandler["upstreams"], desiredUpstreams)
-		handlerPath := handlerAPIPath(routesPath, i, handlerIndex, handler)
-		upstreamMethod := "PATCH"
-		if _, exists := rawHandler["upstreams"]; !exists {
-			upstreamMethod = "PUT"
-		}
-		if _, err := m.caddyClient.apiRequest(host, upstreamMethod, handlerPath+"/upstreams", mergedUpstreams); err != nil {
-			return fmt.Errorf("failed to update canary upstreams: %w", err)
-		}
-		rawLoadBalancingValue, loadBalancingExists := rawHandler["load_balancing"]
-		if !loadBalancingExists {
-			body := map[string]interface{}{"selection_policy": handler.LoadBalancing.SelectionPolicy}
-			if _, err := m.caddyClient.apiRequest(host, "PUT", handlerPath+"/load_balancing", body); err != nil {
-				return fmt.Errorf("failed to create canary load balancing policy: %w", err)
-			}
-			return nil
-		}
-		rawLoadBalancing, ok := rawLoadBalancingValue.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("owned route has invalid load_balancing configuration")
-		}
-		selectionMethod := "PATCH"
-		if _, exists := rawLoadBalancing["selection_policy"]; !exists {
-			selectionMethod = "PUT"
-		}
-		if _, err := m.caddyClient.apiRequest(host, selectionMethod, handlerPath+"/load_balancing/selection_policy", handler.LoadBalancing.SelectionPolicy); err != nil {
-			return fmt.Errorf("failed to update canary selection policy: %w", err)
-		}
-		return nil
-	}
-	return fmt.Errorf("no route found for host %s", serviceHost)
-}
-
-type UpstreamWeight struct {
-	Dial   string
-	Weight int
-}
-
-// GetUpstreamWeights returns all upstreams with their weights for a service
-// using route-specific API operations.
-func (m *Manager) GetUpstreamWeights(host, serviceHost string) ([]UpstreamWeight, error) {
-	routesPath := "/config/apps/http/servers/srv0/routes"
-	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
-	if err != nil {
-		return nil, err
-	}
-	rawRoutes, routes, err := parseRouteIdentities(data)
-	if err != nil {
-		return nil, err
-	}
-	for i, route := range routes {
-		if !routeMatchesHost(route, serviceHost) {
-			continue
-		}
-		if !isAzudOwnedRoute(route) {
-			return nil, fmt.Errorf("refusing to read canary weights from foreign route for host %s", serviceHost)
-		}
-		handler, _, err := parseReverseProxyIdentity(rawRoutes[i])
-		if err != nil {
-			return nil, err
-		}
-		return extractWeights(handler.Upstreams), nil
-	}
-	return nil, fmt.Errorf("service %s not found", serviceHost)
-}
-
-func (m *Manager) verifyUpstreamWeights(host, serviceHost string, expected map[string]int) error {
-	weights, err := m.GetUpstreamWeights(host, serviceHost)
-	if err != nil {
-		return fmt.Errorf("failed to read back upstream weights: %w", err)
-	}
-	actual := make(map[string]int, len(weights))
-	for _, weighted := range weights {
-		actual[weighted.Dial] = weighted.Weight
-	}
-	for dial, want := range expected {
-		if actual[dial] != want {
-			return fmt.Errorf("upstream %s weight readback is %d, want %d", dial, actual[dial], want)
-		}
-	}
-	return nil
-}
-
-func extractWeights(upstreams []*Upstream) []UpstreamWeight {
-	if len(upstreams) == 0 {
-		return nil
-	}
-	counts := make(map[string]int)
-	order := make([]string, 0, len(upstreams))
-	for _, upstream := range upstreams {
-		if counts[upstream.Dial] == 0 {
-			order = append(order, upstream.Dial)
-		}
-		counts[upstream.Dial]++
-	}
-	weights := make([]UpstreamWeight, 0, len(order))
-	for _, dial := range order {
-		weights = append(weights, UpstreamWeight{
-			Dial:   dial,
-			Weight: counts[dial] * 100 / len(upstreams),
-		})
-	}
-	return weights
 }
 
 // isValidHeaderName checks if s is a valid HTTP header field name per RFC 7230.

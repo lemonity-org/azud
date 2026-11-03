@@ -278,43 +278,15 @@ func TestValidate_CanaryConfig(t *testing.T) {
 		name    string
 		canary  CanaryConfig
 		wantErr bool
-		errMsg  string
 	}{
 		{
-			name: "valid canary config",
-			canary: CanaryConfig{
-				Enabled:       true,
-				InitialWeight: 10,
-				StepWeight:    10,
-			},
-			wantErr: false,
+			name:    "enabled is refused",
+			canary:  CanaryConfig{Enabled: true},
+			wantErr: true,
 		},
 		{
-			name: "invalid initial weight",
-			canary: CanaryConfig{
-				Enabled:       true,
-				InitialWeight: 150, // > 100
-			},
-			wantErr: true,
-			errMsg:  "initial_weight",
-		},
-		{
-			name: "negative initial weight",
-			canary: CanaryConfig{
-				Enabled:       true,
-				InitialWeight: -10,
-			},
-			wantErr: true,
-			errMsg:  "initial_weight",
-		},
-		{
-			name: "invalid step weight",
-			canary: CanaryConfig{
-				Enabled:    true,
-				StepWeight: 200,
-			},
-			wantErr: true,
-			errMsg:  "step_weight",
+			name:   "values with enabled off stay accepted",
+			canary: CanaryConfig{InitialWeight: 150, StepWeight: -1, StepInterval: time.Minute, AutoPromote: true},
 		},
 	}
 
@@ -337,17 +309,13 @@ func TestValidate_CanaryConfig(t *testing.T) {
 
 			err := Validate(cfg)
 			if tt.wantErr {
-				if err == nil {
-					t.Errorf("expected error containing %q, got nil", tt.errMsg)
-					return
+				if err == nil || !strings.Contains(err.Error(), "deploy.canary.enabled") || !strings.Contains(err.Error(), "removed in Azud 2") {
+					t.Fatalf("Validate() = %v, want the removal error", err)
 				}
-				if !strings.Contains(err.Error(), tt.errMsg) {
-					t.Errorf("expected error containing %q, got %q", tt.errMsg, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("expected no error, got %v", err)
-				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() = %v", err)
 			}
 		})
 	}

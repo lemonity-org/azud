@@ -660,7 +660,8 @@ type DeployConfig struct {
 	// to false.
 	AllowUnverifiedImage bool `yaml:"allow_unverified_image"`
 
-	// Canary deployment configuration
+	// Canary keys do nothing. They parse so that stored releases that set them
+	// stay readable, and Validate refuses enabled.
 	Canary CanaryConfig `yaml:"canary"`
 }
 
@@ -700,22 +701,14 @@ func (c *Config) MaxStopTimeout() time.Duration {
 	return maxTimeout
 }
 
-// CanaryConfig holds canary deployment settings
+// CanaryConfig holds keys that no deploy acts on. Validate refuses Enabled, and
+// FromRelease clears them all.
 type CanaryConfig struct {
-	// Enable canary deployment mode
-	Enabled bool `yaml:"enabled"`
-
-	// Initial percentage of traffic to canary (0-100)
-	InitialWeight int `yaml:"initial_weight"`
-
-	// Percentage increase per step during auto-promote
-	StepWeight int `yaml:"step_weight"`
-
-	// Time between weight increases during auto-promote
-	StepInterval time.Duration `yaml:"step_interval"`
-
-	// Automatically promote canary if healthy
-	AutoPromote bool `yaml:"auto_promote"`
+	Enabled       bool          `yaml:"enabled"`
+	InitialWeight int           `yaml:"initial_weight"`
+	StepWeight    int           `yaml:"step_weight"`
+	StepInterval  time.Duration `yaml:"step_interval"`
+	AutoPromote   bool          `yaml:"auto_promote"`
 }
 
 // SSHConfig holds SSH connection settings

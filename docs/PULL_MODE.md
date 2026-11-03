@@ -286,7 +286,8 @@ digest; sign the bundle digest that `azud release publish` prints.
 values for them are ignored (the repository's `deploy.yml` sets several of
 them for push mode). If the server leaves `ssh.command_timeout` unset, it is
 derived from the bundle's deploy and stop timeouts. Everything else, including the app's own route, comes
-from the bundle. A bundle for another service, another image
+from the bundle, except `deploy.canary`, which is ignored because canary deploys
+are removed. A bundle for another service, another image
 repository, or a host other than this server is refused. Hooks never run for
 a bundle.
 

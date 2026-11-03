@@ -75,17 +75,6 @@ func ConfigWithSSL() *config.Config {
 	return cfg
 }
 
-// ConfigWithCanary returns a config with canary deployments enabled
-func ConfigWithCanary() *config.Config {
-	cfg := MinimalConfig()
-	cfg.Deploy.Canary = config.CanaryConfig{
-		Enabled:       true,
-		InitialWeight: 10,
-		StepWeight:    10,
-	}
-	return cfg
-}
-
 // AssertNoError fails the test if err is not nil
 func AssertNoError(t *testing.T, err error) {
 	t.Helper()

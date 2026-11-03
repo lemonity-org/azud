@@ -482,20 +482,12 @@ func Validate(cfg *Config) error {
 		}
 	}
 
-	// Validate canary configuration
+	// Other deploy.canary keys do nothing, so a repository may leave them set.
 	if cfg.Deploy.Canary.Enabled {
-		if cfg.Deploy.Canary.InitialWeight < 0 || cfg.Deploy.Canary.InitialWeight > 100 {
-			errs = append(errs, ValidationError{
-				Field:   "deploy.canary.initial_weight",
-				Message: "initial_weight must be between 0 and 100",
-			})
-		}
-		if cfg.Deploy.Canary.StepWeight < 0 || cfg.Deploy.Canary.StepWeight > 100 {
-			errs = append(errs, ValidationError{
-				Field:   "deploy.canary.step_weight",
-				Message: "step_weight must be between 0 and 100",
-			})
-		}
+		errs = append(errs, ValidationError{
+			Field:   "deploy.canary.enabled",
+			Message: "canary deploys are removed in Azud 2; remove deploy.canary from the configuration",
+		})
 	}
 
 	if cfg.Proxy.AppPort < 0 || cfg.Proxy.AppPort > 65535 {

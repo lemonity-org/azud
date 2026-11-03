@@ -67,8 +67,7 @@ type Deployer struct {
 }
 
 // newProxyConfigFromCfg builds a proxy.ProxyConfig from the deploy
-// configuration. Used by both Deployer and CanaryDeployer to avoid
-// duplicating the field mapping.
+// configuration.
 func newProxyConfigFromCfg(cfg *config.Config) *proxy.ProxyConfig {
 	pc := &proxy.ProxyConfig{
 		Hosts:                 cfg.Proxy.AllHosts(),
@@ -551,7 +550,7 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	}
 	// Caddy discovers automatic HTTPS names from route host matchers, while
 	// rolling deployments otherwise update only upstreams.
-	desiredService := BuildProxyServiceConfig(d.cfg, nil, nil)
+	desiredService := BuildProxyServiceConfig(d.cfg, nil)
 	if err := d.proxy.EnsureServiceHosts(host, desiredService); err != nil {
 		return removeNewContainer(fmt.Errorf("failed to ensure proxy hosts: %w", err))
 	}
@@ -1219,7 +1218,7 @@ func (d *Deployer) finalizeStandaloneRole(host, stableName, newName string, oldE
 }
 
 func (d *Deployer) buildContainerConfig(image, name, role string) *podman.ContainerConfig {
-	return NewAppContainerConfig(d.cfg, image, name, role, nil)
+	return NewAppContainerConfig(d.cfg, image, name, role)
 }
 
 // runPreDeployCommand runs the configured pre_deploy_command in a one-off
@@ -1247,12 +1246,12 @@ func (d *Deployer) waitForHealthy(host, container string) error {
 }
 
 func (d *Deployer) registerWithProxy(host, upstream string) error {
-	return d.proxy.RegisterService(host, BuildProxyServiceConfig(d.cfg, []string{upstream}, nil))
+	return d.proxy.RegisterService(host, BuildProxyServiceConfig(d.cfg, []string{upstream}))
 }
 
 // BuildProxyServiceConfig maps application configuration and discovered
 // upstreams to the complete desired proxy route.
-func BuildProxyServiceConfig(cfg *config.Config, upstreams []string, weights []proxy.UpstreamWeight) *proxy.ServiceConfig {
+func BuildProxyServiceConfig(cfg *config.Config, upstreams []string) *proxy.ServiceConfig {
 	livenessPath := ""
 	if !cfg.Proxy.Healthcheck.DisableLiveness && strings.TrimSpace(cfg.Proxy.Healthcheck.LivenessCmd) == "" {
 		livenessPath = cfg.Proxy.Healthcheck.GetLivenessPath()
@@ -1262,7 +1261,6 @@ func BuildProxyServiceConfig(cfg *config.Config, upstreams []string, weights []p
 		Host:                  cfg.Proxy.PrimaryHost(),
 		Hosts:                 cfg.Proxy.AllHosts(),
 		Upstreams:             upstreams,
-		UpstreamWeights:       weights,
 		UpstreamProtocol:      cfg.Proxy.UpstreamProtocol,
 		HealthPath:            livenessPath,
 		HealthInterval:        cfg.Proxy.Healthcheck.Interval,

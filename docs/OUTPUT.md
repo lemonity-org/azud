@@ -20,7 +20,7 @@ only reinforces state.
 
 | Destination | ANSI color | Structure | Width behavior |
 |---|---|---|---|
-| Interactive UTF-8 terminal | Theme-mapped ANSI | Unicode rules and gauges | Wide tables reflow when required |
+| Interactive UTF-8 terminal | Theme-mapped ANSI | Unicode rules | Wide tables reflow when required |
 | Interactive non-UTF-8 terminal | Theme-mapped ANSI | ASCII | Wide tables reflow when required |
 | Pipe, file, command substitution, or CI log | None | ASCII | Stable column layout |
 | `TERM=dumb` | None | ASCII | Stable column layout |
@@ -29,9 +29,9 @@ only reinforces state.
 
 Color is detected independently for stdout and stderr. Azud emits no spinners,
 carriage-return progress, ornamental motion, or soft terminal effects. Body
-text uses the terminal's default foreground. Classification labels, state,
-technical gauges, and structural rules use the terminal's theme-mapped ANSI
-palette so light, dark, and high-contrast themes retain control of legibility.
+text uses the terminal's default foreground. Classification labels and
+structural rules use the terminal's theme-mapped ANSI palette so light, dark,
+and high-contrast themes retain control of legibility.
 
 ## Automation
 
@@ -92,8 +92,6 @@ scripts extend the same fixed-label grammar for their own operations.
 | `ERROR` | Failed operation or invalid state | Red |
 | `DEBUG` | Verbose implementation detail | Gray |
 | `CMD` | Local or remote command | Gray |
-| `STATE` | Explicit state value | State-dependent |
-| `SPLIT` | Canary/stable traffic allocation | Blue and green |
 | `REC` | Reflowed table record | Blue |
 
 The written label is authoritative. Color is never the only indication of

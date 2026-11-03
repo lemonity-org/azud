@@ -19,7 +19,6 @@ const (
 	recordIndent     = "  "
 	recordGutter     = "  "
 	defaultRuleWidth = 56
-	trafficBarWidth  = 32
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -235,109 +234,6 @@ func (l *Logger) Println(format string, args ...interface{}) {
 	defer l.mu.Unlock()
 	_, _ = fmt.Fprintf(l.out, format+"\n", args...)
 	l.outStarted = true
-}
-
-// Phase represents a single step in a deployment pipeline.
-type Phase struct {
-	Name     string
-	Complete bool
-}
-
-// TrafficBar renders the canary/stable traffic split as a fixed technical
-// gauge plus explicit written percentages.
-func (l *Logger) TrafficBar(canaryPct int, canaryLabel, stableLabel string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	canaryPct = clamp(canaryPct, 0, 100)
-	stablePct := 100 - canaryPct
-	barWidth := trafficBarWidth
-	if columns := l.outputWidth(); columns > 0 {
-		barWidth = columns - 19
-		if barWidth < 8 {
-			l.writeOutRecord("SPLIT", Blue, fmt.Sprintf("%03d/%03d", canaryPct, stablePct))
-			l.writeTrafficDetails(canaryPct, canaryLabel, stablePct, stableLabel)
-			return
-		}
-		if barWidth > trafficBarWidth {
-			barWidth = trafficBarWidth
-		}
-	}
-	canaryCells := barWidth * canaryPct / 100
-	stableCells := barWidth - canaryCells
-
-	canaryRune := "#"
-	stableRune := "-"
-	if supportsUnicode(l.out) {
-		canaryRune = SymFilled
-		stableRune = SymEmpty
-	}
-
-	canaryBar := styleForWriter(l.out, Blue, strings.Repeat(canaryRune, canaryCells), false)
-	stableBar := styleForWriter(l.out, Green, strings.Repeat(stableRune, stableCells), false)
-	bar := "[" + canaryBar + stableBar + "]"
-	l.writeOutRecord("SPLIT", Blue, fmt.Sprintf("%s %03d/%03d", bar, canaryPct, stablePct))
-	l.writeTrafficDetails(canaryPct, canaryLabel, stablePct, stableLabel)
-}
-
-func (l *Logger) writeTrafficDetails(canaryPct int, canaryLabel string, stablePct int, stableLabel string) {
-	details := recordMessage("%d%% %s / %d%% %s", canaryPct, canaryLabel, stablePct, stableLabel)
-	width := l.outputWidth()
-	if width == 0 {
-		l.writeContinuation(l.out, details)
-		return
-	}
-	for _, line := range wrapWordsDisplay(details, width-9) {
-		l.writeContinuation(l.out, line)
-	}
-}
-
-// HostPhase renders a host followed by explicit complete and pending phases.
-func (l *Logger) HostPhase(host string, phases []Phase) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	complete, pending := "[x]", "[ ]"
-	if supportsUnicode(l.out) {
-		complete, pending = SymHeader, SymPending
-	}
-
-	parts := make([]string, 0, len(phases))
-	for _, phase := range phases {
-		name := SanitizeTerminal(phase.Name)
-		if phase.Complete {
-			parts = append(parts, styleForWriter(l.out, Green, complete, false)+" "+name)
-		} else {
-			parts = append(parts, styleForWriter(l.out, Gray, pending, false)+" "+name)
-		}
-	}
-
-	message := SanitizeTerminal(host)
-	if len(parts) > 0 {
-		message += " / " + strings.Join(parts, "  ")
-	}
-	l.writeOutRecord("HOST", Blue, message)
-}
-
-// StatusBadge renders a key-value record with an explicit uppercase state.
-func (l *Logger) StatusBadge(label, status string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	tone := Blue
-	switch strings.ToLower(status) {
-	case "running":
-		tone = Green
-	case "deploying":
-		tone = Yellow
-	case "promoting":
-		tone = Blue
-	case "rolling_back":
-		tone = Red
-	}
-
-	chip := styleForWriter(l.out, tone, "["+strings.ToUpper(SanitizeTerminal(status))+"]", true)
-	l.writeOutRecord("STATE", tone, padRight(SanitizeTerminal(label), 16)+" "+chip)
 }
 
 // Timer tracks and logs operation duration.
@@ -573,36 +469,6 @@ func padRight(value string, width int) string {
 	return value + strings.Repeat(" ", padding)
 }
 
-func wrapWordsDisplay(value string, width int) []string {
-	if width < 1 {
-		width = 1
-	}
-
-	var lines []string
-	for _, sourceLine := range strings.Split(normalizeLines(value), "\n") {
-		words := strings.Fields(sourceLine)
-		if len(words) == 0 {
-			lines = append(lines, "")
-			continue
-		}
-
-		current := words[0]
-		for _, word := range words[1:] {
-			if displayWidth(current)+1+displayWidth(word) <= width {
-				current += " " + word
-				continue
-			}
-			lines = append(lines, current)
-			current = word
-		}
-		lines = append(lines, current)
-	}
-	if len(lines) == 0 {
-		return []string{""}
-	}
-	return lines
-}
-
 func sanitizeTable(headers []string, rows [][]string) ([]string, [][]string) {
 	cleanHeaders := make([]string, len(headers))
 	for index, header := range headers {
@@ -634,17 +500,6 @@ func sum(values []int) int {
 	return total
 }
 
-// clamp restricts value to the inclusive range [low, high].
-func clamp(value, low, high int) int {
-	if value < low {
-		return low
-	}
-	if value > high {
-		return high
-	}
-	return value
-}
-
 // Package-level functions for convenience.
 
 func Info(format string, args ...interface{}) {
@@ -673,16 +528,4 @@ func SetVerbose(verbose bool) {
 
 func Println(format string, args ...interface{}) {
 	DefaultLogger.Println(format, args...)
-}
-
-func TrafficBar(canaryPct int, canaryLabel, stableLabel string) {
-	DefaultLogger.TrafficBar(canaryPct, canaryLabel, stableLabel)
-}
-
-func HostPhase(host string, phases []Phase) {
-	DefaultLogger.HostPhase(host, phases)
-}
-
-func StatusBadge(label, status string) {
-	DefaultLogger.StatusBadge(label, status)
 }

@@ -11,6 +11,15 @@ release notes for the corresponding signed tag.
   Before you upgrade, run `azud scale <role>=1` with 1.x for every role you
   scaled. `azud proxy reconcile` no longer counts the extra instances as
   upstreams, and no command removes them for you.
+- Removed every `azud canary` command, for Azud 2.0. A release rolls out
+  with zero downtime and rolls back on failure, so use `azud deploy` instead.
+  `deploy.canary.enabled: true` is now a configuration error; other
+  `deploy.canary` keys do nothing and can stay until you remove them. A stored
+  release that enables canary still loads, and the key is ignored. Before you
+  upgrade, run `azud canary promote` or `azud canary rollback` with 1.x to end
+  a running canary. `azud proxy reconcile --repair` no longer refuses to run
+  beside one: it routes all traffic to the stable container, and no command
+  removes the `<service>-canary` container for you.
 
 ## 1.7.0 - 2026-11-03
 

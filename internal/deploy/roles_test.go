@@ -60,16 +60,14 @@ func roleTestConfig() *config.Config {
 
 func TestNewAppContainerConfigAppliesRoleSemantics(t *testing.T) {
 	cfg := roleTestConfig()
-	worker := NewAppContainerConfig(cfg, cfg.Image, "shop-worker-new", "worker", map[string]string{
-		"azud.service":  "spoofed",
-		"azud.instance": "2",
-	})
+	cfg.Servers["worker"].Labels["azud.service"] = "spoofed"
+	worker := NewAppContainerConfig(cfg, cfg.Image, "shop-worker-new", "worker")
 
 	if worker.Labels["azud.managed"] != "true" || worker.Labels["azud.service"] != "shop" || worker.Labels["azud.role"] != "worker" {
 		t.Fatalf("managed role labels can be spoofed: %#v", worker.Labels)
 	}
-	if worker.Labels["team"] != "jobs" || worker.Labels["azud.instance"] != "2" {
-		t.Fatalf("role and caller labels were not preserved: %#v", worker.Labels)
+	if worker.Labels["team"] != "jobs" {
+		t.Fatalf("role labels were not preserved: %#v", worker.Labels)
 	}
 	if worker.Env["GLOBAL"] != "yes" || worker.Env["ROLE_ENV"] != "worker" {
 		t.Fatalf("role environment did not override global environment: %#v", worker.Env)
@@ -94,7 +92,7 @@ func TestNewAppContainerConfigAppliesRoleSemantics(t *testing.T) {
 		t.Fatalf("worker aliases = %v", got)
 	}
 
-	web := NewAppContainerConfig(cfg, cfg.Image, "shop-new", "web", nil)
+	web := NewAppContainerConfig(cfg, cfg.Image, "shop-new", "web")
 	if !reflect.DeepEqual(web.Ports, []string{"127.0.0.1::3000"}) {
 		t.Fatalf("web host ports = %v", web.Ports)
 	}
@@ -426,7 +424,7 @@ func stopFirstTestDeployer(fake *fakeContainerLifecycle) (*Deployer, *podman.Con
 	worker.Hosts = []string{"host"}
 	worker.Strategy = "stop_first"
 	cfg.Servers["worker"] = worker
-	containerCfg := NewAppContainerConfig(cfg, cfg.Image, "shop-worker-new", "worker", nil)
+	containerCfg := NewAppContainerConfig(cfg, cfg.Image, "shop-worker-new", "worker")
 	return &Deployer{
 		cfg:        cfg,
 		containers: fake,

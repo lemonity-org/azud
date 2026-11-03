@@ -33,9 +33,6 @@ const (
 	SymHeader  = "■"
 	SymHost    = "◆"
 	SymLine    = "───"
-	SymFilled  = "█"
-	SymEmpty   = "░"
-	SymPending = "□"
 	SymRail    = "│"
 )
 

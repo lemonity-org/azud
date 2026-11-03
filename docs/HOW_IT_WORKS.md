@@ -32,8 +32,8 @@ Azud manages Caddy as the reverse proxy by default:
 
 Each Azud-owned route and reverse-proxy handler has a stable Caddy `@id`.
 `azud proxy reconcile --check` reports drift between configuration, managed
-containers, canary state, and the live route; `--repair` explicitly restores
-that desired state without touching routes owned by other IDs.
+containers, and the live route; `--repair` explicitly restores that desired
+state without touching routes owned by other IDs.
 
 Caddy's admin API never listens on TCP. In every network mode it is a unix
 socket, `/run/azud-admin/admin.sock` (mode `0600`), inside a `0700` tmpfs that
@@ -53,8 +53,8 @@ binary needs it to start), and `no-new-privileges`. Caddy's state lives in the
 `caddy_data` and `caddy_config` volumes.
 
 Azud labels the proxy container with `azud.proxy.spec`. `azud proxy boot`,
-`azud proxy reboot`, `azud deploy` and canary deploys recreate a proxy created
-by an older release once: stop, normalize the autosave, rename the old
+`azud proxy reboot` and `azud deploy` recreate a proxy created by an older
+release once: stop, normalize the autosave, rename the old
 container to `azud-proxy-legacy`, start the new container, wait for the admin
 socket, remove the old container, then restore the configuration. If the new
 container does not answer, Azud removes it, puts back the old container and
@@ -93,21 +93,10 @@ This keeps CI/CD fast and avoids pushing large images from a laptop.
 ## Configuration and durable operational state
 
 The CLI reads desired state from `config/deploy.yml`, keeping deploys
-reproducible and version-controlled. It also keeps a small deployment and canary
-journal in `AZUD_STATE_DIR` (`~/.local/share/azud` for normal Unix users or
-`/var/lib/azud` for root). CI must persist that directory so a clean checkout can
-find the prior stable version, roll back, or continue a canary safely.
-
-## Canary Deployments
-
-Canaries split traffic between a stable version and a new version. Azud can
-deploy a canary, adjust traffic weight, and promote or roll back:
-
-```bash
-azud canary deploy --version v1.2.3 --weight 10
-azud canary weight 50
-azud canary promote
-```
+reproducible and version-controlled. It also keeps a small deployment journal in
+`AZUD_STATE_DIR` (`~/.local/share/azud` for normal Unix users or `/var/lib/azud`
+for root). CI must persist that directory so a clean checkout can find the prior
+stable version and roll back.
 
 ## Roles and Hosts
 

@@ -59,7 +59,7 @@ func DirQuoted(user string) string {
 }
 
 // LocalDir returns the state directory path for the current local user.
-// This is used for local state files (e.g., canary state).
+// This is used for local state files (e.g., deployment history).
 func LocalDir() (string, error) {
 	if configured := os.Getenv("AZUD_STATE_DIR"); configured != "" {
 		if !filepath.IsAbs(configured) {
@@ -78,20 +78,6 @@ func LocalDir() (string, error) {
 	}
 
 	return filepath.Join(home, UserStateDirName), nil
-}
-
-// EnsureLocalDir creates the local state directory if it doesn't exist.
-func EnsureLocalDir() (string, error) {
-	dir, err := LocalDir()
-	if err != nil {
-		return "", err
-	}
-
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create state directory: %w", err)
-	}
-
-	return dir, nil
 }
 
 // LockFile returns the path to a lock file for the given name.

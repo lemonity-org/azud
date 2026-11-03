@@ -282,21 +282,6 @@ func TestBuildServiceRouteRetriesWhileNoUpstreamIsAvailable(t *testing.T) {
 	}
 }
 
-func TestBuildServiceRouteUsesReducedWeightedUpstreams(t *testing.T) {
-	route := (&Manager{}).buildServiceRoute(&ServiceConfig{
-		Name: "shop", Host: "shop.example.com",
-		UpstreamWeights: []UpstreamWeight{{Dial: "stable:3000", Weight: 80}, {Dial: "canary:3000", Weight: 20}},
-	})
-	handler, _, ok := reverseProxyHandler(route)
-	if !ok || handler.LoadBalancing.SelectionPolicy.Policy != "random" {
-		t.Fatalf("weighted policy = %#v", handler.LoadBalancing)
-	}
-	want := []*Upstream{{Dial: "stable:3000"}, {Dial: "stable:3000"}, {Dial: "stable:3000"}, {Dial: "stable:3000"}, {Dial: "canary:3000"}}
-	if !reflect.DeepEqual(handler.Upstreams, want) {
-		t.Fatalf("weighted upstreams = %#v, want %#v", handler.Upstreams, want)
-	}
-}
-
 func TestReconcileRouteStatusOnlyOwnsStableIDOrLegacyHost(t *testing.T) {
 	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
 		Name: "shop", Host: "shop.example.com", Upstreams: []string{"shop:3000"},
@@ -399,7 +384,7 @@ func TestCommandUsesResumeForDirectAndQuadletCommands(t *testing.T) {
 	}
 }
 
-func TestRoutesEquivalentIgnoresUpstreamOrderAndCompletedCanaryPolicy(t *testing.T) {
+func TestRoutesEquivalentIgnoresUpstreamOrderAndUniformRandomPolicy(t *testing.T) {
 	desired := (&Manager{}).buildServiceRoute(&ServiceConfig{
 		Name: "shop", Host: "shop.example.com", Upstreams: []string{"shop:3000", "shop-2:3000", "shop-10:3000"},
 	})
@@ -544,28 +529,6 @@ func TestAddUpstreamIfMissingIsIdempotent(t *testing.T) {
 	got = addUpstreamIfMissing(got, "app-2:3000")
 	if len(got) != 2 || got[1].Dial != "app-2:3000" {
 		t.Fatalf("new upstream was not added: %#v", got)
-	}
-}
-
-func TestWeightedUpstreamsUseStockCaddySchema(t *testing.T) {
-	upstreams := weightedUpstreams(
-		UpstreamWeight{Dial: "stable:3000", Weight: 90},
-		UpstreamWeight{Dial: "canary:3000", Weight: 10},
-	)
-	if len(upstreams) != 10 {
-		t.Fatalf("weighted upstream count = %d, want reduced ratio of 10", len(upstreams))
-	}
-	weights := extractWeights(upstreams)
-	if len(weights) != 2 || weights[0] != (UpstreamWeight{Dial: "stable:3000", Weight: 90}) || weights[1] != (UpstreamWeight{Dial: "canary:3000", Weight: 10}) {
-		t.Fatalf("extracted weights = %#v", weights)
-	}
-
-	payload, err := json.Marshal(&Handler{Handler: "reverse_proxy", Upstreams: upstreams})
-	if err != nil {
-		t.Fatalf("marshal handler: %v", err)
-	}
-	if strings.Contains(string(payload), "weight") || strings.Contains(string(payload), "weighted_round_robin") {
-		t.Fatalf("stock Caddy payload contains unsupported weighted fields: %s", payload)
 	}
 }
 
