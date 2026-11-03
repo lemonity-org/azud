@@ -1,0 +1,63 @@
+service: fixture
+image: ghcr.io/acme/fixture
+minimum_version: "1.6.0"
+registry:
+  server: ghcr.io
+  username: bot
+  password: [AZUD_REGISTRY_PASSWORD]
+builder:
+  dockerfile: Dockerfile
+servers:
+  web:
+    hosts: [app-1]
+    labels:
+      team: platform
+    runtime:
+      read_only: true
+      tmpfs:
+        - path: /tmp
+          size: 64m
+  worker:
+    hosts: [app-1]
+    cmd: bin/worker
+env:
+  clear:
+    PUBLIC_HOST: ${PUBLIC_HOST}
+  secret: [DATABASE_URL]
+proxy:
+  host: fixture.example.com
+  app_port: 3000
+  ssl: true
+  acme_email: ops@example.com
+  healthcheck:
+    path: /up
+deploy:
+  readiness_delay: 5s
+  stop_timeout: 60s
+  rollback_on_failure: true
+  canary:
+    enabled: false
+accessories:
+  db:
+    image: postgres:17
+    host: db-1
+  cache:
+    image: valkey:8
+    host: app-1
+cron:
+  sweep:
+    schedule: "@hourly"
+    command: bin/sweep
+ssh:
+  user: deploy
+  command_timeout: 2m
+podman:
+  rootless: true
+agent:
+  source: bundle
+  track: production
+  verify_command: "cosign verify"
+secrets_path: .azud/secrets
+secrets_remote_path: /srv/fixture/secrets
+release:
+  recipients: [RECIPIENT]
