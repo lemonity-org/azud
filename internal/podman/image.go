@@ -193,7 +193,6 @@ type ManifestBuildConfig struct {
 	BuildConfig
 	Platforms []string // e.g., ["linux/amd64", "linux/arm64"]
 	Push      bool
-	CacheTo   string
 	Output    string
 }
 
