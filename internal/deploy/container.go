@@ -76,24 +76,20 @@ func IsProxyRole(role string) bool {
 }
 
 // NewAppContainerConfig creates a standard role-aware application container
-// configuration. The extra labels parameter allows callers to add
-// deployment-specific labels (for example canary markers).
+// configuration.
 //
 // The Podman HEALTHCHECK is configured with the liveness probe path
 // (healthcheck.liveness_path, falling back to healthcheck.path). This
 // probe runs continuously inside the container and determines if it is
 // still functioning. The readiness probe is checked separately during
 // deployment to gate proxy registration.
-func NewAppContainerConfig(cfg *config.Config, image, name, role string, extraLabels map[string]string) *podman.ContainerConfig {
+func NewAppContainerConfig(cfg *config.Config, image, name, role string) *podman.ContainerConfig {
 	labels := make(map[string]string)
 	roleConfig, hasRole := cfg.Servers[role]
 	if hasRole {
 		for key, value := range roleConfig.Labels {
 			labels[key] = value
 		}
-	}
-	for k, v := range extraLabels {
-		labels[k] = v
 	}
 	// Managed labels are applied last so configuration cannot spoof ownership.
 	labels["azud.managed"] = "true"
@@ -171,11 +167,6 @@ func NewAppContainerConfig(cfg *config.Config, image, name, role string, extraLa
 	}
 
 	return containerCfg
-}
-
-// newAppContainerConfig retains an internal shorthand for web-only callers.
-func newAppContainerConfig(cfg *config.Config, image, name string, extraLabels map[string]string) *podman.ContainerConfig {
-	return NewAppContainerConfig(cfg, image, name, "web", extraLabels)
 }
 
 // waitForContainerHealthy polls a container's health status and also

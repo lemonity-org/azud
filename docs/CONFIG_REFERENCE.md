@@ -341,9 +341,6 @@ deploy:
   retain_history: 20
   rollback_on_failure: true
   allow_unverified_image: false
-  canary:
-    enabled: true
-    initial_weight: 10
 ```
 
 `pre_deploy_command` runs in a one-off `--rm` container from the **new image**

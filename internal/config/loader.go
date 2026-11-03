@@ -935,19 +935,6 @@ func applyDefaults(cfg *Config) {
 		cfg.Deploy.RetainHistory = 100
 	}
 
-	// Canary defaults (only apply if enabled)
-	if cfg.Deploy.Canary.Enabled {
-		if cfg.Deploy.Canary.InitialWeight == 0 {
-			cfg.Deploy.Canary.InitialWeight = 10
-		}
-		if cfg.Deploy.Canary.StepWeight == 0 {
-			cfg.Deploy.Canary.StepWeight = 10
-		}
-		if cfg.Deploy.Canary.StepInterval == 0 {
-			cfg.Deploy.Canary.StepInterval = 5 * time.Minute
-		}
-	}
-
 	// Builder defaults
 	if cfg.Builder.Dockerfile == "" {
 		cfg.Builder.Dockerfile = "Dockerfile"

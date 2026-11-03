@@ -37,15 +37,6 @@ azud app exec -- <command>
 azud app exec -it -- /bin/sh
 ```
 
-## Canary
-
-```bash
-azud canary deploy --version v1.2.3 --weight 10
-azud canary weight 50
-azud canary promote
-azud canary rollback
-```
-
 ## Secrets
 
 ```bash

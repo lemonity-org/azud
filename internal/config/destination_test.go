@@ -104,6 +104,21 @@ func TestLoaderMergesDestinationOverride(t *testing.T) {
 	}
 }
 
+func TestLoaderRefusesCanaryEnabledByDestinationOverride(t *testing.T) {
+	path := writeDestinationFixture(t)
+	destPath := filepath.Join(filepath.Dir(path), "deploy.staging.yml")
+	if err := os.WriteFile(destPath, []byte("deploy:\n  canary:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewLoader(path, "staging").Load(); err == nil || !strings.Contains(err.Error(), "removed in Azud 2") {
+		t.Fatalf("Load() = %v, want the removal error", err)
+	}
+	if _, err := NewLoader(path, "").Load(); err != nil {
+		t.Fatalf("Load() without the destination = %v", err)
+	}
+}
+
 func TestLoaderDestinationWithoutOverrideUsesBase(t *testing.T) {
 	path := writeDestinationFixture(t)
 

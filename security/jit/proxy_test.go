@@ -64,7 +64,7 @@ func TestControl_CaddyAdminIsPrivateUnixSocket(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load config: %v", err)
 			}
-			if app := deploy.NewAppContainerConfig(cfg, cfg.Image, "shop", "web", nil); app.Network != "azud" {
+			if app := deploy.NewAppContainerConfig(cfg, cfg.Image, "shop", "web"); app.Network != "azud" {
 				t.Fatalf("app network = %q, want azud", app.Network)
 			}
 			assertAdminCallsUsePrivateSocket(t, fake.snapshot(), topology.podman)

@@ -18,11 +18,11 @@ one or more Podman hosts.
 
 | Function | Implementation |
 |---|---|
-| Traffic changes | Blue-green and canary deployment procedures with health checks |
+| Traffic changes | Blue-green deployment procedures with health checks |
 | Ingress and TLS | Caddy reverse proxy with automatic HTTPS through Let's Encrypt |
 | Host topology | One or more hosts grouped by application role |
 | Desired state | Version-controlled YAML configuration |
-| Recovery state | Durable deployment and canary journal used for rollback and CI handoff |
+| Recovery state | Durable deployment journal used for rollback and CI handoff |
 | Operator output | Explicit status labels, terminal-aware color, and a stable plain mode |
 
 ## Features
@@ -30,7 +30,6 @@ one or more Podman hosts.
 - **Zero-downtime deployments** with blue-green pattern and health checks
 - **Automatic HTTPS** via Let's Encrypt through Caddy
 - **Multi-server deployments** with role-based server groups
-- **Canary deployments** for gradual rollouts
 - **Native cron jobs** with job locking and timeouts
 - **Accessory management** for databases, caches, and other services
 - **Rollback support** to any previous version
@@ -42,7 +41,7 @@ one or more Podman hosts.
 - `docs/GETTING_STARTED.md` - First deploy walkthrough
 - `docs/CONFIG_REFERENCE.md` - Configuration reference
 - `docs/HOW_IT_WORKS.md` - Architecture and deployment model
-- `docs/OPERATIONS.md` - Day-2 tasks (logs, canary, rollbacks)
+- `docs/OPERATIONS.md` - Day-2 tasks (logs, rollbacks)
 - `docs/PRODUCTION_CHECKLIST.md` - Production readiness checklist
 - `docs/TROUBLESHOOTING.md` - Common failures and fixes
 - `docs/CHEATSHEET.md` - Command quick reference
@@ -238,14 +237,6 @@ builder:
 | `azud cron boot` | Start scheduled tasks |
 | `azud cron run <name>` | Run a job immediately |
 | `azud cron list` | List all cron jobs |
-
-### Canary
-| Command | Description |
-|---------|-------------|
-| `azud canary deploy` | Deploy to small traffic % |
-| `azud canary weight <percentage>` | Adjust traffic percentage |
-| `azud canary promote` | Promote to full production |
-| `azud canary rollback` | Rollback canary |
 
 ## Configuration
 

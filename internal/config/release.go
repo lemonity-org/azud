@@ -18,7 +18,9 @@ import (
 // describe the host itself: agent, ssh, security, registry, builder, podman,
 // the secrets provider and paths, and hooks. The repository's deploy.yml sets several of them for push
 // mode, so a bundle's values are not an error; they are replaced, and their
-// keys returned as ignored when they differ from the server's.
+// keys returned as ignored when they differ from the server's. Canary deploys
+// are removed, so deploy.canary is cleared, and returned as ignored when the
+// bundle enabled it.
 //
 // A bundle must belong to the server's service and image repository and run
 // only on the server's hosts.
@@ -73,6 +75,10 @@ func FromRelease(base, dest []byte, server *Config) (*Config, []string, error) {
 	bundleShared, ownShared := sharedProxy(cfg.Proxy), sharedProxy(server.Proxy)
 	trust("proxy (settings shared by every app on the host)", &bundleShared, &ownShared)
 	applySharedProxy(&cfg.Proxy, server.Proxy)
+	if cfg.Deploy.Canary.Enabled {
+		ignored = append(ignored, "deploy.canary")
+	}
+	cfg.Deploy.Canary = CanaryConfig{}
 
 	// A timeout the server set stays binding, and Validate refuses a release
 	// that needs longer. One the server left to its default follows what

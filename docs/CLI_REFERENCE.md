@@ -448,63 +448,6 @@ hosts as `registry login`.
 
 ---
 
-### Canary Deployments
-
-Manage gradual rollouts using traffic splitting.
-
-#### `azud canary deploy`
-
-Start a canary deployment with a specific version and traffic weight.
-
-**Usage:**
-```bash
-azud canary deploy --version <tag> [flags]
-```
-
-**Flags:**
-*   `--version string` (Required): The version tag to deploy.
-*   `--weight int`: Initial traffic percentage (0-100). Default is 10 or configured value.
-*   `--skip-pull`: Skip image pull.
-*   `--skip-health`: Skip health checks.
-
-#### `azud canary promote`
-
-Promote the canary version to full production (100% traffic) and remove the old stable version.
-
-**Usage:**
-```bash
-azud canary promote
-```
-
-#### `azud canary rollback`
-
-Rollback the canary deployment, directing all traffic back to the stable version.
-
-**Usage:**
-```bash
-azud canary rollback
-```
-
-#### `azud canary weight`
-
-Adjust the traffic percentage routed to the canary version.
-
-**Usage:**
-```bash
-azud canary weight <percentage>
-```
-
-#### `azud canary status`
-
-Show the current status of the canary deployment (versions, weight, duration).
-
-**Usage:**
-```bash
-azud canary status
-```
-
----
-
 ### Proxy Management
 
 Manage the Caddy reverse proxy.
@@ -538,8 +481,8 @@ Show proxy status and route count.
 **Flags:** `--host`
 
 #### `azud proxy reconcile`
-Compare the configured service, running Azud-managed web containers, persisted
-canary state, and the service's ID-owned Caddy route.
+Compare the configured service, running Azud-managed web containers, and the
+service's ID-owned Caddy route.
 
 ```bash
 azud proxy reconcile --check

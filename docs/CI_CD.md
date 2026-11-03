@@ -1,8 +1,8 @@
 # CI/CD Integration Guide
 
 Azud is designed for automated deployment pipelines. Configuration is kept in
-version control, while deployment history and in-progress canary state are
-durable operational data and must survive clean CI checkouts.
+version control, while deployment history is durable operational data and must
+survive clean CI checkouts.
 
 ## GitHub Actions
 
@@ -134,7 +134,7 @@ checks; do not parse the human-readable version report.
 
 ## Durable deployment state
 
-Azud writes history, locks, and canary state under the platform state directory
+Azud writes history and locks under the platform state directory
 (`~/.local/share/azud` for a normal Unix user, `/var/lib/azud` for root). Set
 `AZUD_STATE_DIR` to an absolute path to override it. State writes are atomic and
 serialized, but the storage itself must be shared across CI runs.
@@ -151,9 +151,8 @@ env:
 ```
 
 Do not run concurrent pipelines for the same service and state directory.
-Without the prior state, Azud cannot safely infer an earlier stable version or
-resume an in-progress canary, and those operations intentionally fail instead
-of guessing.
+Without the prior state, Azud cannot safely infer an earlier stable version, and
+that operation intentionally fails instead of guessing.
 
 ---
 

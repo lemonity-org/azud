@@ -160,6 +160,48 @@ env:
 	}
 }
 
+func TestFromReleaseClearsCanary(t *testing.T) {
+	const release = `service: app
+image: ghcr.io/acme/app
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: app.example.com
+`
+	const enabled = "deploy:\n  canary:\n    enabled: true\n    initial_weight: 150\n"
+	const disabled = "deploy:\n  canary:\n    enabled: false\n    initial_weight: 25\n"
+	tests := []struct {
+		name        string
+		base, dest  string
+		wantIgnored bool
+	}{
+		{name: "enabled in deploy.yml", base: release + enabled, wantIgnored: true},
+		{name: "enabled in the destination file", base: release, dest: enabled, wantIgnored: true},
+		{name: "turned off by the destination file", base: release + enabled, dest: disabled},
+		{name: "left set but off", base: release + disabled},
+		{name: "not set", base: release},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var dest []byte
+			if tt.dest != "" {
+				dest = []byte(tt.dest)
+			}
+			cfg, ignored, err := FromRelease([]byte(tt.base), dest, releaseServer(t))
+			if err != nil {
+				t.Fatalf("FromRelease: %v", err)
+			}
+			if !reflect.ValueOf(cfg.Deploy.Canary).IsZero() {
+				t.Errorf("Deploy.Canary = %+v, want it cleared", cfg.Deploy.Canary)
+			}
+			if got := slices.Contains(ignored, "deploy.canary"); got != tt.wantIgnored {
+				t.Errorf("ignored = %v, want deploy.canary reported: %v", ignored, tt.wantIgnored)
+			}
+		})
+	}
+}
+
 func TestFromReleaseRejectsAnotherServiceImageOrHost(t *testing.T) {
 	server := releaseServer(t)
 	release := func(service, image, host string) []byte {

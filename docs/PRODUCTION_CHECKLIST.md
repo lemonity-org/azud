@@ -52,7 +52,6 @@ Use this before the first production launch and after major changes.
 
 ## Day‑2 Operations
 
-- Canary flow tested (`azud canary deploy/promote`)
 - Systemd units enabled if you want auto‑start (`azud systemd enable`)
 
 ## Go‑Live

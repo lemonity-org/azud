@@ -125,77 +125,6 @@ func TestOutputErrorStaysOnStderr(t *testing.T) {
 	}
 }
 
-func TestTrafficBarPlainBoundariesAndClamp(t *testing.T) {
-	tests := []struct {
-		name       string
-		percentage int
-		wantBar    string
-		wantSplit  string
-	}{
-		{name: "zero", percentage: 0, wantBar: "[--------------------------------]", wantSplit: "000/100"},
-		{name: "quarter", percentage: 25, wantBar: "[########------------------------]", wantSplit: "025/075"},
-		{name: "hundred", percentage: 100, wantBar: "[################################]", wantSplit: "100/000"},
-		{name: "clamp low", percentage: -8, wantBar: "[--------------------------------]", wantSplit: "000/100"},
-		{name: "clamp high", percentage: 108, wantBar: "[################################]", wantSplit: "100/000"},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			usePlainProfile(t)
-			logger, out, _ := newTestLogger()
-			logger.TrafficBar(test.percentage, "canary (v2)", "stable (v1)")
-
-			got := out.String()
-			if !strings.Contains(got, test.wantBar+" "+test.wantSplit) {
-				t.Fatalf("traffic bar %q does not contain %q", got, test.wantBar+" "+test.wantSplit)
-			}
-			if strings.Contains(got, "\x1b") {
-				t.Fatalf("plain traffic bar contains ANSI: %q", got)
-			}
-		})
-	}
-}
-
-func TestTrafficBarNarrowDropsGaugeButKeepsExactSplit(t *testing.T) {
-	usePlainProfile(t)
-	logger, out, _ := newTestLogger()
-	logger.SetWidth(24)
-	logger.TrafficBar(25, "canary", "stable")
-
-	const want = "" +
-		"  SPLIT  025/075\n" +
-		"         25% canary /\n" +
-		"         75% stable\n"
-	if got := out.String(); got != want {
-		t.Fatalf("narrow traffic split = %q, want %q", got, want)
-	}
-}
-
-func TestHostPhasePlainUsesWrittenASCIIState(t *testing.T) {
-	usePlainProfile(t)
-	logger, out, _ := newTestLogger()
-	logger.HostPhase("app-01", []Phase{
-		{Name: "Pull", Complete: true},
-		{Name: "Health", Complete: false},
-	})
-
-	const want = "  HOST   app-01 / [x] Pull  [ ] Health\n"
-	if got := out.String(); got != want {
-		t.Fatalf("phase output = %q, want %q", got, want)
-	}
-}
-
-func TestStatusBadgePlainPairsStateWithText(t *testing.T) {
-	usePlainProfile(t)
-	logger, out, _ := newTestLogger()
-	logger.StatusBadge("Status:", "rolling_back")
-
-	const want = "  STATE  Status:          [ROLLING_BACK]\n"
-	if got := out.String(); got != want {
-		t.Fatalf("status output = %q, want %q", got, want)
-	}
-}
-
 func TestTablePlainAlignmentHasNoTrailingWhitespace(t *testing.T) {
 	usePlainProfile(t)
 	logger, out, _ := newTestLogger()
@@ -322,17 +251,6 @@ func TestRichTerminalUsesThemeMappedLabelsAndPlainMessages(t *testing.T) {
 	}
 }
 
-func TestStatusBadgePadsLabelsByDisplayWidth(t *testing.T) {
-	usePlainProfile(t)
-	logger, out, _ := newTestLogger()
-	logger.StatusBadge("État:", "running")
-
-	const want = "  STATE  État:            [RUNNING]\n"
-	if got := out.String(); got != want {
-		t.Fatalf("Unicode status label = %q, want %q", got, want)
-	}
-}
-
 func TestPlainSurfaceContainsNoANSIOrUnicodeStructure(t *testing.T) {
 	usePlainProfile(t)
 	logger, out, errOut := newTestLogger(true)
@@ -343,15 +261,13 @@ func TestPlainSurfaceContainsNoANSIOrUnicodeStructure(t *testing.T) {
 	logger.Debug("Debug")
 	logger.Command("command")
 	logger.Output("output")
-	logger.HostPhase("host", []Phase{{Name: "Pull", Complete: true}})
-	logger.TrafficBar(50, "canary", "stable")
 	logger.Error("Error")
 
 	combined := out.String() + errOut.String()
 	if strings.Contains(combined, "\x1b") {
 		t.Fatalf("plain surface contains ANSI: %q", combined)
 	}
-	for _, symbol := range []string{SymHeader, SymFilled, SymEmpty, SymPending, SymRail} {
+	for _, symbol := range []string{SymHeader, SymRail} {
 		if strings.Contains(combined, symbol) {
 			t.Fatalf("plain surface contains Unicode structure %q: %q", symbol, combined)
 		}
@@ -369,8 +285,6 @@ func TestRecordsNeutralizeControlSequences(t *testing.T) {
 	logger.Debug("debug %s", terminalPayload)
 	logger.Host("app\x1b[2J", "host %s", terminalPayload)
 	logger.Command("podman " + terminalPayload)
-	logger.HostPhase("app\x1b[2J", []Phase{{Name: "Pull" + terminalPayload}})
-	logger.StatusBadge("web"+terminalPayload, "running"+terminalPayload)
 	logger.Output(terminalPayload + "\n")
 	logger.Error("failed to stop: %s", terminalPayload)
 	logger.HostError("app-02", "exit: %s", terminalPayload)

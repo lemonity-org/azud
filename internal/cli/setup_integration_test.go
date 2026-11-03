@@ -139,18 +139,6 @@ func TestSetupIntegration(t *testing.T) {
 		"podman ps -a --filter label=azud.service=azud-it --filter label=azud.role=worker --format '{{.Names}}' | grep -E '^azud-it-worker-(old|new)-' | wc -l",
 		"0")
 
-	// Canary state is deliberately consumed from a second clean working
-	// directory while sharing only AZUD_STATE_DIR.
-	secondCheckout := filepath.Join(tempDir, "clean-checkout")
-	if err := os.MkdirAll(secondCheckout, 0755); err != nil {
-		t.Fatalf("create second checkout: %v", err)
-	}
-	runAzud(t, binaryPath, configPath, stateDir, tempDir, "canary", "deploy", "--version", "latest", "--weight", "10")
-	runAzud(t, binaryPath, configPath, stateDir, secondCheckout, "canary", "status")
-	runAzud(t, binaryPath, configPath, stateDir, secondCheckout, "canary", "weight", "50")
-	runAzud(t, binaryPath, configPath, stateDir, secondCheckout, "canary", "rollback")
-	assertHTTPAvailable(t, client, host, httpPort)
-
 	runAzud(t, binaryPath, configPath, stateDir, tempDir, "cron", "boot", "heartbeat", "--host", host)
 	assertContainerRunning(t, client, host, "azud-it-cron-heartbeat")
 	cronMounts := assertRemoteSuccess(t, client, host, "podman container inspect azud-it-cron-heartbeat --format '{{range .Mounts}}{{.Destination}} {{.RW}};{{end}}'")
@@ -282,9 +270,6 @@ deploy:
   deploy_timeout: 2m
   drain_timeout: 0s
   rollback_on_failure: true
-  canary:
-    enabled: true
-    initial_weight: 10
 
 podman:
   rootless: %t

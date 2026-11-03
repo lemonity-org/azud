@@ -728,7 +728,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Deployment history and canary state must survive clean hosted runners.
+      # Deployment history must survive clean hosted runners.
       # For stricter retention guarantees, mount a durable AZUD_STATE_DIR on a
       # self-hosted runner instead of relying on the GitHub cache lifecycle.
       - name: Restore Azud deployment state

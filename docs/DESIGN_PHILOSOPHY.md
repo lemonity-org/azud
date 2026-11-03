@@ -98,8 +98,8 @@ GitHub issues show recurring problems:
 - Deploy-branch getting incorrectly set during git sync
 
 **Azud's approach:** Desired state lives in version-controlled YAML. A small,
-access-controlled local journal records deployment and canary transitions so a
-clean CI checkout can roll back or continue an in-progress operation safely.
+access-controlled local journal records deployments so a clean CI checkout can
+roll back safely.
 
 ### 6. Bash Script Origins
 
@@ -137,7 +137,7 @@ No pre-validation of nginx configurations before deployment - failures happen at
 6. **Battle-Tested Components** - Use proven tools (Caddy, Podman), don't reinvent
 7. **Clear Output** - Know what's happening without parsing logs
 8. **Configuration-led state** - Desired state comes from config; the durable
-   operational journal exists only for safe history, rollback, and canary handoff
+   operational journal exists only for safe history and rollback
 
 ---
 

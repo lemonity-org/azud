@@ -296,7 +296,7 @@ func systemdSecretsPath(path string, rootless bool, user string) string {
 }
 
 func buildAppQuadletUnit(image, role string) *quadlet.ContainerUnit {
-	containerCfg := deploy.NewAppContainerConfig(cfg, image, deploy.RoleContainerName(cfg, role), role, nil)
+	containerCfg := deploy.NewAppContainerConfig(cfg, image, deploy.RoleContainerName(cfg, role), role)
 	after, requires := quadletNetworkOnlineDependencies(cfg.Podman.Rootless)
 
 	unit := &quadlet.ContainerUnit{

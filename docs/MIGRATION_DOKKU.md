@@ -45,7 +45,7 @@ Update DNS to point to the Azud server(s).
 ## 6) Differences to keep in mind
 
 - Azud uses configuration files instead of git push, plus a durable local state
-  directory for rollback history and in-progress canaries
+  directory for rollback history
 - Azud has built-in zero-downtime deploys via blue-green
 - Caddy manages HTTPS automatically
 

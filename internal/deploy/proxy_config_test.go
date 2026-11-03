@@ -44,7 +44,7 @@ func TestNewProxyConfigFromCfgIncludesCustomCertificates(t *testing.T) {
 		t.Fatalf("proxy-wide settings were not propagated: %#v", got)
 	}
 
-	route := BuildProxyServiceConfig(cfg, []string{"app:4000"}, nil)
+	route := BuildProxyServiceConfig(cfg, []string{"app:4000"})
 	if route.FlushInterval != "-1s" || route.StreamCloseDelay != "5m" {
 		t.Fatalf("route streaming settings were not propagated: %#v", route)
 	}
