@@ -314,13 +314,13 @@ func TestControl_ManifestBuildCommandsKeepPayloadsAsArguments(t *testing.T) {
 			Args:       map[string]string{"K" + payload: "V" + payload},
 			Target:     "target" + payload,
 			CacheFrom:  []string{"type=local,src=/tmp" + payload},
+			CacheTo:    "type=local,dest=/tmp" + payload,
 			NoCache:    true,
 			Pull:       true,
 			Secrets:    []string{"id=secret,src=/tmp" + payload},
 			SSH:        []string{"default" + payload},
 		},
 		Platforms: []string{"linux/amd64" + payload},
-		CacheTo:   "type=local,dest=/tmp" + payload,
 	}
 	args := podmanArgv(t, dir, cfg.ManifestBuildCommands()[1])
 	for _, want := range []string{
