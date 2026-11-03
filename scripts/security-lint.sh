@@ -119,7 +119,7 @@ if command -v govulncheck >/dev/null 2>&1; then
     fi
 else
     record ERROR "$RED" "govulncheck is required"
-    record INFO "$BLUE" "Install: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0"
+    record INFO "$BLUE" "Install: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0"
     ERRORS=$((ERRORS + 1))
 fi
 

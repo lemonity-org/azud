@@ -726,13 +726,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Deployment history and canary state must survive clean hosted runners.
       # For stricter retention guarantees, mount a durable AZUD_STATE_DIR on a
       # self-hosted runner instead of relying on the GitHub cache lifecycle.
       - name: Restore Azud deployment state
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.local/share/azud
           key: azud-state-${{ runner.os }}-${{ github.repository_id }}-${{ github.ref_name }}-${{ github.run_id }}
@@ -760,7 +760,7 @@ jobs:
   #   name: Run Tests
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
   #     - name: Run tests
   #       run: |
   #         # Add your test commands here
@@ -773,7 +773,7 @@ jobs:
   #   environment: staging
   #   needs: [test]
   #   steps:
-  #     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
   #     - name: Setup Azud
   #       uses: lemonity-org/azud@v1
   #       with:

@@ -104,7 +104,7 @@ func TestInitCreatesGitHubWorkflowAndGitignoreEntry(t *testing.T) {
 	if !strings.Contains(string(workflow), "uses: lemonity-org/azud@v1") {
 		t.Fatalf("generated workflow must use the maintained stable action tag")
 	}
-	if !strings.Contains(string(workflow), "actions/cache@caa296126883cff596d87d8935842f9db880ef25") ||
+	if !strings.Contains(string(workflow), "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9") ||
 		!strings.Contains(string(workflow), "cancel-in-progress: false") {
 		t.Fatalf("generated workflow must persist and serialize durable deployment state")
 	}

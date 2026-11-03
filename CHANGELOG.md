@@ -6,6 +6,16 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Updated dependencies. Go is 1.27.3, the build image is
+  `golang:1.27.3-alpine`, and the runtime image is `alpine:3.24`.
+  `golang.org/x/crypto` is v0.58.0, `golang.org/x/term` is v0.47.0, and
+  `golang.org/x/sys` is v0.49.0. GitHub Actions are `actions/checkout`
+  v7.0.1, `actions/setup-go` v7.0.0, `actions/cache` v6.1.0,
+  `actions/attest` v4.2.2, `softprops/action-gh-release` v3.0.3,
+  `docker/setup-buildx-action` v4.4.1, `docker/login-action` v4.7.0,
+  `docker/metadata-action` v6.2.0, and `docker/build-push-action` v7.4.0.
+  `golangci-lint` is v2.15.0 and `govulncheck` is v1.9.0. The scaffolded
+  deploy workflow uses the same checkout and cache pins.
 - Fixed a deploy being silently undone by an active app unit from
   `azud systemd enable`. The unit has `Restart=always` and a pinned image, so
   when a rolling deploy stopped the old container, systemd restarted the unit,
