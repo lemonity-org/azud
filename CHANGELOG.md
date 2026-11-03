@@ -57,6 +57,10 @@ release notes for the corresponding signed tag.
   running, so `deploy.pull_timeout` could not take effect beyond that. The pool
   now leaves a connection alone while a command runs, and counts idle time from
   when the last command finished.
+- Fixed a crash-looping role or accessory occasionally being reported as started.
+  These containers restart on failure, so a check could catch one running between
+  two crashes. A container that restarts during the check now fails it, and the
+  error gives the restart count and the last exit code.
 - Fixed a data race when an SSH command timed out or was canceled: its output
   could still be written while the result was being read. Output that arrives
   after that point is now dropped.
