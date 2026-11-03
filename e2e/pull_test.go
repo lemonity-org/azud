@@ -7,10 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestFirstDeploy(t *testing.T) {
@@ -62,49 +59,13 @@ func TestNewReleaseIsZeroDowntime(t *testing.T) {
 	s.deploys()
 	s.waitServes("v1")
 
-	var served, failed atomic.Int64
-	var lastFailure atomic.Value
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	finish := sync.OnceFunc(func() {
-		close(stop)
-		<-done
-	})
-	t.Cleanup(finish)
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			got, err := s.serves()
-			switch {
-			case err != nil:
-				failed.Add(1)
-				lastFailure.Store(err.Error())
-			case got != "v1" && got != "v2":
-				failed.Add(1)
-				lastFailure.Store("unexpected body " + got)
-			default:
-				served.Add(1)
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}()
+	watch := s.watchRequests("v1", "v2")
 
 	s.release("v2")
 	s.deploys()
 	s.waitServes("v2")
-	finish()
-
-	if failed.Load() != 0 {
-		t.Errorf("%d of %d requests failed during the swap, last: %v", failed.Load(), failed.Load()+served.Load(), lastFailure.Load())
-	}
-	if served.Load() < 10 {
-		t.Errorf("only %d requests ran during the swap, so this proves little", served.Load())
-	}
+	watch.stop()
+	watch.requireNoFailures()
 }
 
 func TestBadReleaseKeepsThePreviousOneServing(t *testing.T) {
@@ -112,18 +73,26 @@ func TestBadReleaseKeepsThePreviousOneServing(t *testing.T) {
 	good := s.release("v1")
 	s.deploys()
 	s.waitServes("v1")
-	running := s.inspect("{{.Id}}")
 
+	// The bad release never became ready, so nothing switched: the same container
+	// keeps serving, and no request fails or reaches the bad release.
+	serving := s.inspect("{{.Id}}")
+	watch := s.watchRequests("v1")
 	bad := s.publishBroken("v2")
 	s.sign(bad)
 	s.promote(bad)
 	if out, err := s.agentOnce(); err == nil {
 		t.Fatalf("agent reported success for a release that never became ready:\n%s", out)
 	}
+	watch.stop()
+	watch.requireNoFailures()
 
 	s.waitServes("v1")
-	if after := s.inspect("{{.Id}}"); after != running {
-		t.Errorf("a release that failed readiness replaced the serving container: %s to %s", running, after)
+	if got, want := s.inspect("{{.ImageName}}"), s.repo+"@"+good; got != want {
+		t.Errorf("after a release that failed readiness, the container runs %q, want %q", got, want)
+	}
+	if after := s.inspect("{{.Id}}"); after != serving {
+		t.Errorf("a release that never became ready replaced the serving container: %s to %s", serving, after)
 	}
 	st := s.agentState()
 	if st.DeployedDigest != good || st.FailedDigest != bad {
@@ -131,7 +100,7 @@ func TestBadReleaseKeepsThePreviousOneServing(t *testing.T) {
 	}
 
 	// A one-shot check reports a known failed release as an error, and does not retry it.
-	running = s.inspect("{{.Id}}")
+	running := s.inspect("{{.Id}}")
 	out, err := s.agentOnce()
 	if err == nil || !strings.Contains(out, "failed before") {
 		t.Errorf("a check on a known failed release should refuse it, got %v\n%s", err, out)

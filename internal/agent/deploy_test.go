@@ -114,7 +114,7 @@ func TestCommandDeployerKillsARollbackThatOutlivesItsGrace(t *testing.T) {
 }
 
 func TestCommandDeployerFinishesWhenTheAgentIsStopped(t *testing.T) {
-	// Reconcile hands Deploy an uncancelable context; only the timeout ends it.
+	// The agent hands Deploy an uncancelable context; only the timeout ends it.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	d := &CommandDeployer{Command: `sleep 0.2; echo done`}

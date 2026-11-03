@@ -280,6 +280,23 @@ func Fetch(ctx context.Context, repo *registry.Repository, digest string) (*Rele
 	return rel, nil
 }
 
+// MissingSecrets lists the secrets the app or an accessory needs that secrets
+// does not hold.
+func MissingSecrets(cfg *config.Config, secrets map[string]string) []string {
+	needed := append([]string(nil), cfg.Env.Secret...)
+	for _, accessory := range cfg.Accessories {
+		needed = append(needed, accessory.Env.Secret...)
+	}
+	var missing []string
+	for _, name := range needed {
+		if _, ok := secrets[name]; !ok && !slices.Contains(missing, name) {
+			missing = append(missing, name)
+		}
+	}
+	slices.Sort(missing)
+	return missing
+}
+
 func parseManifest(m registry.Manifest) (*manifest, error) {
 	var parsed manifest
 	dec := json.NewDecoder(bytes.NewReader(m.Body))

@@ -29,14 +29,46 @@ Each check:
 4. Runs `agent.verify_command` with `AZUD_AGENT_IMAGE` set to the image pinned
    by digest. The image is never deployed if the command fails.
 5. Deploys the pinned image: registry login, pull, digest check, pre-deploy
-   command, health-checked container swap, and rollback on failure, exactly
-   as `azud deploy` does. The deploy takes the same host lock as a pushed
-   deploy, so the two never overlap.
+   command, and health-checked container swap, as `azud deploy` does. The agent
+   holds the same host lock as a pushed deploy for the whole release, so the two
+   never overlap.
 
 A release that fails verification or deployment is not tried again until the
 tag moves, so a broken image is not redeployed every minute. Once
 verification passes, the deploy runs to completion even if the agent is asked
 to stop.
+
+### When a release fails or the agent dies
+
+The agent keeps a record of each release it accepts, and saves a journal before
+it changes anything. Both work the same for images and for release bundles.
+
+- **Failure.** It marks the release failed and stops at the first role that fails.
+  If no role had switched, as when a pull or the first role's readiness check
+  fails, the previous release still runs whole, so nothing restarts. Otherwise it
+  returns the whole server to the previous release, whichever role failed, so no
+  role keeps running the failed release. The previous release's containers are
+  then replaced by new ones of the same release, with zero downtime for a rolling
+  role and a short stop for a `stop_first` role. `deploy.pre_deploy_command` does not run for this: an older
+  image's migration against a newer schema is at best a no-op. Hooks run as for
+  any deploy, except that `post-rollback` runs in place of `pre-deploy` and
+  `post-deploy`. Roles the failed release added are stopped. With images, the
+  `rollback_on_failure` setting no longer changes this, and secrets are not
+  reverted.
+- **No previous release.** Its roles are stopped too, unless this service was
+  already running on the server when it started; those roles keep running.
+- **A failed undo.** The agent keeps trying without waiting for the tag to move,
+  30 seconds after the first failure and doubling to every 15 minutes, and
+  `azud agent status` shows the next attempt. A new digest on the tag replaces the
+  undo. `--once --retry-failed` goes forward with the failed release instead.
+- **The agent dies.** The journal stays open, so the next check finishes the job,
+  even if the tag has not moved. If the tag still names the release and it has not
+  failed, the agent runs it again from its record, without verifying it again. If
+  it has failed, or the tag moved back, the agent undoes it. If the tag moved on,
+  the agent deploys that release instead.
+
+None of this needs the registry while the images are still on the server: a check
+that cannot resolve the tag with a journal open acts on the last digest it saw.
 
 ## Requirements
 
@@ -201,8 +233,11 @@ verification passed, with the variables `verify_command` gets plus
   `azud proxy reconcile`, do not take it.
 - **Result.** Exit 0 records the release as deployed. Any other exit records
   it as failed, with the last 40 output lines, and it is not retried until the
-  tag moves (or `--once --retry-failed`). Output streams to the agent's log as
-  it is written.
+  tag moves (or `--once --retry-failed`). The agent runs no undo: the command owns
+  its own. Output streams to the agent's log as it is written.
+- **Interruption.** If the agent dies while the command runs, its next check runs
+  the command again for the same image, without verifying it again. The command
+  may still be running then, since a stop of the unit leaves it running.
 - **Time.** After `deploy_timeout`, the command and every process it started
   (it runs in its own process group) get `SIGTERM`, so a deploy script can
   roll back. Whatever is still running `deploy_stop_grace` later is killed;
@@ -223,11 +258,17 @@ secrets and configuration in one transaction with Azud's own deploy.
 | Retry a release that failed | `azud agent run --once --retry-failed -d agent` |
 | Follow the log | `journalctl --user -u azud-agent-app.service -f` |
 | Roll back | Move the tag back to the previous digest |
-| Break-glass deploy | `azud deploy` from a workstation still works; the agent adopts the digest if the tag later points to it |
+| Break-glass deploy | `azud deploy` from a workstation still works; the agent adopts the digest if the tag later points to it, unless a journal is open |
 
 State lives in `~/.local/share/azud/agent/<service>.json` for non-root users
-(`/var/lib/azud/agent/` for root). Deployment history is recorded on the
-server, as for any deploy run there.
+(`/var/lib/azud/agent/` for root), with the record of each release in
+`agent/<service>/releases/<id>/` beside it. A record holds the release's
+configuration as written, so anything stored can be returned to with no network.
+An image release's record is named `<digest>-<hash of its configuration>`, because
+one image can be applied with edited configuration. A digest deployed before the
+agent kept records is recorded when it is first needed, with the configuration on
+disk at that moment. Deployment history is recorded on the server, as for any
+deploy run there.
 
 ## Release bundles
 
@@ -296,19 +337,15 @@ What the agent does for each bundle:
 - **Secrets:** holding the same deploy lock as pushed deploys, it writes them
   atomically to the runtime secrets file (0600); a release without secrets
   leaves the file empty. Decrypted secrets are never stored elsewhere.
-- **Failure:** it puts the previous secrets back (the previous release's,
-  decrypted again; before the first bundle, the file as it was, kept once in
-  `<file>.pre-bundle`, or no file) and redeploys the previous release as a
-  whole, so no role runs one release's image with another's configuration.
-  Roles the failed release added are stopped. A failed first release has
-  nothing to return to, so its roles are stopped too, unless this service was
-  already running on the server when it started; those roles keep running.
-- **Interruption.** If the agent dies in the middle, its next check redeploys,
-  even when the tag still names the recorded release. If the rollback itself
-  fails, the agent keeps trying it without waiting for the tag to move, 30
-  seconds after the first failure and doubling to every 15 minutes, and
-  `azud agent status` shows the next attempt. The failed release is not
-  deployed again until the tag moves or you run `--once --retry-failed`.
+- **Failure:** the agent returns to the previous release as described in
+  [When a release fails or the agent dies](#when-a-release-fails-or-the-agent-dies),
+  and puts the previous secrets back first (the previous release's, decrypted again;
+  before the first bundle, the file as it was, kept once in `<file>.pre-bundle`, or
+  no file), so no role runs one release's image with another's configuration.
+  Hooks do not run.
+- **Interruption:** a resumed release writes its secrets again from its record.
+  The failed release is not deployed again until the tag moves or you run
+  `--once --retry-failed`.
 - **Version:** a bundle whose `minimum_version` is newer than the agent's
   azud is refused before anything changes.
 - **Downgrades:** a bundle older than the deployed one is refused, so access to
@@ -320,7 +357,8 @@ What the agent does for each bundle:
   the release's. It deploys the app, and `azud agent status` lists them with the
   command to run from a workstation, with every release until they match.
 - **Storage:** each applied release (configuration, `release.json`, encrypted
-  secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`.
+  secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`, in a
+  directory named for its digest.
 
 ## Limitations
 

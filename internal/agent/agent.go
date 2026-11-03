@@ -6,10 +6,10 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
 )
 
@@ -56,6 +56,19 @@ func (o Outcome) String() string {
 	}
 }
 
+// DeployOptions tune one deploy.
+type DeployOptions struct {
+	// Undo means this deploy returns to an earlier release after a later one
+	// failed, so the release's pre-deploy command does not run.
+	Undo bool
+	// Local means use the image if it is already on this server, so the deploy
+	// needs no registry.
+	Local bool
+	// Hooks means run hooks. They never run for a bundle: they are host commands
+	// outside what its signature covers.
+	Hooks bool
+}
+
 // Agent checks one tag and deploys what it points to. The functions are the
 // seams to the registry, Podman, and the deployer, so the decision logic can
 // be tested on its own.
@@ -73,16 +86,25 @@ type Agent struct {
 	// Verify must succeed before image is deployed. Nil skips verification,
 	// which configuration only allows with insecure_skip_verify.
 	Verify func(ctx context.Context, image string) error
-	// Deploy deploys image, which is pinned by digest.
-	Deploy func(ctx context.Context, image string) error
-	// Interrupted reports that a deploy started and did not finish, so the
-	// recorded digest may not be what runs. The agent then deploys even an
-	// unchanged digest. Optional.
-	Interrupted func() bool
-	// Recover undoes an interrupted deploy when the tag names a release that
-	// failed, so the server does not stay between releases until the tag
-	// moves. Optional; it takes the deploy lock itself.
-	Recover func(ctx context.Context) error
+	// Source produces the candidate for a digest.
+	Source Source
+	// Server is the configuration the agent runs with, and the trust anchor for
+	// every release it deploys from a record.
+	Server *config.Config
+
+	// Deploy deploys image, which is pinned by digest, with cfg. The deploy lock
+	// is already held.
+	Deploy func(ctx context.Context, cfg *config.Config, image string, opts DeployOptions) error
+	// DeployUndoes means Deploy runs agent.deploy_command, which owns its own
+	// undo, so a failure closes the journal without one.
+	DeployUndoes bool
+	// Lock runs fn holding the host's deploy lock, the one pushed deploys take,
+	// so a pushed deploy never overlaps a release. Nil runs fn without a lock.
+	Lock func(fn func() error) error
+	// StopRoles stops the role containers of cfg named by roles.
+	StopRoles func(cfg *config.Config, roles []string) error
+	// RunningRoles returns the roles of cfg with a running container.
+	RunningRoles func(cfg *config.Config) ([]string, error)
 
 	State *Store
 	Log   *output.Logger
@@ -108,11 +130,17 @@ func (a *Agent) Image(digest string) string {
 	return a.Repository + "@" + digest
 }
 
-// Reconcile checks the tag once and deploys a new digest. A digest that
+func (a *Agent) records() *Records {
+	return a.State.Records(a.Repository)
+}
+
+// Reconcile checks the tag once and acts on what Decide returns. A digest that
 // failed before is skipped unless retryFailed is set.
 //
-// Once verification passes, the deploy runs to completion even if ctx is
-// canceled: stopping halfway would leave the server between releases.
+// It holds the state lock throughout, so nothing else changes the state between
+// the decision and the action. Once verification passes, a deploy or undo runs to
+// completion even if ctx is canceled: stopping halfway would leave the server
+// between releases.
 func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, string, error) {
 	unlock, err := a.State.Lock()
 	if err != nil {
@@ -120,114 +148,73 @@ func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, strin
 	}
 	defer unlock()
 
-	digest, err := a.Resolve(ctx)
-	if err != nil {
-		return Failed, "", fmt.Errorf("failed to resolve %s: %w", a.Ref, err)
-	}
-
 	st, err := a.State.Load()
 	if err != nil {
-		return Failed, digest, err
+		return Failed, "", err
+	}
+
+	tag, resolveErr := a.Resolve(ctx)
+	if resolveErr != nil {
+		resolveErr = fmt.Errorf("failed to resolve %s: %w", a.Ref, resolveErr)
+		// Undoing a release must not depend on the registry that served it.
+		if st.Journal == nil || ctx.Err() != nil {
+			return Failed, "", resolveErr
+		}
+		tag = st.LastSeenDigest
+		if tag == "" {
+			tag = st.Journal.Digest
+		}
+		a.log().Warn("%v; acting on the last digest seen, %s", resolveErr, short(tag))
+	} else {
+		st.LastSeenDigest = tag
 	}
 	st.Ref = a.Ref
-	st.LastSeenDigest = digest
 	st.LastCheckAt = a.now()
 
-	interrupted := a.Interrupted != nil && a.Interrupted()
-	if st.DeployedDigest == digest && !interrupted {
-		return Unchanged, digest, a.State.Save(st)
+	in := Input{Tag: tag, DeployedDigest: st.DeployedDigest, FailedDigest: st.FailedDigest, Journal: st.Journal, Retry: retryFailed, Now: a.now()}
+	action := Decide(in)
+	if a.DeployUndoes && (action.Kind == ActionUndo || action.Kind == ActionCleanup) {
+		// The agent has no undo to run, and the command was the one to run it.
+		a.log().Warn("Closing the interrupted deploy of %s: agent.deploy_command owns its undo", a.Image(action.Digest))
+		st.Journal, in.Journal = nil, nil
+		action = Decide(in)
+	}
+
+	switch action.Kind {
+	case ActionNone:
+		return Unchanged, tag, a.State.Save(st)
+	case ActionWait:
+		return Waiting, action.Digest, a.State.Save(st)
+	case ActionResume:
+		return a.resume(ctx, &st, resolveErr)
+	case ActionUndo, ActionCleanup:
+		return a.undoOpen(ctx, &st)
 	}
 
 	// Checked before skipping a failed digest: a pushed deploy may have put
-	// that release live since the agent's own attempt failed.
-	if a.Running != nil {
+	// that release live since the agent's own attempt failed. An open journal
+	// is not asked: the running digest may be the failed release.
+	if st.Journal == nil && a.Running != nil {
 		running, err := a.Running(ctx)
 		if err != nil {
 			a.log().Debug("Could not read the running image: %v", err)
-		} else if running == digest {
-			a.recordDeployed(&st, digest)
-			return Adopted, digest, a.State.Save(st)
-		}
-	}
-
-	if st.FailedDigest == digest && !retryFailed {
-		// A failed digest is not deployed again, but a server left between
-		// releases must not wait for the tag to move.
-		if interrupted && a.Recover != nil {
-			return a.recoverInterrupted(ctx, &st, digest)
-		}
-		return SkippedFailed, digest, a.State.Save(st)
-	}
-
-	image := a.Image(digest)
-	if a.Verify != nil {
-		if err := a.Verify(ctx, image); err != nil {
-			// A stop request is not a verdict on the image: leave it to be
-			// verified again on the next start.
-			if ctx.Err() != nil {
-				return Failed, digest, fmt.Errorf("verification of %s interrupted: %w", image, ctx.Err())
+		} else if running == tag {
+			if err := a.adopt(&st, tag); err != nil {
+				return Failed, tag, err
 			}
-			return a.recordFailure(&st, digest, fmt.Errorf("verification of %s failed: %w", image, err))
+			return Adopted, tag, a.State.Save(st)
 		}
 	}
 
-	if err := a.Deploy(context.WithoutCancel(ctx), image); err != nil {
-		return a.recordFailure(&st, digest, fmt.Errorf("deploy of %s failed: %w", image, err))
+	if action.Kind == ActionRefuse {
+		return SkippedFailed, tag, a.State.Save(st)
 	}
-
-	a.recordDeployed(&st, digest)
-	return Deployed, digest, a.State.Save(st)
-}
-
-// recoverInterrupted undoes an interrupted deploy, backing off while it fails.
-// Like a deploy, it runs to completion even if ctx is canceled.
-func (a *Agent) recoverInterrupted(ctx context.Context, st *State, digest string) (Outcome, string, error) {
-	if a.now().Before(st.RecoverAfter) {
-		return Waiting, digest, a.State.Save(*st)
+	if resolveErr != nil {
+		// A release is verified and fetched from the registry, so an outage
+		// says nothing about it.
+		return Failed, tag, resolveErr
 	}
-	if err := a.Recover(context.WithoutCancel(ctx)); err != nil {
-		cause := fmt.Errorf("undoing the failed deploy of %s failed: %w", a.Image(digest), err)
-		st.RecoverAfter = a.now().Add(recoverDelay(st.RecoverTries))
-		st.RecoverTries++
-		st.LastError = cause.Error()
-		if err := a.State.Save(*st); err != nil {
-			return Failed, digest, errors.Join(cause, err)
-		}
-		return Failed, digest, cause
-	}
-	st.RecoverTries = 0
-	st.RecoverAfter = time.Time{}
-	return Recovered, digest, a.State.Save(*st)
-}
-
-// recoverDelay is how long to wait after a failed recovery: 30s, doubling to
-// 15m. A recovery restarts containers, so it should not run on every check.
-func recoverDelay(tries int) time.Duration {
-	delay := 30 * time.Second
-	for i := 0; i < tries && delay < 15*time.Minute; i++ {
-		delay *= 2
-	}
-	return min(delay, 15*time.Minute)
-}
-
-func (a *Agent) recordDeployed(st *State, digest string) {
-	st.DeployedDigest = digest
-	st.DeployedAt = a.now()
-	st.FailedDigest = ""
-	st.FailedAt = time.Time{}
-	st.LastError = ""
-	st.RecoverTries = 0
-	st.RecoverAfter = time.Time{}
-}
-
-func (a *Agent) recordFailure(st *State, digest string, cause error) (Outcome, string, error) {
-	st.FailedDigest = digest
-	st.FailedAt = a.now()
-	st.LastError = cause.Error()
-	if err := a.State.Save(*st); err != nil {
-		return Failed, digest, errors.Join(cause, err)
-	}
-	return Failed, digest, cause
+	return a.apply(ctx, &st, tag)
 }
 
 // Run checks the tag every interval until ctx is canceled. Failed checks are

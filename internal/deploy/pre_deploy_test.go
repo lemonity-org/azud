@@ -1,9 +1,17 @@
 package deploy
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/lemonity-org/azud/internal/config"
+	"github.com/lemonity-org/azud/internal/localtest"
+	"github.com/lemonity-org/azud/internal/output"
 )
 
 func TestNewPreDeployContainerConfig(t *testing.T) {
@@ -167,5 +175,68 @@ func TestParseCommandArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// undoTestDeployer deploys one standalone role against a runner that answers every
+// command with success, with a hook for each name in hooks that records it ran.
+func undoTestDeployer(t *testing.T, hooks ...string) (*Deployer, *localtest.Fake, string) {
+	t.Helper()
+	t.Setenv("AZUD_STATE_DIR", t.TempDir())
+	hooksDir, ran := t.TempDir(), filepath.Join(t.TempDir(), "ran")
+	for _, name := range hooks {
+		script := "#!/bin/sh\necho " + name + " >> " + ran + "\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		Service:   "shop",
+		Image:     "example/shop@sha256:abc",
+		Servers:   map[string]config.RoleConfig{"worker": {Hosts: []string{"host"}, Cmd: "work"}},
+		HooksPath: hooksDir,
+		Deploy:    config.DeployConfig{PreDeployCommand: "./migrate up"},
+	}
+	fake := &localtest.Fake{
+		Handle: func(cmd string, _ io.Reader) (string, string, int) {
+			if strings.Contains(cmd, "RestartCount") {
+				return "true 0 0", "", 0
+			}
+			return "", "", 0
+		},
+		UserName: "deploy",
+	}
+	return NewDeployer(cfg, fake, output.NewLogger(io.Discard, io.Discard, false)), fake, ran
+}
+
+func ranMigration(fake *localtest.Fake) bool {
+	return slices.ContainsFunc(fake.Commands(), func(cmd string) bool { return strings.Contains(cmd, "pre-deploy") })
+}
+
+func TestDeployRunsThePreDeployCommandAndItsHooks(t *testing.T) {
+	d, fake, ran := undoTestDeployer(t, "pre-deploy", "post-deploy", "post-rollback")
+	if err := d.Deploy(context.Background(), &DeployOptions{SkipPull: true, LockHeld: true, Hosts: []string{"host"}}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !ranMigration(fake) {
+		t.Fatalf("a forward deploy skipped the pre-deploy command: %q", fake.Commands())
+	}
+	got, _ := os.ReadFile(ran)
+	if string(got) != "pre-deploy\npost-deploy\n" {
+		t.Fatalf("hooks = %q", got)
+	}
+}
+
+func TestUndoSkipsThePreDeployCommandAndRunsPostRollback(t *testing.T) {
+	d, fake, ran := undoTestDeployer(t, "pre-deploy", "post-deploy", "post-rollback")
+	if err := d.Deploy(context.Background(), &DeployOptions{SkipPull: true, LockHeld: true, Undo: true, Hosts: []string{"host"}}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if ranMigration(fake) {
+		t.Fatalf("an undo ran the pre-deploy command: %q", fake.Commands())
+	}
+	got, _ := os.ReadFile(ran)
+	if string(got) != "post-rollback\n" {
+		t.Fatalf("hooks = %q; an undo runs post-rollback alone", got)
 	}
 }

@@ -5,18 +5,59 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
+	"github.com/lemonity-org/azud/internal/release"
 )
 
 const (
 	digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	digestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
+
+const testRepository = "ghcr.io/lemonity-org/app"
+
+const testServerYAML = `service: app
+image: ` + testRepository + `
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: app.example.com
+agent:
+  track: production
+  verify_command: cosign verify "$$AZUD_AGENT_IMAGE"
+`
+
+// testServer loads a server's configuration from yaml, as the CLI does.
+func testServer(t *testing.T, yaml string) *config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "deploy.yml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := config.NewLoader(path, "").WithoutSecrets().Load()
+	if err != nil {
+		t.Fatalf("server config: %v", err)
+	}
+	return server
+}
+
+func testImageSource(t *testing.T, yaml string) *ImageSource {
+	t.Helper()
+	return &ImageSource{
+		Server:     testServer(t, yaml),
+		Files:      []release.File{{Name: "deploy.yml", Data: []byte(yaml)}},
+		Repository: testRepository,
+	}
+}
 
 // fakeServer stands in for the registry, Podman, and the deployer.
 type fakeServer struct {
@@ -25,15 +66,26 @@ type fakeServer struct {
 	running   string
 	verifyErr error
 	deployErr error
-	verified  []string
-	deployed  []string
+	// deployErrs fails the deploy of one digest, whatever else deploys.
+	deployErrs   map[string]error
+	verified     []string
+	deployed     []string
+	options      []DeployOptions
+	runningRoles []string
+	stopped      []string
+	locked       bool
+	// journals holds the journal saved when each deploy started.
+	journals []*Journal
+	store    *Store
 }
 
 func (f *fakeServer) agent(t *testing.T) *Agent {
 	t.Helper()
+	source := testImageSource(t, testServerYAML)
+	f.store = NewStore(t.TempDir(), "app")
 	return &Agent{
-		Ref:        "ghcr.io/lemonity-org/app:production",
-		Repository: "ghcr.io/lemonity-org/app",
+		Ref:        testRepository + ":production",
+		Repository: testRepository,
 		Resolve: func(context.Context) (string, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -53,17 +105,72 @@ func (f *fakeServer) agent(t *testing.T) *Agent {
 			f.verified = append(f.verified, image)
 			return f.verifyErr
 		},
-		Deploy: func(ctx context.Context, image string) error {
+		Source: source,
+		Server: source.Server,
+		Deploy: func(ctx context.Context, _ *config.Config, image string, opts DeployOptions) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.deployed = append(f.deployed, image)
+			f.options = append(f.options, opts)
+			st, err := f.store.Load()
+			if err != nil {
+				return err
+			}
+			f.journals = append(f.journals, st.Journal)
+			digest := strings.TrimPrefix(image, testRepository+"@")
+			if err := f.deployErrs[digest]; err != nil {
+				return err
+			}
 			if f.deployErr == nil {
-				f.running = strings.TrimPrefix(image, "ghcr.io/lemonity-org/app@")
+				f.running = digest
 			}
 			return f.deployErr
 		},
-		State: NewStore(t.TempDir(), "app"),
+		Lock: func(fn func() error) error {
+			f.locked = true
+			defer func() { f.locked = false }()
+			return fn()
+		},
+		StopRoles: func(_ *config.Config, roles []string) error {
+			f.stopped = append(f.stopped, roles...)
+			return nil
+		},
+		RunningRoles: func(*config.Config) ([]string, error) {
+			return append([]string(nil), f.runningRoles...), nil
+		},
+		State: f.store,
 		Log:   output.NewLogger(&bytes.Buffer{}, &bytes.Buffer{}, false),
+	}
+}
+
+// seed saves st, with a journal to digest if one is given, and stores a record for
+// each digest named so the agent can return to it.
+func seed(t *testing.T, a *Agent, st State, j *Journal) {
+	t.Helper()
+	store := func(digest string) string {
+		t.Helper()
+		rec, err := a.Source.Previous(nil, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Origin = OriginVerified
+		if err := a.records().Store(rec); err != nil {
+			t.Fatal(err)
+		}
+		return rec.ID
+	}
+	if st.DeployedDigest != "" {
+		st.Current = store(st.DeployedDigest)
+	}
+	if j != nil {
+		j.Target = store(j.Digest)
+		if j.PreviousDigest != "" {
+			j.Previous = store(j.PreviousDigest)
+		}
+		st.Journal = j
+	}
+	if err := a.State.Save(st); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -228,7 +335,7 @@ func TestReconcileFinishesDeployWhenCanceled(t *testing.T) {
 	f := &fakeServer{tag: digestA}
 	a := f.agent(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	a.Deploy = func(deployCtx context.Context, image string) error {
+	a.Deploy = func(deployCtx context.Context, _ *config.Config, _ string, _ DeployOptions) error {
 		cancel()
 		if deployCtx.Err() != nil {
 			return errors.New("deploy saw the cancellation")
@@ -245,7 +352,7 @@ func TestRunChecksUntilCanceled(t *testing.T) {
 	f := &fakeServer{tag: digestA}
 	a := f.agent(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	a.Deploy = func(context.Context, string) error {
+	a.Deploy = func(context.Context, *config.Config, string, DeployOptions) error {
 		cancel()
 		return nil
 	}
@@ -264,7 +371,7 @@ func TestRunChecksUntilCanceled(t *testing.T) {
 
 func TestStoreSavesPrivately(t *testing.T) {
 	store := NewStore(t.TempDir(), "app")
-	if st, err := store.Load(); err != nil || st != (State{}) {
+	if st, err := store.Load(); err != nil || !reflect.DeepEqual(st, State{}) {
 		t.Fatalf("Load of missing state = %+v, %v", st, err)
 	}
 	want := State{Ref: "r:t", DeployedDigest: digestA, DeployedAt: time.Unix(1700000000, 0).UTC()}
@@ -276,7 +383,7 @@ func TestStoreSavesPrivately(t *testing.T) {
 		t.Fatalf("state file = %v, %v; want mode 600", info, err)
 	}
 	got, err := store.Load()
-	if err != nil || got != want {
+	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("Load = %+v, %v; want %+v", got, err, want)
 	}
 }
@@ -309,112 +416,73 @@ func TestCommandVerifierTimesOut(t *testing.T) {
 }
 
 func TestInterruptedDeployIsRedoneEvenIfTheTagDidNotMove(t *testing.T) {
-	store := NewStore(t.TempDir(), "app")
 	digest := "sha256:" + strings.Repeat("a", 64)
-	if err := store.Save(State{DeployedDigest: digest}); err != nil {
-		t.Fatal(err)
-	}
-	deployed := 0
-	interrupted := true
-	a := &Agent{
-		Ref:         "ghcr.io/acme/app:production",
-		Repository:  "ghcr.io/acme/app",
-		Resolve:     func(context.Context) (string, error) { return digest, nil },
-		Deploy:      func(context.Context, string) error { deployed++; return nil },
-		Interrupted: func() bool { return interrupted },
-		State:       store,
-	}
+	f := &fakeServer{tag: digest}
+	a := f.agent(t)
+	seed(t, a, State{DeployedDigest: digest}, &Journal{Digest: digest, PreviousDigest: digest, Phase: PhaseForward})
 
 	outcome, _, err := a.Reconcile(context.Background(), false)
-	if err != nil || outcome != Deployed || deployed != 1 {
-		t.Fatalf("Reconcile = %v, %v, deploys %d; an interrupted deploy must be redone", outcome, err, deployed)
+	if err != nil || outcome != Deployed || len(f.deployed) != 1 {
+		t.Fatalf("Reconcile = %v, %v, deploys %d; an interrupted deploy must be redone", outcome, err, len(f.deployed))
 	}
-	interrupted = false
-	if outcome, _, _ := a.Reconcile(context.Background(), false); outcome != Unchanged || deployed != 1 {
-		t.Fatalf("Reconcile = %v, deploys %d; nothing to redo once it finished", outcome, deployed)
+	if outcome, _, _ := a.Reconcile(context.Background(), false); outcome != Unchanged || len(f.deployed) != 1 {
+		t.Fatalf("Reconcile = %v, deploys %d; nothing to redo once it finished", outcome, len(f.deployed))
 	}
 }
 
 func TestFailedReleaseLeftInterruptedIsUndoneNotRedeployed(t *testing.T) {
-	store := NewStore(t.TempDir(), "app")
+	previous := "sha256:" + strings.Repeat("a", 64)
 	digest := "sha256:" + strings.Repeat("b", 64)
-	if err := store.Save(State{DeployedDigest: "sha256:" + strings.Repeat("a", 64), FailedDigest: digest}); err != nil {
-		t.Fatal(err)
-	}
 	now := time.Unix(1000, 0)
-	deployed, recovered := 0, 0
-	interrupted := true
-	var recoverErr error
-	a := &Agent{
-		Ref:         "ghcr.io/acme/app:production",
-		Repository:  "ghcr.io/acme/app",
-		Resolve:     func(context.Context) (string, error) { return digest, nil },
-		Deploy:      func(context.Context, string) error { deployed++; return nil },
-		Interrupted: func() bool { return interrupted },
-		Recover: func(context.Context) error {
-			recovered++
-			if recoverErr == nil {
-				interrupted = false
-			}
-			return recoverErr
-		},
-		State: store,
-		Now:   func() time.Time { return now },
-	}
+	f := &fakeServer{tag: digest, deployErrs: map[string]error{previous: errors.New("previous release failed too")}}
+	a := f.agent(t)
+	a.Now = func() time.Time { return now }
+	seed(t, a, State{DeployedDigest: previous, FailedDigest: digest}, &Journal{Digest: digest, PreviousDigest: previous, Phase: PhaseForward})
 
-	recoverErr = errors.New("previous release failed too")
-	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Failed || err == nil || recovered != 1 {
-		t.Fatalf("Reconcile = %v, %v, recoveries %d", outcome, err, recovered)
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Failed || err == nil || len(f.deployed) != 1 {
+		t.Fatalf("Reconcile = %v, %v, undos %d", outcome, err, len(f.deployed))
 	}
-	st, err := store.Load()
+	st, err := a.State.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.RecoverTries != 1 || !st.RecoverAfter.Equal(now.Add(30*time.Second)) || !strings.Contains(st.LastError, "previous release failed too") {
-		t.Fatalf("state = %+v", st)
+	if st.Journal == nil || st.Journal.Tries != 1 || !st.Journal.NextTry.Equal(now.Add(30*time.Second)) || !strings.Contains(st.LastError, "previous release failed too") {
+		t.Fatalf("state = %+v, journal %+v", st, st.Journal)
 	}
 
-	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Waiting || err != nil || recovered != 1 {
-		t.Fatalf("Reconcile during backoff = %v, %v, recoveries %d", outcome, err, recovered)
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Waiting || err != nil || len(f.deployed) != 1 {
+		t.Fatalf("Reconcile during backoff = %v, %v, undos %d", outcome, err, len(f.deployed))
 	}
 
 	now = now.Add(31 * time.Second)
-	recoverErr = nil
-	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Recovered || err != nil || recovered != 2 {
-		t.Fatalf("Reconcile after backoff = %v, %v, recoveries %d", outcome, err, recovered)
+	f.deployErrs = nil
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Recovered || err != nil || len(f.deployed) != 2 {
+		t.Fatalf("Reconcile after backoff = %v, %v, undos %d", outcome, err, len(f.deployed))
 	}
-	if st, _ := store.Load(); st.RecoverTries != 0 || !st.RecoverAfter.IsZero() || st.FailedDigest != digest {
-		t.Fatalf("state after recovery = %+v; the release stays failed and the backoff resets", st)
+	if st, _ := a.State.Load(); st.Journal != nil || st.FailedDigest != digest {
+		t.Fatalf("state after recovery = %+v; the release stays failed and the journal closes", st)
 	}
 	if outcome, _, _ := a.Reconcile(context.Background(), false); outcome != SkippedFailed {
 		t.Fatalf("Reconcile after recovery = %v", outcome)
 	}
-	if deployed != 0 {
-		t.Fatalf("deploys = %d; a failed release must not be deployed again without a retry", deployed)
+	for _, image := range f.deployed {
+		if strings.HasSuffix(image, digest) {
+			t.Fatalf("deployed %v; a failed release must not be deployed again without a retry", f.deployed)
+		}
 	}
 }
 
 func TestRetryFailedStillDeploysAnInterruptedRelease(t *testing.T) {
-	store := NewStore(t.TempDir(), "app")
 	digest := "sha256:" + strings.Repeat("b", 64)
-	if err := store.Save(State{FailedDigest: digest, RecoverTries: 3, RecoverAfter: time.Unix(5000, 0)}); err != nil {
-		t.Fatal(err)
+	f := &fakeServer{tag: digest}
+	a := f.agent(t)
+	a.Now = func() time.Time { return time.Unix(1000, 0) }
+	seed(t, a, State{FailedDigest: digest}, &Journal{Digest: digest, Phase: PhaseForward, Tries: 3, NextTry: time.Unix(5000, 0)})
+
+	if outcome, _, err := a.Reconcile(context.Background(), true); outcome != Deployed || err != nil || len(f.deployed) != 1 {
+		t.Fatalf("Reconcile = %v, %v, deploys %d", outcome, err, len(f.deployed))
 	}
-	deployed := 0
-	a := &Agent{
-		Ref:         "ghcr.io/acme/app:production",
-		Repository:  "ghcr.io/acme/app",
-		Resolve:     func(context.Context) (string, error) { return digest, nil },
-		Deploy:      func(context.Context, string) error { deployed++; return nil },
-		Interrupted: func() bool { return true },
-		Recover:     func(context.Context) error { t.Fatal("recovered instead of retrying"); return nil },
-		State:       store,
-		Now:         func() time.Time { return time.Unix(1000, 0) },
-	}
-	if outcome, _, err := a.Reconcile(context.Background(), true); outcome != Deployed || err != nil || deployed != 1 {
-		t.Fatalf("Reconcile = %v, %v, deploys %d", outcome, err, deployed)
-	}
-	if st, _ := store.Load(); st.RecoverTries != 0 || !st.RecoverAfter.IsZero() {
+	if st, _ := a.State.Load(); st.Journal != nil || st.FailedDigest != "" {
 		t.Fatalf("state = %+v; a deployed release ends the backoff", st)
 	}
 }

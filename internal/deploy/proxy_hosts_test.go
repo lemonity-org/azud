@@ -11,13 +11,17 @@ import (
 )
 
 type fakeDeploymentProxy struct {
-	routeHosts []string
+	routeHosts     []string
+	ensureHostsErr error
 }
 
 func (f *fakeDeploymentProxy) Boot(string, *proxy.ProxyConfig) error { return nil }
 func (f *fakeDeploymentProxy) EnsureConfig(string) error             { return nil }
 
 func (f *fakeDeploymentProxy) EnsureServiceHosts(_ string, service *proxy.ServiceConfig) error {
+	if f.ensureHostsErr != nil {
+		return f.ensureHostsErr
+	}
 	f.routeHosts = append([]string(nil), service.Hosts...)
 	return nil
 }

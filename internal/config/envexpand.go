@@ -93,6 +93,41 @@ func (p *envPlaceholders) restore(s string) (string, error) {
 	return s, nil
 }
 
+// ResolveEnvReferences returns a configuration file with its environment references
+// replaced by their values, so it reads the same later, whatever the environment
+// holds then. A dollar sign left in a value is escaped, because reading the file
+// expands references again.
+func ResolveEnvReferences(data []byte) ([]byte, error) {
+	protected, placeholders, err := protectEnvReferences(data)
+	if err != nil {
+		return nil, err
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(protected, &document); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+	if err := expandEnvInNode(&document, placeholders); err != nil {
+		return nil, fmt.Errorf("failed to expand environment variables: %w", err)
+	}
+	escapeDollarSigns(&document)
+	return yaml.Marshal(&document)
+}
+
+func escapeDollarSigns(node *yaml.Node) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		node.Value = strings.ReplaceAll(node.Value, "$", "$$")
+	case yaml.MappingNode:
+		for i := 1; i < len(node.Content); i += 2 {
+			escapeDollarSigns(node.Content[i])
+		}
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, child := range node.Content {
+			escapeDollarSigns(child)
+		}
+	}
+}
+
 // envExpander substitutes environment references inside YAML scalar values.
 type envExpander struct {
 	placeholders *envPlaceholders

@@ -330,7 +330,8 @@ deploy:
 `pre_deploy_command` runs in a one-off `--rm` container from the **new image**
 after the image is pulled but before app containers are started. It shares the
 same network, environment variables, and secrets as the app. Runs on the first
-host only. If the command exits non-zero, the deploy aborts.
+host only. If the command exits non-zero, the deploy aborts. It does not run when
+the pull agent returns to an earlier release after a failed one.
 
 Image digest verification fails closed. `allow_unverified_image: true` is an
 explicit local-image escape hatch: Azud prints a high-visibility warning and

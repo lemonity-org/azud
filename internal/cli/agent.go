@@ -182,77 +182,77 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 			return resolver.Digest(ctx, ref, creds)
 		},
 		Running: runningDigest(podman.NewClient(sshClient), cfg, host, repository),
-		Deploy: func(ctx context.Context, image string) error {
-			pinned := *cfg
+		Server:  cfg,
+		Deploy: func(ctx context.Context, release *config.Config, image string, opts agent.DeployOptions) error {
+			pinned := *release
 			pinned.Image = image
-			deployer := deploy.NewDeployer(&pinned, sshClient, log)
+			client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
+			defer closeClient()
+			deployer := deploy.NewDeployer(&pinned, client, log)
+			if !opts.Hooks {
+				deployer.WithoutHooks()
+			}
 			return deployer.Deploy(ctx, &deploy.DeployOptions{
 				Hosts:       []string{host},
 				Destination: GetDestination(),
+				LockHeld:    true,
+				Undo:        opts.Undo,
+				// A later role must not switch to a release that failed. An undo
+				// keeps going, to return as many roles as it can.
+				StopOnFailure: !opts.Undo,
+				SkipPull:      opts.Local && imagePresent(podman.NewClient(client), host, image),
 			})
 		},
-		State: store,
-		Log:   log,
+		Lock: deployLock(cfg, sshClient, host),
+		StopRoles: func(release *config.Config, roles []string) error {
+			client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
+			defer closeClient()
+			return deploy.NewDeployer(release, client, log).StopRoles([]string{host}, roles)
+		},
+		RunningRoles: runningRoles(podman.NewContainerManager(podman.NewClient(sshClient)), host),
+		State:        store,
+		Log:          log,
 	}
 	if cfg.Agent.Bundles() {
 		identity, err := agentIdentityPath(cfg)
 		if err != nil {
 			return err
 		}
-		applier := &bundleApplier{
-			server:         cfg,
-			repo:           resolver.Repository(ref.Registry, ref.Repository, creds),
-			dir:            agentReleasesDir(stateDir, cfg.Service),
-			identity:       identity,
-			allowDowngrade: cfg.Agent.AllowDowngrade || agentAllowDowngrade,
-			deployed: func() (string, error) {
-				st, err := store.Load()
-				return st.DeployedDigest, err
-			},
-			withLock: func(fn func() error) error {
-				lockFile, timeout := deploy.DeployLock(cfg)
-				var fnErr error
-				if err := sshClient.WithRemoteLock(host, lockFile, timeout, func() error {
-					fnErr = fn()
-					return nil
-				}); err != nil {
-					return fmt.Errorf("failed to acquire deployment lock: %w", err)
-				}
-				return fnErr
-			},
-			deploy: func(ctx context.Context, release *config.Config, image string) error {
-				pinned := *release
-				pinned.Image = image
-				client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
-				defer closeClient()
-				// Hooks never run for a bundle: they are host commands outside
-				// what its signature covers.
-				deployer := deploy.NewDeployer(&pinned, client, log).WithoutHooks()
-				return deployer.Deploy(ctx, &deploy.DeployOptions{
-					Hosts:       []string{host},
-					Destination: GetDestination(),
-					LockHeld:    true,
-				})
-			},
-			stopRoles: func(release *config.Config, roles []string) error {
-				client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
-				defer closeClient()
-				return deploy.NewDeployer(release, client, log).StopRoles([]string{host}, roles)
-			},
-			runningRoles: runningRoles(podman.NewContainerManager(podman.NewClient(sshClient)), host),
-			accessoryEnv: accessoryEnvironment(podman.NewClient(sshClient), cfg.Service, host),
-			version:      version.Version,
-			log:          log,
+		secretsPath, err := localPath(config.RemoteSecretsPath(cfg))
+		if err != nil {
+			return err
+		}
+		a.Source = &agent.BundleSource{
+			Server:         cfg,
+			Repo:           resolver.Repository(ref.Registry, ref.Repository, creds),
+			Repository:     repository,
+			SecretsPath:    secretsPath,
+			Identity:       identity,
+			AllowDowngrade: cfg.Agent.AllowDowngrade || agentAllowDowngrade,
+			Version:        version.Version,
+			AccessoryEnv:   accessoryEnvironment(podman.NewClient(sshClient), cfg.Service, host),
+			Log:            log,
 		}
 		// A bundle carries configuration and secrets as well as the image,
 		// so a matching running image proves nothing: never adopt.
 		a.Running = nil
-		a.Deploy = applier.Deploy
-		a.Interrupted = applier.Interrupted
-		a.Recover = applier.Recover
+	} else {
+		path := configPath
+		if path == "" {
+			path = findConfigFile()
+		}
+		files, err := agent.ReadConfigFiles(path, GetDestination())
+		if err != nil {
+			return err
+		}
+		a.Source = &agent.ImageSource{Server: cfg, Files: files, Destination: GetDestination(), Repository: repository}
 	}
 	if cfg.Agent.DeployCommand != "" {
-		a.Deploy = commandDeploy(cfg, sshClient, host, a.Ref, os.Stdout)
+		command := commandDeploy(cfg, a.Ref, os.Stdout)
+		a.Deploy = func(ctx context.Context, _ *config.Config, image string, _ agent.DeployOptions) error {
+			return command(ctx, image)
+		}
+		a.DeployUndoes = true
 		log.Info("Releases deploy through agent.deploy_command")
 	}
 	if cfg.Agent.InsecureSkipVerify {
@@ -334,11 +334,14 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		{"Failed at", formatTime(st.FailedAt)},
 		{"Last error", orDash(firstLine(st.LastError))},
 	}
-	if !st.RecoverAfter.IsZero() {
-		rows = append(rows, []string{"Next undo attempt", formatTime(st.RecoverAfter)})
+	if st.Journal != nil && !st.Journal.NextTry.IsZero() {
+		rows = append(rows, []string{"Next undo attempt", formatTime(st.Journal.NextTry)})
 	}
 	if cfg.Agent.Bundles() {
-		rows = append(rows, bundleStatusRows(stateDir, cfg, st.DeployedDigest)...)
+		rows = append(rows, bundleStatusRows(store.Records(imageRepository(cfg.Image)), st.Current)...)
+	}
+	if st.Journal != nil {
+		rows = append(rows, []string{"Interrupted", "a deploy did not finish; the agent finishes or undoes it on its next check"})
 	}
 	if cfg.Agent.DeployCommand != "" {
 		rows = append(rows, []string{"Deploys with", "agent.deploy_command"})
@@ -422,15 +425,13 @@ func systemdQuote(value string) string {
 	return `"` + replacer.Replace(value) + `"`
 }
 
-// checkAgentUser requires the agent to run as ssh.user, so state paths,
-// rootless Podman, and the deploy lock match what pushed deploys use.
-// commandDeploy runs agent.deploy_command under the host's deploy lock, the
-// lock a pushed `azud deploy` takes, so the two never overlap. The command
-// learns the lock's absolute path from AZUD_DEPLOY_LOCK and must not wait for
-// that lock, or start an `azud deploy` or `azud rollback` of its own, which
-// would wait for it.
-func commandDeploy(cfg *config.Config, locker remoteLocker, host, ref string, out io.Writer) func(context.Context, string) error {
-	lockFile, lockTimeout := deploy.DeployLock(cfg)
+// commandDeploy runs agent.deploy_command for an image. The agent holds the host's
+// deploy lock around it, the lock a pushed `azud deploy` takes, so the two never
+// overlap. The command learns the lock's absolute path from AZUD_DEPLOY_LOCK and
+// must not wait for that lock, or start an `azud deploy` or `azud rollback` of its
+// own, which would wait for it.
+func commandDeploy(cfg *config.Config, ref string, out io.Writer) func(context.Context, string) error {
+	lockFile, _ := deploy.DeployLock(cfg)
 	return func(ctx context.Context, image string) error {
 		// lockFile may start with ${HOME} for the shell that takes the lock.
 		// Nothing expands the value of an environment variable.
@@ -450,20 +451,35 @@ func commandDeploy(cfg *config.Config, locker remoteLocker, host, ref string, ou
 			},
 			Output: out,
 		}
-		var deployErr error
-		if err := locker.WithRemoteLock(host, lockFile, lockTimeout, func() error {
-			deployErr = deployer.Deploy(ctx, image)
+		return deployer.Deploy(ctx, image)
+	}
+}
+
+// deployLock returns a function that runs fn holding the host's deploy lock.
+func deployLock(cfg *config.Config, locker remoteLocker, host string) func(func() error) error {
+	lockFile, timeout := deploy.DeployLock(cfg)
+	return func(fn func() error) error {
+		var fnErr error
+		if err := locker.WithRemoteLock(host, lockFile, timeout, func() error {
+			fnErr = fn()
 			return nil
 		}); err != nil {
 			return fmt.Errorf("failed to acquire deployment lock: %w", err)
 		}
-		return deployErr
+		return fnErr
 	}
 }
 
-// remoteLocker is the part of the SSH client commandDeploy needs.
+// remoteLocker is the part of the local runner deployLock needs.
 type remoteLocker interface {
 	WithRemoteLock(host, lockFile string, timeout time.Duration, fn func() error) error
+}
+
+// imagePresent reports whether image is already on host. An answer it cannot get
+// counts as no: the deploy then pulls, as it would have.
+func imagePresent(client *podman.Client, host, image string) bool {
+	present, err := podman.NewImageManager(client).Exists(host, image)
+	return err == nil && present
 }
 
 // releaseClient returns the client to deploy release with: the agent's own,
@@ -532,6 +548,8 @@ func checkBundleSecretsPaths(cfg *config.Config) error {
 	return nil
 }
 
+// checkAgentUser requires the agent to run as ssh.user, so state paths,
+// rootless Podman, and the deploy lock match what pushed deploys use.
 func checkAgentUser(cfg *config.Config) error {
 	current, err := user.Current()
 	if err != nil {
