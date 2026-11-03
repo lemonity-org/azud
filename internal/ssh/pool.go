@@ -129,14 +129,14 @@ func (p *Pool) cleanup() {
 	}
 }
 
-// removeIdleConnections removes connections that have been idle too long
+// removeIdleConnections removes connections that have been idle too long. A
+// connection with a command running is not idle, however long the command takes.
 func (p *Pool) removeIdleConnections() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	now := time.Now()
 	for host, conn := range p.connections {
-		if now.Sub(conn.LastUsed()) > p.maxIdle {
+		if conn.idleLongerThan(p.maxIdle) {
 			_ = conn.Close()
 			delete(p.connections, host)
 		}

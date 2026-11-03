@@ -52,6 +52,14 @@ release notes for the corresponding signed tag.
   Pulls used to share `ssh.command_timeout`, so with the default of 35s a slow
   first pull failed the deploy. If `ssh.command_timeout` is longer, it applies
   to pulls too. A bundle that sets the new key needs an agent of this version.
+- Fixed a slow pull over SSH losing its connection after about 5 minutes. The
+  connection pool closed any connection it counted as idle, even with a command
+  running, so `deploy.pull_timeout` could not take effect beyond that. The pool
+  now leaves a connection alone while a command runs, and counts idle time from
+  when the last command finished.
+- Fixed a data race when an SSH command timed out or was canceled: its output
+  could still be written while the result was being read. Output that arrives
+  after that point is now dropped.
 - Fixed errors with no reason in them. When a command timed out, was canceled or
   lost its connection, most errors printed only its output, such as `failed to
   stop container: `, or the last lines of a pull. They now say what happened.
