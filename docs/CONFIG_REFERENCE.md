@@ -287,9 +287,6 @@ container's environment.
 
 ```yaml
 builder:
-  remote:
-    host: 203.0.113.12
-    arch: amd64
   platforms: ["linux/amd64", "linux/arm64"]
   multiarch: true
   secrets:
@@ -300,29 +297,16 @@ builder:
       ref: ghcr.io/your-org/my-app-cache
 ```
 
-With `builder.remote.host`, Azud streams the build context to a private
-directory created with `mktemp -d` (mode `0700`) as
-`/tmp/azud-build-<service>.XXXXXXXXXX` on the builder, and removes it after the
-build or as soon as a sync step fails. The builder needs `mktemp`, which every
-supported Linux distribution provides.
-
-Remote build contexts never include the local secrets file: the configured
-`secrets_path` (resolved from the working directory, including through
-symlinks and hard links) and any `.azud/secrets` at any depth are excluded even
-if `.containerignore`/`.dockerignore` tries to re-include them, together with
-any `.secrets-*.tmp` file an interrupted secrets write left next to them.
-
-Local builds pass `podman build --ignorefile` with a temporary copy of the
+Builds pass `podman build --ignorefile` with a temporary copy of the
 ignore file Podman would use for the build (`<Dockerfile>.dockerignore`,
 `<Dockerfile>.containerignore`, `.containerignore`, then `.dockerignore`).
 Azud appends `.azud/secrets` at any depth, the configured `secrets_path` when
 it is inside the build context, and the secrets writer's `.secrets-*.tmp` files
 next to them as the last rules, so a `!` rule cannot put them back. Symlinks
-are resolved as for remote builds: a `secrets_path` that links to a file in the
-context is excluded under the target's path too, as is one reached through a
-symlinked context directory. Podman matches these rules by path, so unlike
-remote builds, a hard link to the secrets file under another name is not
-excluded, and on a case-insensitive filesystem (the macOS default) a
+are resolved: a `secrets_path` that links to a file in the context is excluded
+under the target's path too, as is one reached through a symlinked context
+directory. Podman matches these rules by path, so a hard link to the secrets
+file under another name is not excluded, and on a case-insensitive filesystem (the macOS default) a
 `secrets_path` spelled with different letter case than the build context is
 not recognized as inside it. `secrets_path` must not contain `..`. The flag
 needs a Podman release that supports `--ignorefile` (4.0 or

@@ -3,7 +3,9 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/lemonity-org/azud/internal/secretsfile"
@@ -93,11 +95,9 @@ func effectiveContainerIgnore(contextDir, dockerfile string) ([]byte, error) {
 // exclude: .azud/secrets at any depth (projects nested below the context, as
 // in monorepos), the configured secrets file when it is inside the build
 // context, and leftover temporary files of the secrets writer next to either.
-// Secrets paths are resolved as for remote builds, so a secrets file that is
-// reached through a symbolic link, or a context that is, is excluded under
-// both its configured and its real path. Podman matches paths, so unlike
-// remote builds a hard link to a secrets file under another name is not
-// caught.
+// A secrets file that is reached through a symbolic link, or a context that is,
+// is excluded under both its configured and its real path. Podman matches
+// paths, so a hard link to a secrets file under another name is not caught.
 func mandatoryLocalBuildExcludes(contextDir string) ([]string, error) {
 	excludes := []string{".azud/secrets", "**/.azud/secrets", ".azud/.secrets-*.tmp", "**/.azud/.secrets-*.tmp"}
 
@@ -135,6 +135,71 @@ func mandatoryLocalBuildExcludes(contextDir string) ([]string, error) {
 		}
 	}
 	return excludes, nil
+}
+
+// contextExclusions lists the local secrets files inside a build context.
+type contextExclusions struct {
+	// paths are context-relative, slash-separated paths.
+	paths []string
+	// tempDirs are the context-relative directories of the secrets files,
+	// where the secrets writer may leave .secrets-*.tmp copies behind.
+	tempDirs []string
+}
+
+// secretContextExclusions resolves the configured local secrets file paths
+// against the build context. Paths are compared exactly rather than as ignore
+// patterns, so file names containing glob characters are still excluded.
+// Relative secrets paths are resolved against the working directory, which is
+// how the config loader reads them.
+func secretContextExclusions(absContext string) contextExclusions {
+	var candidates []string
+	if cfg != nil && cfg.SecretsPath != "" {
+		candidates = append(candidates, cfg.SecretsPath)
+	}
+	candidates = append(candidates, getSecretsFilePath(), filepath.Join(".azud", "secrets"))
+
+	contexts := []string{absContext}
+	if real, err := filepath.EvalSymlinks(absContext); err == nil && real != absContext {
+		contexts = append(contexts, real)
+	}
+
+	var excluded contextExclusions
+	seenPaths := make(map[string]bool)
+	for _, candidate := range candidates {
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		variants := []string{abs}
+		real, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			// A missing secrets file may still have writer temp files in
+			// its real parent directory.
+			if dir, dirErr := filepath.EvalSymlinks(filepath.Dir(abs)); dirErr == nil {
+				real, err = filepath.Join(dir, filepath.Base(abs)), nil
+			}
+		}
+		if err == nil && real != abs {
+			variants = append(variants, real)
+		}
+		for _, contextDir := range contexts {
+			for _, variant := range variants {
+				rel, err := filepath.Rel(contextDir, variant)
+				if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					continue
+				}
+				rel = filepath.ToSlash(rel)
+				if !seenPaths[rel] {
+					seenPaths[rel] = true
+					excluded.paths = append(excluded.paths, rel)
+				}
+				if dir := path.Dir(rel); !slices.Contains(excluded.tempDirs, dir) {
+					excluded.tempDirs = append(excluded.tempDirs, dir)
+				}
+			}
+		}
+	}
+	return excluded
 }
 
 // escapeIgnorePattern turns a literal context-relative path into an ignore

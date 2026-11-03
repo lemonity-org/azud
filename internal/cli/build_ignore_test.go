@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -184,7 +185,7 @@ func TestBuildLocalPassesMandatoryIgnoreFile(t *testing.T) {
 	}
 }
 
-func TestLocalBuildExcludesMatchRemoteForNestedSecrets(t *testing.T) {
+func TestLocalBuildExcludesNestedSecrets(t *testing.T) {
 	root := t.TempDir()
 	files := []string{
 		"apps/web/Dockerfile",
@@ -206,14 +207,9 @@ func TestLocalBuildExcludesMatchRemoteForNestedSecrets(t *testing.T) {
 	}
 	defer cleanup()
 	local := parseIgnorePatterns(readFileString(t, path))
-	remote := archiveHeadersExcluding(t, root, readContainerIgnore(root), secretContextExclusions(root))
 
 	for _, name := range files {
 		localKept := !shouldIgnore(name, false, local)
-		_, remoteKept := remote[name]
-		if localKept != remoteKept {
-			t.Errorf("%s: kept by local build = %v, by remote build = %v", name, localKept, remoteKept)
-		}
 		if wantKept := !strings.Contains(name, ".azud/"); localKept != wantKept {
 			t.Errorf("%s: kept by local build = %v, want %v", name, localKept, wantKept)
 		}
@@ -287,4 +283,175 @@ func TestLocalBuildExcludesResolveSymlinks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// useSecretsPath points the package config at secretsPath and runs the test
+// from workDir, matching how the loader resolves relative secrets paths.
+func useSecretsPath(t *testing.T, workDir, secretsPath string) {
+	t.Helper()
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+	cfg = &config.Config{SecretsPath: secretsPath}
+	t.Chdir(workDir)
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecretContextExclusions(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	writeTestFile(t, filepath.Join(project, "config", "prod.secrets"), "A=1\n")
+	writeTestFile(t, filepath.Join(project, "config", "[prod].secrets"), "A=1\n")
+	writeTestFile(t, filepath.Join(project, "config", "real.secrets"), "A=1\n")
+	writeTestFile(t, filepath.Join(outside, "prod.secrets"), "A=1\n")
+	if err := os.Symlink("real.secrets", filepath.Join(project, "config", "link.secrets")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	linkedContext := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(project, linkedContext); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		secretsPath string
+		context     string
+		want        []string
+		notWant     []string
+	}{
+		{name: "relative", secretsPath: "config/prod.secrets", context: project, want: []string{"config/prod.secrets", ".azud/secrets"}},
+		{name: "dot relative", secretsPath: "./config/prod.secrets", context: project, want: []string{"config/prod.secrets"}},
+		{name: "absolute inside context", secretsPath: filepath.Join(project, "config", "prod.secrets"), context: project, want: []string{"config/prod.secrets"}},
+		{name: "absolute outside context", secretsPath: filepath.Join(outside, "prod.secrets"), context: project, want: []string{".azud/secrets"}, notWant: []string{"prod.secrets", "../"}},
+		{name: "glob characters", secretsPath: "config/[prod].secrets", context: project, want: []string{"config/[prod].secrets"}},
+		{name: "context through symlink", secretsPath: "config/prod.secrets", context: linkedContext, want: []string{"config/prod.secrets"}},
+		{name: "secrets path is a symlink", secretsPath: "config/link.secrets", context: project, want: []string{"config/link.secrets", "config/real.secrets"}},
+		{name: "missing file", secretsPath: "config/missing.secrets", context: project, want: []string{"config/missing.secrets"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useSecretsPath(t, project, tt.secretsPath)
+			got := secretContextExclusions(tt.context)
+			for _, want := range tt.want {
+				if !slices.Contains(got.paths, want) {
+					t.Errorf("secretContextExclusions(%q) paths = %v, missing %q", tt.context, got.paths, want)
+				}
+			}
+			for _, path := range got.paths {
+				for _, notWant := range tt.notWant {
+					if strings.HasPrefix(path, notWant) {
+						t.Errorf("secretContextExclusions(%q) paths = %v, unexpected %q", tt.context, got.paths, path)
+					}
+				}
+			}
+		})
+	}
+}
+
+// ignorePattern represents a parsed .dockerignore / .containerignore line. It
+// and the functions below model how podman applies the generated ignore file.
+type ignorePattern struct {
+	pattern string
+	negate  bool
+}
+
+// parseIgnorePatterns parses a .dockerignore file into patterns.
+func parseIgnorePatterns(content string) []ignorePattern {
+	var patterns []ignorePattern
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		negate := strings.HasPrefix(line, "!")
+		if negate {
+			line = strings.TrimPrefix(line, "!")
+		}
+		line = strings.TrimPrefix(line, "/")
+		line = strings.TrimSuffix(line, "/")
+		patterns = append(patterns, ignorePattern{pattern: line, negate: negate})
+	}
+	return patterns
+}
+
+// shouldIgnore checks if a path should be excluded based on the ignore
+// patterns. Later patterns override earlier ones (last match wins),
+// including negation patterns.
+func shouldIgnore(relPath string, isDir bool, patterns []ignorePattern) bool {
+	ignored := false
+	for _, p := range patterns {
+		if matchIgnorePattern(relPath, p.pattern) {
+			ignored = !p.negate
+		}
+	}
+	return ignored
+}
+
+// matchIgnorePattern checks if a relative path matches a .dockerignore pattern.
+func matchIgnorePattern(relPath, pattern string) bool {
+	relPath = filepath.ToSlash(relPath)
+	pattern = filepath.ToSlash(pattern)
+	separator := "/"
+	// A slashless pattern applies to a file or directory with that basename
+	// at any depth (for example *.env matches config/private.env).
+	if !strings.Contains(pattern, separator) {
+		for _, component := range strings.Split(relPath, separator) {
+			if matchSimple(component, pattern) {
+				return true
+			}
+		}
+	}
+
+	// Handle **/ prefix (match in any directory depth)
+	if strings.HasPrefix(pattern, "**/") {
+		suffix := strings.TrimPrefix(pattern, "**/")
+		if matchSimple(relPath, suffix) {
+			return true
+		}
+		parts := strings.Split(relPath, separator)
+		for i := range parts {
+			sub := strings.Join(parts[i:], separator)
+			if matchSimple(sub, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Handle /** suffix (match everything under)
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		return relPath == prefix || strings.HasPrefix(relPath, prefix+separator)
+	}
+
+	// Direct match
+	if matchSimple(relPath, pattern) {
+		return true
+	}
+
+	// Match if the pattern matches a parent directory of the path
+	parts := strings.Split(relPath, separator)
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], separator)
+		if matchSimple(parent, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchSimple performs a filepath.Match-style glob match.
+func matchSimple(name, pattern string) bool {
+	matched, _ := path.Match(pattern, name)
+	return matched
 }

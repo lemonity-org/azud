@@ -617,11 +617,6 @@ func TestValidate_TrustedFingerprintsIncludeAllSSHHosts(t *testing.T) {
 				Command:  "echo ok",
 			},
 		},
-		Builder: BuilderConfig{
-			Remote: RemoteBuilderConfig{
-				Host: "builder.example.com",
-			},
-		},
 		SSH: SSHConfig{
 			Port: 22,
 			Proxy: SSHProxyConfig{
@@ -631,7 +626,6 @@ func TestValidate_TrustedFingerprintsIncludeAllSSHHosts(t *testing.T) {
 				"web.example.com":     {"SHA256:abc"},
 				"redis.example.com":   {"SHA256:def"},
 				"cron.example.com":    {"SHA256:ghi"},
-				"builder.example.com": {"SHA256:jkl"},
 				"bastion.example.com": {"SHA256:mno"},
 			},
 		},
@@ -1160,7 +1154,7 @@ func TestIsValidBuilderSSH(t *testing.T) {
 	}
 }
 
-func TestValidate_BuilderRemoteArch(t *testing.T) {
+func TestValidate_BuilderRemote(t *testing.T) {
 	cfg := &Config{
 		Service: "test",
 		Image:   "test:latest",
@@ -1170,23 +1164,19 @@ func TestValidate_BuilderRemoteArch(t *testing.T) {
 		Proxy: ProxyConfig{Host: "test.example.com"},
 		SSH:   SSHConfig{Port: 22},
 		Builder: BuilderConfig{
-			Remote: RemoteBuilderConfig{
-				Host: "builder.example.com",
-				Arch: "mips", // invalid
-			},
+			Remote: RemoteBuilderConfig{Host: "builder.example.com", Arch: "amd64"},
 		},
 	}
 
 	err := Validate(cfg)
-	if err == nil || !strings.Contains(err.Error(), "builder.remote.arch") {
-		t.Fatalf("expected builder.remote.arch error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "builder.remote.host") || !strings.Contains(err.Error(), "removed in Azud 2") {
+		t.Fatalf("Validate() = %v, want the removal error", err)
 	}
 
-	// Valid arch
-	cfg.Builder.Remote.Arch = "amd64"
-	err = Validate(cfg)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+	// The arch alone does nothing.
+	cfg.Builder.Remote.Host = ""
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() = %v", err)
 	}
 }
 

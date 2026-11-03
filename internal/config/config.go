@@ -269,7 +269,8 @@ type BuilderConfig struct {
 	// Build context
 	Context string `yaml:"context"`
 
-	// Remote builder configuration
+	// Remote keys do nothing. They parse so that stored releases that set them
+	// stay readable, and Validate refuses host.
 	Remote RemoteBuilderConfig `yaml:"remote"`
 
 	// Secrets for build
@@ -290,12 +291,10 @@ type CacheConfig struct {
 	Options map[string]string `yaml:"options"`
 }
 
-// RemoteBuilderConfig holds remote builder settings
+// RemoteBuilderConfig holds keys that no build acts on. Validate refuses Host,
+// and FromRelease replaces them with the server's.
 type RemoteBuilderConfig struct {
-	// Remote host
 	Host string `yaml:"host"`
-
-	// Target architecture
 	Arch string `yaml:"arch"`
 }
 
@@ -1045,8 +1044,7 @@ func (c *Config) GetAllCronHosts() []string {
 
 // GetWorkloadHosts returns all unique hosts that run application, accessory,
 // or cron containers. These are the only hosts that consume the remote runtime
-// secrets file; the remote builder and SSH bastion are not included unless
-// they also run a workload.
+// secrets file; the SSH bastion is not included unless it also runs a workload.
 func (c *Config) GetWorkloadHosts() []string {
 	hostSet := make(map[string]bool)
 	var hosts []string
@@ -1079,9 +1077,6 @@ func (c *Config) GetAllSSHHosts() []string {
 
 	for _, host := range c.GetWorkloadHosts() {
 		addHost(host)
-	}
-	if c.Builder.Remote.Host != "" {
-		addHost(c.Builder.Remote.Host)
 	}
 	if c.SSH.Proxy.Host != "" {
 		addHost(c.SSH.Proxy.Host)

@@ -107,7 +107,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 	sshClient := createSSHClient()
 	defer func() { _ = sshClient.Close() }()
 
-	if err := validateBuilderSecretRefs(sshClient); err != nil {
+	if err := validateBuilderSecretRefs(); err != nil {
 		return err
 	}
 
@@ -223,10 +223,10 @@ func checkLocalSecretsFileMode() error {
 	return nil
 }
 
-func validateBuilderSecretRefs(sshClient *ssh.Client) error {
+func validateBuilderSecretRefs() error {
 	var missing []string
 	for _, spec := range cfg.Builder.Secrets {
-		for _, ref := range validateBuilderSecret(spec, sshClient) {
+		for _, ref := range validateBuilderSecret(spec) {
 			missing = append(missing, fmt.Sprintf("builder.secrets:%s", ref))
 		}
 	}
@@ -254,7 +254,7 @@ func secretAvailable(key string) bool {
 	return false
 }
 
-func validateBuilderSecret(spec string, sshClient *ssh.Client) []string {
+func validateBuilderSecret(spec string) []string {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return nil
@@ -262,9 +262,6 @@ func validateBuilderSecret(spec string, sshClient *ssh.Client) []string {
 
 	// Plain key reference
 	if !strings.Contains(spec, "=") {
-		if cfg.Builder.Remote.Host != "" {
-			return nil
-		}
 		if secretAvailable(spec) {
 			return nil
 		}
@@ -286,60 +283,16 @@ func validateBuilderSecret(spec string, sshClient *ssh.Client) []string {
 	}
 
 	var missing []string
-	if env := fields["env"]; env != "" {
-		if cfg.Builder.Remote.Host != "" && sshClient != nil {
-			if !remoteEnvAvailable(sshClient, cfg.Builder.Remote.Host, env) {
-				missing = append(missing, fmt.Sprintf("env:%s", env))
-			}
-		} else if os.Getenv(env) == "" {
-			missing = append(missing, fmt.Sprintf("env:%s", env))
-		}
+	if env := fields["env"]; env != "" && os.Getenv(env) == "" {
+		missing = append(missing, fmt.Sprintf("env:%s", env))
 	}
 	if src := fields["src"]; src != "" {
-		if cfg.Builder.Remote.Host != "" && sshClient != nil {
-			if !remoteFileExists(sshClient, cfg.Builder.Remote.Host, src) {
-				missing = append(missing, fmt.Sprintf("src:%s", src))
-			}
-		} else if _, err := os.Stat(src); err != nil {
+		if _, err := os.Stat(src); err != nil {
 			missing = append(missing, fmt.Sprintf("src:%s", src))
 		}
 	}
 
 	return missing
-}
-
-func remoteEnvAvailable(sshClient *ssh.Client, host, name string) bool {
-	if !validEnvName(name) {
-		return false
-	}
-	cmd := fmt.Sprintf("printenv %s >/dev/null 2>&1", name) // safe: validEnvName restricts shell syntax
-	result, err := sshClient.Execute(host, cmd)
-	return err == nil && result.ExitCode == 0
-}
-
-func remoteFileExists(sshClient *ssh.Client, host, path string) bool {
-	cmd := fmt.Sprintf("test -f %s", shellQuote(path)) // safe: path is shell quoted
-	result, err := sshClient.Execute(host, cmd)
-	return err == nil && result.ExitCode == 0
-}
-
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if i == 0 {
-			if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
-				return false
-			}
-			continue
-		}
-		if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
-			return false
-		}
-	}
-	return true
 }
 
 func shellQuote(value string) string {

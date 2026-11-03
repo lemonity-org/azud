@@ -383,9 +383,8 @@ azud app details [flags]
 
 #### `azud env push`
 Push secrets from local `.azud/secrets` to servers. Secrets go only to hosts
-that run application, accessory, or cron containers; `builder.remote.host` and
-`ssh.proxy.host` do not receive them unless they also run one of those
-workloads. `--host` must name one of those workload hosts. A secret value that
+that run application, accessory, or cron containers; `ssh.proxy.host` does not
+receive them unless it also runs one of those workloads. `--host` must name one of those workload hosts. A secret value that
 contains a CR, LF, or NUL is rejected, naming only the key, before any host is
 contacted.
 **Flags:** `--host`
@@ -437,8 +436,8 @@ Delete a secret.
 
 #### `azud registry login`
 Login to the configured registry on all servers. `--host` must name a
-configured server, accessory, cron, or `builder.remote.host` host; the SSH
-bastion and unconfigured hosts are rejected before the password is read.
+configured server, accessory, or cron host; the SSH bastion and unconfigured
+hosts are rejected before the password is read.
 **Flags:** `--host`
 
 #### `azud registry logout`

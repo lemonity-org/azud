@@ -2,7 +2,6 @@ package podman
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -92,7 +91,6 @@ type BuildConfig struct {
 	Target     string
 	CacheFrom  []string
 	CacheTo    string
-	Platform   string
 	NoCache    bool
 	Pull       bool
 	Squash     bool
@@ -101,103 +99,14 @@ type BuildConfig struct {
 	Options    []string // Extra podman build argv values, one per element; each is shell-quoted
 }
 
-func (c *BuildConfig) BuildCommand() string {
-	args := []string{"build"}
-
-	if c.Dockerfile != "" {
-		args = append(args, "-f", shell.Quote(c.Dockerfile))
-	}
-
-	if c.IgnoreFile != "" {
-		args = append(args, "--ignorefile", shell.Quote(c.IgnoreFile))
-	}
-
-	if c.Tag != "" {
-		args = append(args, "-t", shell.Quote(c.Tag))
-	}
-
-	for _, tag := range c.Tags {
-		args = append(args, "-t", shell.Quote(tag))
-	}
-
-	argKeys := make([]string, 0, len(c.Args))
-	for key := range c.Args {
-		argKeys = append(argKeys, key)
-	}
-	sort.Strings(argKeys)
-	for _, key := range argKeys {
-		value := c.Args[key]
-		args = append(args, "--build-arg", shell.Quote(fmt.Sprintf("%s=%s", key, value)))
-	}
-
-	if c.Target != "" {
-		args = append(args, "--target", shell.Quote(c.Target))
-	}
-
-	for _, cache := range c.CacheFrom {
-		args = append(args, "--cache-from", shell.Quote(cache))
-	}
-	if c.CacheTo != "" {
-		args = append(args, "--cache-to", shell.Quote(c.CacheTo))
-	}
-
-	if c.Platform != "" {
-		args = append(args, "--platform", shell.Quote(c.Platform))
-	}
-
-	if c.NoCache {
-		args = append(args, "--no-cache")
-	}
-
-	if c.Pull {
-		args = append(args, "--pull")
-	}
-
-	for _, secret := range c.Secrets {
-		args = append(args, "--secret", shell.Quote(secret))
-	}
-
-	for _, s := range c.SSH {
-		args = append(args, "--ssh", shell.Quote(s))
-	}
-
-	// Options are argv values such as "--annotation=k=v", not shell fragments.
-	// Quote each one so a malformed value cannot escape into the build shell.
-	args = append(args, shell.QuoteAll(c.Options)...)
-
-	context := c.Context
-	if context == "" {
-		context = "."
-	}
-	args = append(args, shell.Quote(context))
-
-	return "podman " + strings.Join(args, " ")
-}
-
-func (m *ImageManager) Build(host string, config *BuildConfig) error {
-	cmd := config.BuildCommand()
-	result, err := m.client.ssh.Execute(host, cmd)
-	if err != nil {
-		return err
-	}
-
-	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to build image: %s", result.Stderr)
-	}
-
-	return nil
-}
-
 // ManifestBuildConfig holds configuration for multi-arch manifest builds.
 type ManifestBuildConfig struct {
 	BuildConfig
 	Platforms []string // e.g., ["linux/amd64", "linux/arm64"]
-	Push      bool
 	Output    string
 }
 
-// ManifestBuildCommands generates manifest create, per-platform builds,
-// and optional manifest push commands.
+// ManifestBuildCommands generates manifest create and per-platform builds.
 func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 	var commands []string
 
@@ -268,39 +177,7 @@ func (c *ManifestBuildConfig) ManifestBuildCommands() []string {
 		commands = append(commands, "podman "+strings.Join(args, " "))
 	}
 
-	if c.Push {
-		commands = append(commands, fmt.Sprintf("podman manifest push %s %s", shell.Quote(tag), shell.Quote(tag)))
-		seen := map[string]struct{}{tag: {}}
-		for _, t := range c.Tags {
-			if t == "" {
-				continue
-			}
-			if _, ok := seen[t]; ok {
-				continue
-			}
-			seen[t] = struct{}{}
-			commands = append(commands, fmt.Sprintf("podman manifest push %s %s", shell.Quote(tag), shell.Quote(t)))
-		}
-	}
-
 	return commands
-}
-
-func (m *ImageManager) ManifestBuild(host string, config *ManifestBuildConfig) error {
-	commands := config.ManifestBuildCommands()
-
-	for _, cmd := range commands {
-		result, err := m.client.ssh.Execute(host, cmd)
-		if err != nil {
-			return err
-		}
-
-		if result.ExitCode != 0 {
-			return fmt.Errorf("failed to build image: %s", result.Stderr)
-		}
-	}
-
-	return nil
 }
 
 func (m *ImageManager) List(host string, filters map[string]string) ([]Image, error) {

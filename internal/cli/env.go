@@ -39,8 +39,8 @@ when containers are started. Registry and proxy TLS credentials stay local to
 Azud and must use distinct names from application env.secret entries.
 
 Secrets are pushed only to hosts that run application, accessory, or cron
-containers. The remote builder and SSH bastion do not receive them unless they
-also run a workload.
+containers. The SSH bastion does not receive them unless it also runs a
+workload.
 
 Example:
   azud env push           # Push to all server, accessory, and cron hosts
@@ -584,9 +584,9 @@ func getSecretsFilePath() string {
 }
 
 // secretTargetHosts returns the hosts that receive the runtime secrets file.
-// Only workload hosts (servers, accessories, and cron) consume it, so the
-// remote builder and SSH bastion never receive application secrets unless
-// they also run a workload. An explicit host must be one of those hosts.
+// Only workload hosts (servers, accessories, and cron) consume it, so the SSH
+// bastion never receives application secrets unless it also runs a workload.
+// An explicit host must be one of those hosts.
 func secretTargetHosts(cfg *config.Config, host string) ([]string, error) {
 	workloadHosts := cfg.GetWorkloadHosts()
 	if host == "" {

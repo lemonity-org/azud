@@ -19,8 +19,7 @@ func TestRegistryTargetHosts(t *testing.T) {
 		Cron: map[string]config.CronConfig{
 			"report": {Host: "cron-1"},
 		},
-		Builder: config.BuilderConfig{Remote: config.RemoteBuilderConfig{Host: "builder-1"}},
-		SSH:     config.SSHConfig{Proxy: config.SSHProxyConfig{Host: "bastion-1"}},
+		SSH: config.SSHConfig{Proxy: config.SSHProxyConfig{Host: "bastion-1"}},
 	}
 
 	tests := []struct {
@@ -33,7 +32,6 @@ func TestRegistryTargetHosts(t *testing.T) {
 		{name: "server host", host: "web-2", want: []string{"web-2"}},
 		{name: "accessory host", host: "db-1", want: []string{"db-1"}},
 		{name: "cron host", host: "cron-1", want: []string{"cron-1"}},
-		{name: "remote builder", host: "builder-1", want: []string{"builder-1"}},
 		{name: "ssh bastion", host: "bastion-1", wantErr: "SSH bastion"},
 		{name: "unknown host", host: "203.0.113.99", wantErr: "is not configured"},
 	}

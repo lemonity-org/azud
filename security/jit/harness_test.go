@@ -13,9 +13,7 @@
 package jit
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -455,10 +453,6 @@ func commandDump(commands []commandRecord) string {
 // Shared handlers
 // ---------------------------------------------------------------------------
 
-// fakeBuildDir is the remote build directory the fake builder reports for the
-// "shop" service.
-const fakeBuildDir = "/tmp/azud-build-shop.jit0000001"
-
 // isCaddyAdminCall reports whether a command is a Caddy admin API request:
 // `<podman> exec [-i] azud-proxy curl ... --unix-socket <sock> ...`.
 func isCaddyAdminCall(command string) bool {
@@ -488,14 +482,7 @@ func permissive() fakeHandler {
 			return fakeResult{Stdout: "{}"}
 		case strings.Contains(command, "test -f"):
 			return fakeResult{Exit: 1}
-		case strings.Contains(command, "mktemp -d /tmp/azud-build-"):
-			// Remote build contexts live in a mktemp directory whose path
-			// the CLI reads back and validates.
-			return fakeResult{Stdout: fakeBuildDir + "\n"}
 		case strings.Contains(command, "cat > \"") || strings.Contains(command, "cat > "):
-			_, _ = io.ReadAll(stdin)
-			return fakeResult{}
-		case strings.Contains(command, "tar xzf -"):
 			_, _ = io.ReadAll(stdin)
 			return fakeResult{}
 		case strings.Contains(command, "--password-stdin"):
@@ -528,9 +515,6 @@ func proxyBootHandler() fakeHandler {
 		case strings.Contains(command, "cat > ") || strings.Contains(command, "umask 077"):
 			_, _ = io.ReadAll(stdin)
 			return fakeResult{}
-		case strings.Contains(command, "tar xzf -"):
-			_, _ = io.ReadAll(stdin)
-			return fakeResult{}
 		case strings.Contains(command, "podman run") && strings.Contains(command, "caddy"):
 			return fakeResult{}
 		case strings.Contains(command, "podman run"):
@@ -539,31 +523,4 @@ func proxyBootHandler() fakeHandler {
 			return fakeResult{}
 		}
 	}
-}
-
-// tarEntries decodes a tar.gz stream and returns entry names with contents.
-func tarEntries(t *testing.T, data []byte) map[string][]byte {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("gzip: %v", err)
-	}
-	defer func() { _ = gz.Close() }()
-	tr := tar.NewReader(gz)
-	entries := make(map[string][]byte)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("tar next: %v", err)
-		}
-		body, err := io.ReadAll(tr)
-		if err != nil {
-			t.Fatalf("tar read: %v", err)
-		}
-		entries[strings.TrimSuffix(hdr.Name, "/")] = body
-	}
-	return entries
 }

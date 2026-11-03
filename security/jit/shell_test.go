@@ -300,30 +300,32 @@ func TestControl_ExecAndLogsBuildersKeepPayloadsAsArguments(t *testing.T) {
 	}
 }
 
-func TestControl_BuildCommandBuilderKeepsPayloadsAsArguments(t *testing.T) {
+func TestControl_ManifestBuildCommandsKeepPayloadsAsArguments(t *testing.T) {
 	dir := t.TempDir()
 	canary := filepath.Join(dir, "CANARY")
 	payload := "$(touch " + canary + ")"
 
-	cfg := &podman.BuildConfig{
-		Context:    "." + payload,
-		Dockerfile: "Dockerfile" + payload,
-		Tag:        "app" + payload + ":v1",
-		Tags:       []string{"app" + payload + ":latest"},
-		Args:       map[string]string{"K" + payload: "V" + payload},
-		Target:     "target" + payload,
-		CacheFrom:  []string{"type=local,src=/tmp" + payload},
-		CacheTo:    "type=local,dest=/tmp" + payload,
-		Platform:   "linux/amd64" + payload,
-		NoCache:    true,
-		Pull:       true,
-		Secrets:    []string{"id=secret,src=/tmp" + payload},
-		SSH:        []string{"default" + payload},
+	cfg := &podman.ManifestBuildConfig{
+		BuildConfig: podman.BuildConfig{
+			Context:    "." + payload,
+			Dockerfile: "Dockerfile" + payload,
+			Tag:        "app" + payload + ":v1",
+			Tags:       []string{"app" + payload + ":latest"},
+			Args:       map[string]string{"K" + payload: "V" + payload},
+			Target:     "target" + payload,
+			CacheFrom:  []string{"type=local,src=/tmp" + payload},
+			CacheTo:    "type=local,dest=/tmp" + payload,
+			NoCache:    true,
+			Pull:       true,
+			Secrets:    []string{"id=secret,src=/tmp" + payload},
+			SSH:        []string{"default" + payload},
+		},
+		Platforms: []string{"linux/amd64" + payload},
 	}
-	args := podmanArgv(t, dir, cfg.BuildCommand())
+	args := podmanArgv(t, dir, cfg.ManifestBuildCommands()[1])
 	for _, want := range []string{
 		"-f", "Dockerfile" + payload,
-		"-t", "app" + payload + ":v1",
+		"--manifest", "app" + payload + ":v1",
 		"-t", "app" + payload + ":latest",
 		"--build-arg", "K" + payload + "=V" + payload,
 		"--target", "target" + payload,
@@ -343,24 +345,19 @@ func TestControl_BuildCommandBuilderKeepsPayloadsAsArguments(t *testing.T) {
 	}
 }
 
-// Control: BuildConfig.Options (and ManifestBuildConfig.Options) are quoted one
-// argv value per element, like every other build field. No config field feeds
+// Control: ManifestBuildConfig.Options are quoted one argv value per element,
+// like every other build field. No config field feeds
 // Options today; this keeps the builder safe for future callers.
 func TestControl_BuildConfigOptionsAreQuoted(t *testing.T) {
 	dir := t.TempDir()
 	canary := filepath.Join(dir, "CANARY")
 	option := "--annotation=$(touch " + canary + ")"
-	cfg := &podman.BuildConfig{
-		Context: ".",
-		Options: []string{option},
-	}
-	if args := podmanArgv(t, dir, cfg.BuildCommand()); !argvContains(args, option) {
-		t.Errorf("build argv missing literal option %q: %q", option, bytesToArgs(args))
-	}
-
 	manifest := &podman.ManifestBuildConfig{
-		BuildConfig: *cfg,
-		Platforms:   []string{"linux/amd64", "linux/arm64"},
+		BuildConfig: podman.BuildConfig{
+			Context: ".",
+			Options: []string{option},
+		},
+		Platforms: []string{"linux/amd64", "linux/arm64"},
 	}
 	commands := manifest.ManifestBuildCommands()
 	for _, command := range commands[1 : 1+len(manifest.Platforms)] {

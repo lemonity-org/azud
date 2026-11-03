@@ -343,10 +343,6 @@ builder:
   # Build arguments
   # args:
   #   RUBY_VERSION: "3.2"
-  # Remote builder (for CI/CD)
-  # remote:
-  #   host: builder.example.com
-  #   arch: amd64
 
 # Deployment settings
 deploy:

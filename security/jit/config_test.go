@@ -621,8 +621,8 @@ done
 			if !containsLine(lines, "node_modules") {
 				t.Fatalf("user ignore patterns were dropped:\n%s", ignore)
 			}
-			// Like remote builds, local builds exclude the secrets files of
-			// projects nested below the context and the writer's temp files.
+			// Builds exclude the secrets files of projects nested below the
+			// context and the writer's temp files.
 			for _, want := range []string{"**/.azud/secrets", "**/.azud/.secrets-*.tmp"} {
 				if !containsLine(lines, want) {
 					t.Fatalf("ignore file does not exclude %s:\n%s", want, ignore)

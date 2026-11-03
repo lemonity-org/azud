@@ -202,6 +202,31 @@ proxy:
 	}
 }
 
+func TestFromReleaseReplacesARemoteBuilder(t *testing.T) {
+	base := []byte(`service: app
+image: ghcr.io/acme/app
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: app.example.com
+builder:
+  remote:
+    host: builder.example.com
+    arch: arm64
+`)
+	cfg, ignored, err := FromRelease(base, nil, releaseServer(t))
+	if err != nil {
+		t.Fatalf("FromRelease: %v", err)
+	}
+	if cfg.Builder.Remote != (RemoteBuilderConfig{}) {
+		t.Errorf("Builder.Remote = %+v, want the server's", cfg.Builder.Remote)
+	}
+	if !slices.Contains(ignored, "builder") {
+		t.Errorf("ignored = %v, want builder reported", ignored)
+	}
+}
+
 func TestFromReleaseRejectsAnotherServiceImageOrHost(t *testing.T) {
 	server := releaseServer(t)
 	release := func(service, image, host string) []byte {

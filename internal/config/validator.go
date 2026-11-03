@@ -683,23 +683,12 @@ func Validate(cfg *Config) error {
 	}
 
 	// Validate builder configuration
+	// builder.remote.arch does nothing, so a repository may leave it set.
 	if cfg.Builder.Remote.Host != "" {
-		if !isValidHost(cfg.Builder.Remote.Host) {
-			errs = append(errs, ValidationError{
-				Field:   "builder.remote.host",
-				Message: fmt.Sprintf("invalid remote builder host: %s", cfg.Builder.Remote.Host),
-			})
-		}
-	}
-
-	// Validate builder remote arch
-	if cfg.Builder.Remote.Host != "" && cfg.Builder.Remote.Arch != "" {
-		if !isValidArch(cfg.Builder.Remote.Arch) {
-			errs = append(errs, ValidationError{
-				Field:   "builder.remote.arch",
-				Message: fmt.Sprintf("invalid architecture: %s (expected one of: amd64, arm64, arm, 386, ppc64le, s390x, riscv64)", cfg.Builder.Remote.Arch),
-			})
-		}
+		errs = append(errs, ValidationError{
+			Field:   "builder.remote.host",
+			Message: "the remote builder is removed in Azud 2; build in CI or locally, and remove builder.remote from the configuration",
+		})
 	}
 
 	cacheType := strings.TrimSpace(cfg.Builder.Cache.Type)
@@ -1422,11 +1411,6 @@ func ValidateMinimumVersion(cfg *Config, currentVersion string) error {
 var knownArchitectures = map[string]bool{
 	"amd64": true, "arm64": true, "arm": true, "386": true,
 	"ppc64le": true, "s390x": true, "riscv64": true, "mips64le": true,
-}
-
-// isValidArch checks if an architecture string is a known value.
-func isValidArch(arch string) bool {
-	return knownArchitectures[strings.ToLower(arch)]
 }
 
 var platformRegex = regexp.MustCompile(`^[a-z]+/[a-z0-9]+(/[a-z0-9]+)?$`)
