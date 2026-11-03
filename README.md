@@ -29,7 +29,7 @@ one or more Podman hosts.
 
 - **Zero-downtime deployments** with blue-green pattern and health checks
 - **Automatic HTTPS** via Let's Encrypt through Caddy
-- **Multi-server scaling** with dynamic instance management
+- **Multi-server deployments** with role-based server groups
 - **Canary deployments** for gradual rollouts
 - **Native cron jobs** with job locking and timeouts
 - **Accessory management** for databases, caches, and other services
@@ -42,7 +42,7 @@ one or more Podman hosts.
 - `docs/GETTING_STARTED.md` - First deploy walkthrough
 - `docs/CONFIG_REFERENCE.md` - Configuration reference
 - `docs/HOW_IT_WORKS.md` - Architecture and deployment model
-- `docs/OPERATIONS.md` - Day-2 tasks (logs, scaling, canary, rollbacks)
+- `docs/OPERATIONS.md` - Day-2 tasks (logs, canary, rollbacks)
 - `docs/PRODUCTION_CHECKLIST.md` - Production readiness checklist
 - `docs/TROUBLESHOOTING.md` - Common failures and fixes
 - `docs/CHEATSHEET.md` - Command quick reference
@@ -207,13 +207,6 @@ builder:
 | `azud app exec -- <command>` | Execute command in container |
 | `azud app start/stop/restart` | Control application lifecycle |
 | `azud app details` | Show container status |
-
-### Scaling
-| Command | Description |
-|---------|-------------|
-| `azud scale web=3` | Set absolute instance count |
-| `azud scale web=+1` | Scale up by 1 |
-| `azud scale web=-1` | Scale down by 1 |
 
 ### Proxy
 | Command | Description |

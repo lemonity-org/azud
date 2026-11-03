@@ -37,11 +37,9 @@ azud app exec -- <command>
 azud app exec -it -- /bin/sh
 ```
 
-## Scaling and Canary
+## Canary
 
 ```bash
-azud scale web=3
-azud scale web=+1
 azud canary deploy --version v1.2.3 --weight 10
 azud canary weight 50
 azud canary promote

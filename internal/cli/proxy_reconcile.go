@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -220,27 +219,16 @@ func validateCanaryContainers(names []string, stable, canary string) error {
 	if !containsString(names, stable) || !containsString(names, canary) {
 		return fmt.Errorf("running canary state requires containers %s and %s", stable, canary)
 	}
-	for _, name := range names {
-		if name != stable && name != canary {
-			return fmt.Errorf("refusing reconciliation with scaled container %s during a running canary", name)
-		}
-	}
 	return nil
 }
 
 func selectProxyContainers(containers []podman.Container, service, stable, canary string) []string {
 	var names []string
-	prefix := stable + "-"
 	for _, c := range containers {
 		if c.Labels["azud.managed"] != "true" || c.Labels["azud.service"] != service || (c.Labels["azud.role"] != "web" && c.Labels["azud.role"] != "") {
 			continue
 		}
-		valid := c.Name == stable || (canary != "" && c.Name == canary)
-		if !valid && strings.HasPrefix(c.Name, prefix) {
-			i, err := strconv.Atoi(strings.TrimPrefix(c.Name, prefix))
-			valid = err == nil && i >= 0 && c.Labels["azud.instance"] == strconv.Itoa(i)
-		}
-		if valid {
+		if c.Name == stable || (canary != "" && c.Name == canary) {
 			names = append(names, c.Name)
 		}
 	}

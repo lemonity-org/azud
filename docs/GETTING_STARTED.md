@@ -161,7 +161,7 @@ Find the version tag from your deploy output or image tags.
 
 ## Next steps
 
-- `docs/OPERATIONS.md` - day-2 tasks (logs, scaling, canary)
+- `docs/OPERATIONS.md` - day-2 tasks (logs, canary)
 - `docs/HOW_IT_WORKS.md` - deployment model and proxy behavior
 - `docs/ADVANCED_USAGE.md` - accessories, volumes, and recipes
 - `docs/PRODUCTION_CHECKLIST.md` - production readiness checklist

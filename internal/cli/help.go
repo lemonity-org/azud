@@ -131,7 +131,7 @@ func rootCommandGroup(name string) string {
 	switch name {
 	case "agent", "build", "deploy", "history", "preflight", "redeploy", "release", "rollback", "setup":
 		return "DEPLOY"
-	case "accessory", "app", "canary", "cron", "proxy", "scale":
+	case "accessory", "app", "canary", "cron", "proxy":
 		return "OPERATE"
 	case "config", "env", "hooks", "init", "registry", "server", "ssh", "systemd":
 		return "SYSTEM"

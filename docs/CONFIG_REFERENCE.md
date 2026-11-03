@@ -69,9 +69,8 @@ Role options:
 old process before starting the candidate. If the replacement fails to start or
 cannot be activated, Azud stops it before restoring and restarting the previous
 container. This strategy deliberately trades a short service gap for a strict
-no-overlap guarantee. It requires exactly one host, is rejected for the
-proxy-serving `web` role, and cannot be used with `azud scale`. Before every
-deployment, Azud reconciles an interrupted transition and restores the previous
+no-overlap guarantee. It requires exactly one host and is rejected for the
+proxy-serving `web` role. Before every deployment, Azud reconciles an interrupted transition and restores the previous
 container before attempting another replacement.
 
 A `stop_first` deployment is refused while the role's generated systemd unit is

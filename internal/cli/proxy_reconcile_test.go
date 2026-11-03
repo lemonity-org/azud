@@ -16,12 +16,11 @@ func TestSelectProxyContainersRequiresExactIdentity(t *testing.T) {
 	containers := []podman.Container{
 		{Name: "shop-web", Labels: labels("web")},
 		{Name: "shop-web-2", Labels: map[string]string{"azud.managed": "true", "azud.service": "shop", "azud.role": "web", "azud.instance": "2"}},
-		{Name: "shop-web-3", Labels: labels("web")}, // missing instance label
 		{Name: "shop-web-deploy-1", Labels: labels("web")},
 		{Name: "shop-web-canary", Labels: labels("")},
 		{Name: "shopper-web", Labels: map[string]string{"azud.managed": "true", "azud.service": "shopper", "azud.role": "web"}},
 	}
-	want := []string{"shop-web", "shop-web-2", "shop-web-canary"}
+	want := []string{"shop-web", "shop-web-canary"}
 	if got := selectProxyContainers(containers, "shop", "shop-web", "shop-web-canary"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("selected = %v, want %v", got, want)
 	}
@@ -67,14 +66,11 @@ func TestUnmanagedCanaryStateRequiresPersistedWeights(t *testing.T) {
 	}
 }
 
-func TestValidateCanaryContainersRejectsScaledInstances(t *testing.T) {
+func TestValidateCanaryContainersRequiresBothContainers(t *testing.T) {
 	if err := validateCanaryContainers([]string{"shop", "shop-canary"}, "shop", "shop-canary"); err != nil {
 		t.Fatalf("valid canary containers rejected: %v", err)
 	}
 	if err := validateCanaryContainers([]string{"shop"}, "shop", "shop-canary"); err == nil {
 		t.Fatal("missing canary container accepted")
-	}
-	if err := validateCanaryContainers([]string{"shop", "shop-canary", "shop-2"}, "shop", "shop-canary"); err == nil {
-		t.Fatal("scaled container during canary accepted")
 	}
 }

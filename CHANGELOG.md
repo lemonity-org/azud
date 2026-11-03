@@ -6,6 +6,12 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Removed `azud scale` and `azud scale status`, for Azud 2.0. In 2.0 a service
+  runs on one server with one instance per role, so there is nothing to scale.
+  Before you upgrade, run `azud scale <role>=1` with 1.x for every role you
+  scaled. `azud proxy reconcile` no longer counts the extra instances as
+  upstreams, and no command removes them for you.
+
 ## 1.7.0 - 2026-11-03
 
 - Updated dependencies. Go is 1.27.3, the build image is

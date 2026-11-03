@@ -166,6 +166,15 @@ func IsVerbose() bool {
 	return verbose
 }
 
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func getConfigDir() string {
 	path := GetConfigPath()
 	if path == "" {
