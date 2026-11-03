@@ -103,7 +103,6 @@ type BuildConfig struct {
 type ManifestBuildConfig struct {
 	BuildConfig
 	Platforms []string // e.g., ["linux/amd64", "linux/arm64"]
-	CacheTo   string
 	Output    string
 }
 

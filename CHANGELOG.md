@@ -78,6 +78,8 @@ release notes for the corresponding signed tag.
 - `install.sh` no longer needs the GitHub CLI. Without it, it verifies the release's
   signed checksums with `cosign`, downloading a pinned copy if there is none. A
   release before this one has no signed checksums, so it still needs the GitHub CLI.
+- Fixed multi-architecture builds ignoring `builder.cache`'s export. Each platform's
+  build now passes `--cache-to`, as a single-architecture build always did.
 - Added `deploy.pull_timeout` (default 15m), which limits pulling one image.
   Pulls used to share `ssh.command_timeout`, so with the default of 35s a slow
   first pull failed the deploy. If `ssh.command_timeout` is longer, it applies
