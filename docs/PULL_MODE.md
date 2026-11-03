@@ -292,7 +292,9 @@ a lock, so they work while the agent is deploying.
 - **While a deploy has not finished.** The server may be running parts of two releases.
   `azud cron boot`, `azud accessory boot` and `azud proxy reconcile --repair` refuse, and
   name `azud agent run --once`, which finishes or undoes the deploy. Commands that read
-  use the last whole release, as does `azud cron run`, which leaves nothing behind.
+  use the last whole release. So does `azud cron run` with images, which leaves nothing
+  behind. With bundles it refuses too, because the secrets file may already hold the new
+  release's secrets.
   `azud proxy boot` and `reboot` still run, because they apply this server's own proxy
   settings and are the way back if the proxy is down.
 - **Inside a `deploy_command` script.** The journal open around the script is its own, so

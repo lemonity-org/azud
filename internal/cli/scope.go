@@ -45,7 +45,8 @@ const (
 	// is open.
 	releaseWhole = "whole"
 	// releaseRunning runs what the release specifies and writes nothing that stays:
-	// it needs a release, and runs while a journal is open.
+	// it needs a release. It runs while a journal is open only with images, whose
+	// deploys leave the secrets file alone.
 	releaseRunning = "running"
 	// releaseSpec writes from cfg, and needs a release only for the spec a bundle
 	// carries. With images that spec is in this server's configuration.
@@ -174,7 +175,10 @@ func deployCommandConfig(server *config.Config, effective *agent.Effective) *con
 // names what to do. A command that needs nothing says when nothing is deployed, on
 // stderr, because its stdout may be a container's logs.
 func checkRelease(cmd *cobra.Command, need string, server *config.Config, effective *agent.Effective) error {
-	if effective.Settling && (need == releaseWhole || need == releaseSpec) {
+	// A bundle's deploy swaps the secrets file before anything else, so a job started
+	// now would run the last whole release's image with the new release's secrets.
+	mixesSecrets := need == releaseRunning && server.Agent.Bundles()
+	if effective.Settling && (need == releaseWhole || need == releaseSpec || mixesSecrets) {
 		return fmt.Errorf("a deploy of %s has not finished, so this server may be running parts of two releases and `%s` would write from one of them. The agent finishes or undoes it on its next check. To do that now, run `azud agent run --once`, then run this again (`azud agent status` shows where it stands)",
 			effective.Journal.Digest, cmd.CommandPath())
 	}

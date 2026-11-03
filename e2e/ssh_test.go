@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -23,7 +24,11 @@ import (
 // reach a server through the SSH client, so `azud cron boot` runs here against real
 // Podman with no sshd to install. It goes when those commands run locally.
 func (h *harness) startSSH() error {
-	_, clientKey, err := ed25519.GenerateKey(rand.Reader)
+	clientPublic, clientKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	authorized, err := ssh.NewPublicKey(clientPublic)
 	if err != nil {
 		return err
 	}
@@ -45,7 +50,12 @@ func (h *harness) startSSH() error {
 		return err
 	}
 	config := &ssh.ServerConfig{
-		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+		// Anyone who gets in runs commands as this process, which may be root, and
+		// the listener is open to every local user.
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if !bytes.Equal(key.Marshal(), authorized.Marshal()) {
+				return nil, errors.New("unknown key")
+			}
 			return nil, nil
 		},
 	}

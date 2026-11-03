@@ -461,6 +461,22 @@ func TestWhileSettling(t *testing.T) {
 	}
 }
 
+// A bundle's deploy swaps the secrets file first, so a job started now would run the
+// last whole release's image with the new release's secrets.
+func TestCronRunRefusesWhileABundleDeploySettles(t *testing.T) {
+	s := newEffectiveServer(t, "agent:\n  source: bundle\n  track: production\n  insecure_skip_verify: true\n")
+	s.deployed(digestOne, nil)
+	s.settling(digestTwo)
+
+	_, err := loadConfig(cronRunCmd)
+	if err == nil || !strings.Contains(err.Error(), digestTwo) {
+		t.Fatalf("cron run while a bundle settles = %v", err)
+	}
+	if _, err := loadConfig(cronListCmd); err != nil {
+		t.Errorf("cron list only reads, so it still runs: %v", err)
+	}
+}
+
 func TestDeployCommandScriptActsForTheReleaseItIsDeploying(t *testing.T) {
 	section := "agent:\n  track: production\n  insecure_skip_verify: true\n  deploy_command: exec deploy \"$$AZUD_AGENT_IMAGE\"\n"
 	s := newEffectiveServer(t, section)
