@@ -464,7 +464,7 @@ func TestWhileSettling(t *testing.T) {
 // A bundle's deploy swaps the secrets file first, so a job started now would run the
 // last whole release's image with the new release's secrets.
 func TestCronRunRefusesWhileABundleDeploySettles(t *testing.T) {
-	s := newEffectiveServer(t, "agent:\n  source: bundle\n  track: production\n  insecure_skip_verify: true\n")
+	s := newEffectiveServer(t, "agent:\n  source: bundle\n  track: production\n  verify_command: cosign verify \"$$AZUD_AGENT_IMAGE\"\n")
 	s.deployed(digestOne, nil)
 	s.settling(digestTwo)
 
