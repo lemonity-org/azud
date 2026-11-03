@@ -1,577 +1,21 @@
 package cli
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
-	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/lemonity-org/azud/internal/agent"
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
-	"github.com/lemonity-org/azud/internal/registry"
 	"github.com/lemonity-org/azud/internal/release"
-	"github.com/lemonity-org/azud/internal/secretsfile"
 )
-
-// bundleApplier deploys release bundles on the server the agent runs on. The
-// server's own configuration is the trust anchor: config.FromRelease takes its
-// trust settings from it and checks the bundle belongs to this service,
-// repository and host.
-type bundleApplier struct {
-	server         *config.Config
-	repo           *registry.Repository
-	dir            string // <state dir>/agent/<service>/releases
-	identity       string
-	allowDowngrade bool
-	// deployed returns the digest of the release deployed now, or "".
-	deployed func() (string, error)
-	// withLock runs fn holding the host's deploy lock, the one pushed
-	// deploys take, so a pushed deploy never starts containers while the
-	// secrets file holds another release's secrets.
-	withLock func(fn func() error) error
-	// deploy deploys image (pinned by digest) with cfg on this server. The
-	// deploy lock is already held.
-	deploy func(ctx context.Context, cfg *config.Config, image string) error
-	// stopRoles stops role containers on this server, for roles a failed
-	// release added and its rollback does not replace.
-	stopRoles func(cfg *config.Config, roles []string) error
-	// runningRoles returns the roles of cfg with a running container.
-	runningRoles func(cfg *config.Config) ([]string, error)
-	// accessoryEnv returns the environment an accessory container runs
-	// with, or nil when it is not running. Optional.
-	accessoryEnv func(name string) (map[string]string, error)
-	// version is the running azud version, checked against a release's
-	// minimum_version.
-	version string
-	log     *output.Logger
-}
-
-// bundleNotes records what the agent did not apply from a release.
-type bundleNotes struct {
-	Ignored    []string `json:"ignored,omitempty"`
-	NotApplied []string `json:"not_applied,omitempty"`
-}
-
-// storedRelease is a release kept on the server after it was applied: its
-// files, release.json and the still-encrypted secrets. Restoring the
-// previous environment decrypts it again, so no plaintext copy is kept.
-type storedRelease struct {
-	*release.Release
-}
-
-// Deploy applies the bundle that ref (repository@digest) names. The agent has
-// verified the digest's signature before calling it.
-func (b *bundleApplier) Deploy(ctx context.Context, ref string) error {
-	digest := ref[strings.LastIndex(ref, "@")+1:]
-	rel, err := release.Fetch(ctx, b.repo, digest)
-	if err != nil {
-		return err
-	}
-
-	prev, err := b.previous()
-	if err != nil {
-		return err
-	}
-	if prev != nil && rel.Info.Created.Before(prev.Info.Created) && !b.allowDowngrade {
-		return fmt.Errorf("release %s (created %s) is older than the deployed release %s (created %s); to roll back to it, run: azud agent run --once --allow-downgrade",
-			short(rel.Digest), rel.Info.Created.Format("2006-01-02 15:04"), short(prev.Digest), prev.Info.Created.Format("2006-01-02 15:04"))
-	}
-
-	cfg, ignored, err := b.config(rel)
-	if err != nil {
-		return err
-	}
-	if err := config.ValidateMinimumVersion(cfg, b.version); err != nil {
-		return fmt.Errorf("release %s: %w", short(rel.Digest), err)
-	}
-	var secrets []byte
-	if rel.Secrets != nil {
-		if secrets, err = b.decrypt(rel.Secrets); err != nil {
-			return err
-		}
-	}
-	values := parseSecrets(secrets)
-	if missing := missingReleaseSecrets(cfg, values); len(missing) > 0 {
-		return fmt.Errorf("release %s lacks secrets its configuration lists: %s", short(rel.Digest), strings.Join(missing, ", "))
-	}
-
-	notApplied := b.unapplied(cfg, values)
-	if err := b.store(rel, bundleNotes{Ignored: ignored, NotApplied: notApplied}); err != nil {
-		return err
-	}
-
-	envPath, err := localPath(config.RemoteSecretsPath(cfg))
-	if err != nil {
-		return err
-	}
-	// The agent rolls a failed release back as a whole (secrets, config and
-	// image together) below. The deployer's own fleet rollback would restart
-	// earlier roles with this release's configuration and secrets.
-	deployCfg := *cfg
-	deployCfg.Deploy.RollbackOnFailure = false
-	image := imageRepository(cfg.Image) + "@" + rel.Info.Image
-	b.log.Info("Release %s: commit %s, image %s", short(rel.Digest), orDash(rel.Info.Commit), short(rel.Info.Image))
-
-	err = b.withLock(func() error {
-		// Recorded before anything changes and cleared only once the server
-		// runs one whole release again, so an agent that dies in between
-		// redeploys instead of trusting the recorded release (Interrupted).
-		if err := b.markPending(&deployCfg, rel.Digest, prev); err != nil {
-			return err
-		}
-		restore, err := b.swapEnv(envPath, secrets, prev)
-		if err != nil {
-			return err
-		}
-		deployErr := b.deploy(ctx, &deployCfg, image)
-		if deployErr == nil {
-			return b.clearPending()
-		}
-		if err := b.undo(ctx, &deployCfg, prev, restore); err != nil {
-			return errors.Join(deployErr, err)
-		}
-		return deployErr
-	})
-	if err != nil {
-		return err
-	}
-
-	if len(ignored) > 0 {
-		b.log.Info("Kept this server's settings for %s (the release's values are ignored)", strings.Join(ignored, ", "))
-	}
-	for _, change := range notApplied {
-		b.log.Warn("Not applied: %s", change)
-	}
-	return nil
-}
-
-// undo returns the server to one whole release after a deploy of failed did
-// not finish: the secrets file, then the previous release, then whatever only
-// the failed release started. The deploy stays marked interrupted unless all
-// of it succeeds, so the agent tries again. failed is nil when the failed
-// release can no longer be read; what only it started then keeps running.
-func (b *bundleApplier) undo(ctx context.Context, failed *config.Config, prev *storedRelease, restore func() error) error {
-	if err := restore(); err != nil {
-		return fmt.Errorf("restoring the previous secrets file: %w", err)
-	}
-	if prev == nil {
-		return b.undoFirstRelease(failed)
-	}
-
-	b.log.Warn("Rolling back to release %s", short(prev.Digest))
-	prevCfg, _, err := b.config(prev.Release)
-	if err != nil {
-		return fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err)
-	}
-	prevDeploy := *prevCfg
-	prevDeploy.Deploy.RollbackOnFailure = false
-	if err := b.deploy(ctx, &prevDeploy, imageRepository(prevCfg.Image)+"@"+prev.Info.Image); err != nil {
-		return fmt.Errorf("rolling back to %s: %w", short(prev.Digest), err)
-	}
-	if failed != nil {
-		running, err := b.runningRoles(failed)
-		if err != nil {
-			return fmt.Errorf("finding roles the failed release added: %w", err)
-		}
-		added := slices.DeleteFunc(running, prevCfg.HasRole)
-		if len(added) > 0 {
-			if err := b.stopRoles(failed, added); err != nil {
-				return fmt.Errorf("stopping roles the failed release added (%s): %w", strings.Join(added, ", "), err)
-			}
-		}
-	}
-	return b.clearPending()
-}
-
-// undoFirstRelease cleans up a failed release with no earlier release to
-// return to. Its roles are stopped only if none of them ran before it: on a
-// server already running this service by other means, stopping a role that
-// switched could take the service down, so those roles keep running.
-func (b *bundleApplier) undoFirstRelease(failed *config.Config) error {
-	attempt, _, err := b.readPending()
-	if err != nil {
-		return err
-	}
-	if !attempt.first || failed == nil {
-		b.log.Warn("Restored the secrets file. Roles that switched before the failure keep this release until the next deploy")
-		return b.clearPending()
-	}
-	running, err := b.runningRoles(failed)
-	if err != nil {
-		return fmt.Errorf("finding roles the failed release started: %w", err)
-	}
-	if len(running) > 0 {
-		b.log.Warn("Stopping roles the failed first release started: %s", strings.Join(running, ", "))
-		if err := b.stopRoles(failed, running); err != nil {
-			return fmt.Errorf("stopping roles the failed release started (%s): %w", strings.Join(running, ", "), err)
-		}
-	}
-	return b.clearPending()
-}
-
-// Recover undoes a deploy that stayed marked interrupted: its rollback failed,
-// or the agent died during a retry of a release that had failed. The release
-// is not deployed again, and the agent's record of it as failed stays.
-func (b *bundleApplier) Recover(ctx context.Context) error {
-	return b.withLock(func() error {
-		attempt, ok, err := b.readPending()
-		if err != nil || !ok {
-			return err
-		}
-		prev, err := b.previous()
-		if err != nil {
-			return err
-		}
-		envPath, err := localPath(config.RemoteSecretsPath(b.server))
-		if err != nil {
-			return err
-		}
-		restore, err := b.envRestorer(envPath, prev)
-		if err != nil {
-			return err
-		}
-		return b.undo(ctx, b.failedConfig(attempt.digest), prev, restore)
-	})
-}
-
-// failedConfig returns the configuration a stored release deploys with, or
-// nil if it cannot be read, which must not stop the server from recovering.
-func (b *bundleApplier) failedConfig(digest string) *config.Config {
-	rel, err := b.load(digest)
-	if err == nil && rel == nil {
-		err = errors.New("it is not stored on this server")
-	}
-	if err != nil {
-		b.log.Warn("Cannot read failed release %s: %v", short(digest), err)
-		return nil
-	}
-	cfg, _, err := b.config(rel.Release)
-	if err != nil {
-		b.log.Warn("Cannot read failed release %s: %v", short(digest), err)
-		return nil
-	}
-	return cfg
-}
-
-func (b *bundleApplier) pendingPath() string {
-	return filepath.Join(b.dir, "pending")
-}
-
-// pendingDeploy is what the pending file records: the release being deployed,
-// and whether it is the first thing of this service to run on the server.
-type pendingDeploy struct {
-	digest string
-	first  bool
-}
-
-const pendingFirstRelease = "first-release"
-
-func (b *bundleApplier) markPending(cfg *config.Config, digest string, prev *storedRelease) error {
-	if err := os.MkdirAll(b.dir, 0o700); err != nil {
-		return err
-	}
-	first, err := b.isFirstRelease(cfg, prev)
-	if err != nil {
-		return err
-	}
-	content := digest + "\n"
-	if first {
-		content += pendingFirstRelease + "\n"
-	}
-	return os.WriteFile(b.pendingPath(), []byte(content), 0o600)
-}
-
-// isFirstRelease reports whether nothing of this service ran before this
-// deploy. An unfinished deploy keeps its answer, since the roles it started
-// are running now.
-func (b *bundleApplier) isFirstRelease(cfg *config.Config, prev *storedRelease) (bool, error) {
-	if prev != nil {
-		return false, nil
-	}
-	attempt, ok, err := b.readPending()
-	if err != nil {
-		return false, err
-	}
-	if ok {
-		return attempt.first, nil
-	}
-	running, err := b.runningRoles(cfg)
-	if err != nil {
-		return false, fmt.Errorf("finding the roles running before this release: %w", err)
-	}
-	return len(running) == 0, nil
-}
-
-func (b *bundleApplier) readPending() (pendingDeploy, bool, error) {
-	data, err := os.ReadFile(b.pendingPath())
-	if errors.Is(err, os.ErrNotExist) {
-		return pendingDeploy{}, false, nil
-	}
-	if err != nil {
-		return pendingDeploy{}, false, err
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	return pendingDeploy{digest: lines[0], first: slices.Contains(lines[1:], pendingFirstRelease)}, true, nil
-}
-
-func (b *bundleApplier) clearPending() error {
-	if err := os.Remove(b.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-// Interrupted reports whether a deploy started and neither finished nor
-// rolled back, so the server may run parts of two releases. The agent then
-// redeploys even when the tag points to the recorded release.
-func (b *bundleApplier) Interrupted() bool {
-	_, err := os.Stat(b.pendingPath())
-	return err == nil
-}
-
-// config builds the configuration the release deploys with.
-func (b *bundleApplier) config(rel *release.Release) (*config.Config, []string, error) {
-	var base, dest []byte
-	for _, f := range rel.Files {
-		if f.Name == "deploy.yml" {
-			base = f.Data
-		} else {
-			dest = f.Data
-		}
-	}
-	return config.FromRelease(base, dest, b.server)
-}
-
-// previous returns the deployed release when it is a bundle this agent
-// applied, or nil (nothing deployed yet, or an image deployed by tag).
-func (b *bundleApplier) previous() (*storedRelease, error) {
-	digest, err := b.deployed()
-	if err != nil || digest == "" {
-		return nil, err
-	}
-	return b.load(digest)
-}
-
-func (b *bundleApplier) releaseDir(digest string) string {
-	return filepath.Join(b.dir, strings.TrimPrefix(digest, "sha256:"))
-}
-
-// store keeps the release's files, release.json, encrypted secrets and notes.
-func (b *bundleApplier) store(rel *release.Release, notes bundleNotes) error {
-	dir := b.releaseDir(rel.Digest)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	info, err := json.Marshal(rel.Info)
-	if err != nil {
-		return err
-	}
-	notesJSON, err := json.Marshal(notes)
-	if err != nil {
-		return err
-	}
-	files := map[string][]byte{"release.json": info, "notes.json": notesJSON}
-	for _, f := range rel.Files {
-		files[f.Name] = f.Data
-	}
-	if rel.Secrets != nil {
-		files[release.SecretsFile] = rel.Secrets
-	}
-	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// load reads a stored release, or returns nil when there is none.
-func (b *bundleApplier) load(digest string) (*storedRelease, error) {
-	dir := b.releaseDir(digest)
-	infoJSON, err := os.ReadFile(filepath.Join(dir, "release.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	rel := &release.Release{Digest: digest}
-	if err := json.Unmarshal(infoJSON, &rel.Info); err != nil {
-		return nil, fmt.Errorf("stored release %s: %w", short(digest), err)
-	}
-	names := []string{"deploy.yml"}
-	if rel.Info.Destination != "" {
-		names = append(names, "deploy."+rel.Info.Destination+".yml")
-	}
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if errors.Is(err, os.ErrNotExist) && name != "deploy.yml" {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("stored release %s: %w", short(digest), err)
-		}
-		rel.Files = append(rel.Files, release.File{Name: name, Data: data})
-	}
-	if secrets, err := os.ReadFile(filepath.Join(dir, release.SecretsFile)); err == nil {
-		rel.Secrets = secrets
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	return &storedRelease{rel}, nil
-}
-
-func (b *bundleApplier) decrypt(ciphertext []byte) ([]byte, error) {
-	identity, err := readIdentity(b.identity)
-	if err != nil {
-		return nil, err
-	}
-	return release.Decrypt(ciphertext, identity)
-}
-
-// swapEnv replaces the runtime secrets file with the release's secrets (an
-// empty file for a release without secrets) and returns a function that puts
-// back exactly what was there: the previous release's secrets, decrypted
-// again, or before the first release the file as it was (kept once in
-// <path>.pre-bundle), or no file at all. The previous state is read before
-// anything is written, so restoring cannot fail on a missing key later.
-func (b *bundleApplier) swapEnv(path string, secrets []byte, prev *storedRelease) (func() error, error) {
-	restore, err := b.envRestorer(path, prev)
-	if err != nil {
-		return nil, err
-	}
-	if secrets == nil {
-		secrets = []byte{}
-	}
-	if _, err := secretsfile.WriteFile(path, secrets); err != nil {
-		return nil, fmt.Errorf("failed to write the secrets file: %w", err)
-	}
-	return restore, nil
-}
-
-// envRestorer reads what the secrets file should hold without the release
-// being deployed, and returns a function that puts it back.
-func (b *bundleApplier) envRestorer(path string, prev *storedRelease) (func() error, error) {
-	previous, absent, err := b.previousEnv(path, prev)
-	if err != nil {
-		return nil, err
-	}
-	return func() error {
-		if absent {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			return nil
-		}
-		_, err := secretsfile.WriteFile(path, previous)
-		return err
-	}, nil
-}
-
-// previousEnv returns the secrets file contents to restore if this release
-// fails, or absent when there was no file before the first release.
-func (b *bundleApplier) previousEnv(path string, prev *storedRelease) (contents []byte, absent bool, err error) {
-	if prev != nil {
-		if prev.Secrets == nil {
-			return []byte{}, false, nil
-		}
-		plaintext, err := b.decrypt(prev.Secrets)
-		return plaintext, false, err
-	}
-
-	// Before the first release. A marker or backup from an earlier attempt
-	// that did not finish wins over the file, which that attempt rewrote.
-	backup, marker := path+".pre-bundle", path+".pre-bundle-absent"
-	if _, err := os.Stat(marker); err == nil {
-		return nil, true, nil
-	}
-	if data, err := os.ReadFile(backup); err == nil {
-		return data, false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, false, err
-	}
-	current, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := secretsfile.EnsureDir(filepath.Dir(path)); err != nil {
-			return nil, false, err
-		}
-		if err := os.WriteFile(marker, nil, 0o600); err != nil {
-			return nil, false, err
-		}
-		return nil, true, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	if _, err := secretsfile.WriteFile(backup, current); err != nil {
-		return nil, false, fmt.Errorf("failed to keep the secrets file before the first release: %w", err)
-	}
-	return current, false, nil
-}
-
-// unapplied lists what a deploy leaves as it is: accessories and cron jobs
-// that differ from this server's configuration, and accessories running with secret values other than the release's. They
-// stay listed with every release until they match.
-func (b *bundleApplier) unapplied(cfg *config.Config, values map[string]string) []string {
-	var changes []string
-	names := cfg.GetAccessoryNames()
-	for _, name := range b.server.GetAccessoryNames() {
-		if !slices.Contains(names, name) {
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
-	for _, name := range names {
-		now, ok := cfg.Accessories[name]
-		if !reflect.DeepEqual(now, b.server.Accessories[name]) {
-			changes = append(changes, fmt.Sprintf("accessory %s differs from this server's configuration (azud accessory stop %s, then azud accessory boot %s, from a workstation)", name, name, name))
-		}
-		if !ok || b.accessoryEnv == nil {
-			continue
-		}
-		running, err := b.accessoryEnv(name)
-		if err != nil {
-			b.log.Debug("Cannot read accessory %s's environment: %v", name, err)
-			continue
-		}
-		for _, key := range now.Env.Secret {
-			if running != nil && running[key] != values[key] {
-				changes = append(changes, fmt.Sprintf("accessory %s runs with another value of secret %s; it takes the release's value when rebooted", name, key))
-			}
-		}
-	}
-	if !reflect.DeepEqual(cfg.Cron, b.server.Cron) {
-		changes = append(changes, "cron jobs differ from this server's configuration (azud cron boot)")
-	}
-	return changes
-}
-
-// parseSecrets reads KEY=VALUE lines, as azud's secrets files hold them.
-func parseSecrets(data []byte) map[string]string {
-	values := make(map[string]string)
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 0, 64<<10), release.MaxSecretsBytes)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if key, value, ok := strings.Cut(line, "="); ok {
-			values[strings.TrimSpace(key)] = value
-		}
-	}
-	return values
-}
 
 // agentIdentityPath returns agent.identity, or the default
 // ~/.config/azud/agent/<service>.age, with ~ expanded.
@@ -581,24 +25,6 @@ func agentIdentityPath(cfg *config.Config) (string, error) {
 		path = filepath.Join("~", ".config", "azud", "agent", cfg.Service+".age")
 	}
 	return expandHome(path)
-}
-
-// readIdentity reads an age identity file that only its owner can read.
-func readIdentity(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("no age identity at %s: run azud agent init on this server", path)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("age identity %s is not a regular file", path)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("age identity %s is readable by others (mode %04o); run chmod 600 %s", path, info.Mode().Perm(), path)
-	}
-	return os.ReadFile(path)
 }
 
 // localPath turns a path written for a remote shell, which may use $HOME,
@@ -623,18 +49,6 @@ func expandHome(path string) (string, error) {
 	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
 }
 
-func short(digest string) string {
-	if len(digest) > len("sha256:")+12 {
-		return digest[:len("sha256:")+12]
-	}
-	return digest
-}
-
-// agentReleasesDir is where the agent keeps the releases it applied.
-func agentReleasesDir(stateDir, service string) string {
-	return filepath.Join(stateDir, "agent", service, "releases")
-}
-
 func runAgentInit(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
@@ -645,7 +59,7 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 	}
 	log.Header("Agent / %s", cfg.Service)
 	if _, err := os.Lstat(path); err == nil {
-		identity, err := readIdentity(path)
+		identity, err := agent.ReadIdentity(path)
 		if err != nil {
 			return err
 		}
@@ -696,32 +110,24 @@ func recipientFromIdentityFile(identity []byte) string {
 }
 
 // bundleStatusRows describes the deployed release bundle for agent status.
-func bundleStatusRows(stateDir string, cfg *config.Config, deployed string) [][]string {
-	if deployed == "" {
+func bundleStatusRows(records *agent.Records, current string) [][]string {
+	if current == "" {
 		return nil
 	}
-	applier := &bundleApplier{dir: agentReleasesDir(stateDir, cfg.Service)}
-	rel, err := applier.load(deployed)
-	if err != nil || rel == nil {
+	rec, err := records.Load(current)
+	if err != nil || rec == nil || rec.Info == nil {
 		return nil
 	}
 	rows := [][]string{
-		{"Release commit", orDash(rel.Info.Commit)},
-		{"Release image", rel.Info.Image},
-		{"Release secrets", orDash(strings.Join(rel.Info.Secrets, ", "))},
+		{"Release commit", orDash(rec.Info.Commit)},
+		{"Release image", rec.Info.Image},
+		{"Release secrets", orDash(strings.Join(rec.Info.Secrets, ", "))},
 	}
-	var notes bundleNotes
-	if data, err := os.ReadFile(filepath.Join(applier.releaseDir(deployed), "notes.json")); err == nil {
-		_ = json.Unmarshal(data, &notes)
+	if len(rec.Ignored) > 0 {
+		rows = append(rows, []string{"Server settings kept", strings.Join(rec.Ignored, ", ")})
 	}
-	if len(notes.Ignored) > 0 {
-		rows = append(rows, []string{"Server settings kept", strings.Join(notes.Ignored, ", ")})
-	}
-	for _, change := range notes.NotApplied {
+	for _, change := range rec.NotApplied {
 		rows = append(rows, []string{"Not applied (at deploy)", change})
-	}
-	if _, err := os.Stat(applier.pendingPath()); err == nil {
-		rows = append(rows, []string{"Interrupted", "a deploy did not finish; the agent finishes or undoes it on its next check"})
 	}
 	return rows
 }

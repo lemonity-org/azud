@@ -24,6 +24,27 @@ release notes for the corresponding signed tag.
   machine it runs on, so build in CI or locally. A set `builder.remote.host` is
   now a configuration error, and a stored release that sets it still loads with
   the key ignored. `builder.remote.arch` does nothing.
+- The pull agent now runs every release as one transaction, for images as well
+  as bundles. It keeps a record of each release it accepts and saves a journal
+  before changing anything, in place of the `pending` file, which an upgrade reads
+  as it is.
+  - Image mode gains crash recovery. An agent that dies mid-deploy finishes on its
+    next check, from the stored record, with no verification or registry.
+  - A failed image release now rolls back all its roles as a whole, whatever
+    `deploy.rollback_on_failure` says, by redeploying the previous release. That
+    replaces the previous release's containers even if the failure touched
+    nothing, so a `stop_first` role restarts. It skips `pre_deploy_command`, and
+    runs `post-rollback` in place of the `pre-deploy` and `post-deploy` hooks. Secrets
+    are not reverted. A digest with no record, from v1 or a pushed deploy, is
+    returned to with the configuration on disk.
+  - A failed first image release stops the roles it started, unless the service
+    was already running.
+  - `deploy_command` failures are recorded without an undo, since the command owns
+    its own.
+  - An undo that fails backs off from the first failure, and needs no registry if
+    the image is on the server. `--retry-failed` during a failed undo still goes
+    forward with the failed release, and an undo no longer runs the release's
+    `pre_deploy_command`, for bundles too.
 
 ## 1.7.0 - 2026-11-03
 

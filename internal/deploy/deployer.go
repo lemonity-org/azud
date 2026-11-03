@@ -180,6 +180,13 @@ type DeployOptions struct {
 	// (DeployLock), so the deployer must not take it again. The pull agent
 	// holds it while it swaps a release's secrets and deploys.
 	LockHeld bool
+
+	// Undo reports that this deploy returns to an earlier release after a later
+	// one failed. It skips deploy.pre_deploy_command, because an older image's
+	// migration against a newer schema is at best a no-op. It also skips the
+	// pre-deploy and post-deploy hooks and runs post-rollback instead, so a hook
+	// meant for a new release cannot stop the server from returning to an old one.
+	Undo bool
 }
 
 // DeployLock returns the lock file and timeout that serialize deploys of a
@@ -261,8 +268,10 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 
 	// Run pre-deploy hook
 	hookCtx := d.hookContext(opts, image, version)
-	if err := d.hooks.Run(ctx, "pre-deploy", hookCtx); err != nil {
-		return d.failAndRecord(record, fmt.Errorf("pre-deploy hook failed: %w", err))
+	if !opts.Undo {
+		if err := d.hooks.Run(ctx, "pre-deploy", hookCtx); err != nil {
+			return d.failAndRecord(record, fmt.Errorf("pre-deploy hook failed: %w", err))
+		}
 	}
 
 	d.log.Info("Deploying to %d host(s)", len(hosts))
@@ -297,7 +306,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 	}
 
 	// Run pre-deploy command from new image (e.g., database migrations)
-	if d.cfg.Deploy.PreDeployCommand != "" {
+	if d.cfg.Deploy.PreDeployCommand != "" && !opts.Undo {
 		if err := d.runPreDeployCommand(hosts[0], image); err != nil {
 			return d.failAndRecord(record, fmt.Errorf("pre-deploy command failed: %w", err))
 		}
@@ -320,11 +329,15 @@ func (d *Deployer) Deploy(ctx context.Context, opts *DeployOptions) error {
 		return d.failAndRecord(record, err)
 	}
 
-	// Run post-deploy hook
+	// Run post-deploy hook, or post-rollback when this deploy undid a failed one
 	hookCtx.Runtime = fmt.Sprintf("%.0f", time.Since(deployStart).Seconds())
 	hookCtx.RecordedAt = time.Now().Format(time.RFC3339)
-	if err := d.hooks.Run(ctx, "post-deploy", hookCtx); err != nil {
-		d.log.Warn("post-deploy hook failed: %v", err)
+	postHook := "post-deploy"
+	if opts.Undo {
+		postHook = "post-rollback"
+	}
+	if err := d.hooks.Run(ctx, postHook, hookCtx); err != nil {
+		d.log.Warn("%s hook failed: %v", postHook, err)
 	}
 
 	// Record successful deployment

@@ -151,7 +151,7 @@ func runReleasePublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load secrets: %w", err)
 	}
 	secrets := remoteRuntimeSecrets(cfg, loaded)
-	if missing := missingReleaseSecrets(cfg, secrets); len(missing) > 0 {
+	if missing := release.MissingSecrets(cfg, secrets); len(missing) > 0 {
 		return fmt.Errorf("secrets listed in the configuration were not loaded: %s", strings.Join(missing, ", "))
 	}
 	names := make([]string, 0, len(secrets))
@@ -314,23 +314,6 @@ func readReleaseFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s exceeds %d bytes", path, release.MaxConfigBytes)
 	}
 	return os.ReadFile(path)
-}
-
-// missingReleaseSecrets lists the secrets the app or an accessory needs that
-// the bundle would not carry.
-func missingReleaseSecrets(cfg *config.Config, secrets map[string]string) []string {
-	needed := append([]string(nil), cfg.Env.Secret...)
-	for _, accessory := range cfg.Accessories {
-		needed = append(needed, accessory.Env.Secret...)
-	}
-	var missing []string
-	for _, name := range needed {
-		if _, ok := secrets[name]; !ok && !slices.Contains(missing, name) {
-			missing = append(missing, name)
-		}
-	}
-	slices.Sort(missing)
-	return missing
 }
 
 func releaseCommitID() string {

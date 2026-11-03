@@ -25,7 +25,10 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,6 +181,10 @@ func (h *harness) startRegistry() error {
 		return fmt.Errorf("start registry: %w\n%s", err, out)
 	}
 
+	return h.waitForRegistry()
+}
+
+func (h *harness) waitForRegistry() error {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		resp, err := h.registry.Get("https://" + registryHost + "/v2/")
@@ -483,9 +490,17 @@ func (s *service) deploys() string {
 
 // agentState is the agent's state file, read as the operator would see it.
 type agentState struct {
-	DeployedDigest string `json:"deployed_digest"`
-	FailedDigest   string `json:"failed_digest"`
-	LastError      string `json:"last_error"`
+	DeployedDigest string        `json:"deployed_digest"`
+	FailedDigest   string        `json:"failed_digest"`
+	LastError      string        `json:"last_error"`
+	Current        string        `json:"current"`
+	Applied        []string      `json:"applied"`
+	Journal        *agentJournal `json:"journal"`
+}
+
+type agentJournal struct {
+	Digest string `json:"digest"`
+	Phase  string `json:"phase"`
 }
 
 func (s *service) agentState() agentState {
@@ -521,6 +536,61 @@ func (s *service) serves() (string, error) {
 		return "", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	return strings.TrimSpace(string(body)), nil
+}
+
+// requestWatch sends requests through the proxy until it is stopped.
+type requestWatch struct {
+	s            *service
+	served       atomic.Int64
+	failed       atomic.Int64
+	lastFailure  atomic.Value
+	stopRequests chan struct{}
+	done         chan struct{}
+	stop         func()
+}
+
+// watchRequests starts a requestWatch. A request fails if it errors or answers
+// anything but allowed.
+func (s *service) watchRequests(allowed ...string) *requestWatch {
+	w := &requestWatch{s: s, stopRequests: make(chan struct{}), done: make(chan struct{})}
+	w.stop = sync.OnceFunc(func() {
+		close(w.stopRequests)
+		<-w.done
+	})
+	s.t.Cleanup(w.stop)
+	go func() {
+		defer close(w.done)
+		for {
+			select {
+			case <-w.stopRequests:
+				return
+			default:
+			}
+			got, err := s.serves()
+			switch {
+			case err != nil:
+				w.failed.Add(1)
+				w.lastFailure.Store(err.Error())
+			case !slices.Contains(allowed, got):
+				w.failed.Add(1)
+				w.lastFailure.Store("unexpected body " + got)
+			default:
+				w.served.Add(1)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	return w
+}
+
+func (w *requestWatch) requireNoFailures() {
+	w.s.t.Helper()
+	if w.failed.Load() != 0 {
+		w.s.t.Errorf("%d of %d requests failed, last: %v", w.failed.Load(), w.failed.Load()+w.served.Load(), w.lastFailure.Load())
+	}
+	if w.served.Load() < 10 {
+		w.s.t.Errorf("only %d requests ran, so this proves little", w.served.Load())
+	}
 }
 
 func (s *service) waitServes(want string) {

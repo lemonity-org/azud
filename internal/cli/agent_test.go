@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -208,8 +209,9 @@ func TestCommandDeployRunsUnderTheDeployLock(t *testing.T) {
 	}
 	locker := &recordingLocker{}
 	image := "ghcr.io/acme/app@sha256:" + strings.Repeat("a", 64)
-	deployFn := commandDeploy(cfg, locker, "203.0.113.10", "ghcr.io/acme/app:production", io.Discard)
-	if err := deployFn(context.Background(), image); err != nil {
+	deployFn := commandDeploy(cfg, "ghcr.io/acme/app:production", io.Discard)
+	lock := deployLock(cfg, locker, "203.0.113.10")
+	if err := lock(func() error { return deployFn(context.Background(), image) }); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	wantLock, wantTimeout := deploy.DeployLock(cfg)
@@ -233,7 +235,7 @@ func TestCommandDeployReportsTheCommandFailure(t *testing.T) {
 		SSH:     config.SSHConfig{User: "deploy"},
 		Agent:   config.AgentConfig{DeployCommand: `echo "contract preflight failed" >&2; exit 1`},
 	}
-	err := commandDeploy(cfg, &recordingLocker{}, "h", "r", io.Discard)(context.Background(), "ghcr.io/acme/app@sha256:"+strings.Repeat("b", 64))
+	err := commandDeploy(cfg, "r", io.Discard)(context.Background(), "ghcr.io/acme/app@sha256:"+strings.Repeat("b", 64))
 	if err == nil || !strings.Contains(err.Error(), "contract preflight failed") {
 		t.Fatalf("deploy = %v; want the command output", err)
 	}
@@ -346,5 +348,47 @@ func TestReleaseClientUsesTheReleasesPullTimeout(t *testing.T) {
 	}
 	if result, err := client.Execute(host, "sleep 1"); err == nil && result.ExitCode == 0 {
 		t.Fatal("the release's pull timeout reached other commands")
+	}
+}
+
+func TestDeployLockReportsALockItCannotGet(t *testing.T) {
+	cfg := &config.Config{Service: "app", SSH: config.SSHConfig{User: "deploy"}}
+	lock := deployLock(cfg, failingLocker{}, "h")
+	ran := false
+	err := lock(func() error { ran = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "failed to acquire deployment lock") || ran {
+		t.Fatalf("lock = %v, ran = %v", err, ran)
+	}
+
+	want := errors.New("deploy failed")
+	if err := deployLock(cfg, &recordingLocker{}, "h")(func() error { return want }); !errors.Is(err, want) {
+		t.Fatalf("lock = %v; the function's own error comes back", err)
+	}
+}
+
+type failingLocker struct{}
+
+func (failingLocker) WithRemoteLock(string, string, time.Duration, func() error) error {
+	return errors.New("timed out")
+}
+
+func TestImagePresent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the local transport needs a POSIX shell")
+	}
+	t.Setenv("HOME", t.TempDir())
+	fakePodman := filepath.Join(t.TempDir(), "podman")
+	script := "#!/bin/sh\ncase \"$3\" in\n  here) echo sha256:abc ;;\n  *) echo 'no such image' >&2; exit 125 ;;\nesac\n"
+	if err := os.WriteFile(fakePodman, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := local.New(local.Options{Host: "app-1"})
+	defer func() { _ = client.Close() }()
+	podmanClient := podman.NewClientWithCommand(client, fakePodman)
+	if !imagePresent(podmanClient, "app-1", "here") {
+		t.Fatal("an image on this server was not found")
+	}
+	if imagePresent(podmanClient, "app-1", "gone") {
+		t.Fatal("an image not on this server was found, so the deploy would not pull it")
 	}
 }
