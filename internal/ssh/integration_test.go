@@ -34,9 +34,13 @@ func integrationClient(t *testing.T, commandTimeout time.Duration) (*Client, str
 
 func TestSSHIntegrationTimeoutLeavesTheConnectionUsable(t *testing.T) {
 	client, host := integrationClient(t, time.Second)
+	conn, err := client.Connect(host)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	start := time.Now()
-	result, err := client.Execute(host, "sleep 30")
+	result, err := conn.Execute("sleep 30")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +51,8 @@ func TestSSHIntegrationTimeoutLeavesTheConnectionUsable(t *testing.T) {
 		t.Errorf("the timeout took %s to return", elapsed)
 	}
 
-	// A later command on the same connection still works.
-	result, err = client.Execute(host, "echo still here")
+	// Through this connection, because the client would replace a dead one.
+	result, err = conn.Execute("echo still here")
 	if err != nil || !result.Success() || !strings.Contains(result.Stdout, "still here") {
 		t.Fatalf("next command = %+v, %v", result, err)
 	}
