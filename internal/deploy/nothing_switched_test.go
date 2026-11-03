@@ -132,3 +132,20 @@ func TestPreAppBootHookFailingSwitchesNothing(t *testing.T) {
 		t.Fatalf("Deploy = %v, want ErrNothingSwitched", err)
 	}
 }
+
+func TestFailureAfterTheProxyChangedCountsAsSwitched(t *testing.T) {
+	cfg := roleTestConfig()
+	cfg.Proxy.Host = "new.example.com"
+	proxyManager := &fakeDeploymentProxy{ensureHostsErr: errors.New("admin API refused")}
+	deployer := &Deployer{
+		cfg:        cfg,
+		containers: newFakeContainerLifecycle("shop"),
+		proxy:      proxyManager,
+		hooks:      NewHookRunner(t.TempDir(), 0, output.DefaultLogger),
+		log:        output.DefaultLogger,
+	}
+	err := deployer.deployToTargetLocked(context.Background(), deploymentTarget{Host: "host", Role: "web"}, cfg.Image, "latest", &DeployOptions{SkipHealthCheck: true})
+	if err == nil || errors.Is(err, ErrNothingSwitched) {
+		t.Fatalf("deploy = %v; the route's hosts may already have changed, so this needs the undo", err)
+	}
+}

@@ -548,9 +548,15 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	if err != nil {
 		return nothingSwitched{fmt.Errorf("failed to start container: %w", err)}
 	}
+	// Removing the new container undoes everything up to the first change to the
+	// proxy. Past that, such as a route's hosts changing, it does not.
+	proxyChanged := false
 	removeNewContainer := func(cause error) error {
 		if removeErr := d.containers.Remove(host, newContainerName, true); removeErr != nil {
 			return fmt.Errorf("%w (failed to remove new container %s: %v)", cause, newContainerName, removeErr)
+		}
+		if proxyChanged {
+			return cause
 		}
 		return nothingSwitched{cause}
 	}
@@ -583,6 +589,8 @@ func (d *Deployer) deployToTargetLocked(ctx context.Context, target deploymentTa
 	if !IsProxyRole(role) {
 		return d.finalizeStandaloneRole(host, oldContainerName, newContainerName, oldExists)
 	}
+
+	proxyChanged = true
 
 	// Ensure the proxy container is running before attempting any admin
 	// API calls. Boot is idempotent: if the container is already running

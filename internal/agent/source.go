@@ -49,8 +49,8 @@ type Source interface {
 type ImageSource struct {
 	// Server is the configuration on disk.
 	Server *config.Config
-	// Files are the files Server was loaded from, as written. ReadConfigFiles
-	// returns them.
+	// Files are the files Server was loaded from, with environment references
+	// resolved. ReadConfigFiles returns them.
 	Files       []release.File
 	Destination string
 	Repository  string
@@ -59,7 +59,7 @@ type ImageSource struct {
 // ReadConfigFiles returns the configuration on disk as written, named as a
 // release names them: deploy.yml, then deploy.<destination>.yml if it exists.
 func ReadConfigFiles(path, destination string) ([]release.File, error) {
-	base, err := os.ReadFile(path)
+	base, err := readResolvedConfig(path)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func ReadConfigFiles(path, destination string) ([]release.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(destPath)
+	data, err := readResolvedConfig(destPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return files, nil
 	}
@@ -79,6 +79,21 @@ func ReadConfigFiles(path, destination string) ([]release.File, error) {
 		return nil, err
 	}
 	return append(files, release.File{Name: "deploy." + destination + ".yml", Data: data}), nil
+}
+
+// readResolvedConfig reads a configuration file with its environment references
+// resolved, so a record keeps the settings it deployed with: an undo must not start
+// the previous image with what the environment holds by then.
+func readResolvedConfig(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := config.ResolveEnvReferences(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return resolved, nil
 }
 
 // Load returns the image with the configuration on disk.

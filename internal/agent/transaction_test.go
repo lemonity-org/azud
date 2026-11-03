@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -843,5 +844,69 @@ func TestResumeThatSwitchesNothingStillUndoes(t *testing.T) {
 	}
 	if !slices.Equal(f.deployed, []string{imageOf(digestB), imageOf(digestA)}) {
 		t.Fatalf("deployed = %v; want the undo", f.deployed)
+	}
+}
+
+// The agent can die between saving the journal and stopping the roles.
+func TestAbandonedReleaseStaysInTheJournalUntilItsRolesStop(t *testing.T) {
+	f := &fakeServer{runningRoles: []string{"web", "worker"}, tag: digestC}
+	a := f.agent(t)
+	abandoned := recordWith(t, a, digestB, twoRoleYAML)
+	previous := recordWith(t, a, digestA, testServerYAML)
+	if err := a.State.Save(State{
+		DeployedDigest: digestA,
+		Current:        previous.ID,
+		Journal:        &Journal{Target: abandoned.ID, Digest: digestB, Previous: previous.ID, PreviousDigest: digestA, Phase: PhaseForward},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stop := a.StopRoles
+	a.StopRoles = func(*config.Config, []string) error { return errors.New("podman is busy") }
+	if outcome, _, err := a.Reconcile(context.Background(), false); outcome != Deployed || err != nil {
+		t.Fatalf("Reconcile = %s, %v; the release going forward must not wait on the abandoned one", outcome, err)
+	}
+
+	saved := f.journals[len(f.journals)-1]
+	if !slices.Contains(saved.Abandoned, abandoned.ID) {
+		t.Fatalf("journal during the deploy = %+v; a crash would lose track of the abandoned release", saved)
+	}
+
+	// The next attempt finds it again.
+	a.StopRoles = stop
+	j := &Journal{Abandoned: []string{abandoned.ID}}
+	if !a.stopAbandoned(j, func(role string) bool { return role == "web" }) || len(j.Abandoned) != 0 {
+		t.Fatalf("abandoned after stopping = %v", j.Abandoned)
+	}
+	if !slices.Equal(f.stopped, []string{"worker"}) {
+		t.Fatalf("stopped = %v", f.stopped)
+	}
+}
+
+func TestImageRecordKeepsTheSettingsItDeployedWith(t *testing.T) {
+	t.Setenv("MODE", "old")
+	t.Setenv("PASSWORD", "a$b${c}")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deploy.yml")
+	yaml := strings.Replace(testServerYAML, "service: app\n", "service: app\nenv:\n  clear:\n    MODE: ${MODE}\n    PASSWORD: ${PASSWORD}\n    LITERAL: \"$$HOME\"\n", 1)
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files, err := ReadConfigFiles(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := testServer(t, testServerYAML)
+
+	t.Setenv("MODE", "new")
+	t.Setenv("PASSWORD", "changed")
+	rec := &Record{Source: SourceImage, Files: files}
+	cfg, _, err := rec.Config(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"MODE": "old", "PASSWORD": "a$b${c}", "LITERAL": "$HOME"} {
+		if got := cfg.Env.Clear[key]; got != want {
+			t.Errorf("%s = %q, want %q; the record must keep what it deployed with", key, got, want)
+		}
 	}
 }
