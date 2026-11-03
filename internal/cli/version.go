@@ -11,8 +11,9 @@ import (
 
 func newVersionCommand() *cobra.Command {
 	command := &cobra.Command{
-		Use:   "version",
-		Short: "Print version and build metadata",
+		Use:         "version",
+		Short:       "Print version and build metadata",
+		Annotations: scopedNone,
 		Long: `Print the version, source revision, build date, Go runtime, and target.
 
 Use --short for a stable, unstyled version value in scripts.`,

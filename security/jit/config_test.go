@@ -214,6 +214,54 @@ func TestControl_ConfigCommandDoesNotExecuteSecretsCommand(t *testing.T) {
 	}
 }
 
+func TestControl_CommandsThatReadNoSecretsDoNotExecuteSecretsCommand(t *testing.T) {
+	tests := [][]string{
+		{"app", "logs"},
+		{"app", "details"},
+		{"app", "stop"},
+		{"history", "list"},
+		{"cron", "list"},
+		{"accessory", "logs", "db"},
+		{"proxy", "status"},
+		{"proxy", "reconcile", "--check"},
+		{"hooks", "list"},
+	}
+	agents := map[string]string{
+		"no agent section": "",
+		"agent section":    "agent:\n  track: production\n  insecure_skip_verify: true\n",
+	}
+	for name, section := range agents {
+		for _, args := range tests {
+			t.Run(name+"/"+strings.Join(args, " "), func(t *testing.T) {
+				fake := startFakeSSH(t, "127.0.0.1:0", permissive())
+				dir := newWorkdir(t)
+				canary := filepath.Join(dir, "CANARY")
+				config := baseConfig("127.0.0.1", fake.port(), clientKeyPath(t), "shop") + `
+secrets_provider: command
+secrets_command: "touch ` + canary + `"
+accessories:
+  db:
+    image: example/db:v1
+    host: 127.0.0.1
+cron:
+  backup:
+    schedule: "0 2 * * *"
+    command: bin/backup
+` + section
+				writeConfig(t, dir, config)
+
+				res := runAzud(t, dir, []string{"AZUD_STATE_DIR=" + filepath.Join(dir, "state")}, args...)
+				if _, err := os.Stat(canary); !os.IsNotExist(err) {
+					t.Fatalf("azud %v executed secrets_command (stat err: %v): %s", args, err, res)
+				}
+				if strings.Contains(res.Combined, "secrets_command") {
+					t.Fatalf("azud %v reported on secrets_command: %s", args, res)
+				}
+			})
+		}
+	}
+}
+
 func TestControl_ShellCompletionDoesNotExecuteSecretsCommand(t *testing.T) {
 	tests := []struct {
 		name string

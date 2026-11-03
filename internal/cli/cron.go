@@ -53,8 +53,9 @@ Example:
 }
 
 var cronStopCmd = &cobra.Command{
-	Use:   "stop [name]",
-	Short: "Stop cron jobs",
+	Use:         "stop [name]",
+	Annotations: anyState,
+	Short:       "Stop cron jobs",
 	Long: `Stop the cron scheduler for specified jobs.
 
 If no name is provided, stops all cron jobs.
@@ -66,9 +67,10 @@ Example:
 }
 
 var cronLogsCmd = &cobra.Command{
-	Use:   "logs <name>",
-	Short: "View cron job logs",
-	Args:  cobra.ExactArgs(1),
+	Use:         "logs <name>",
+	Annotations: anyState,
+	Short:       "View cron job logs",
+	Args:        cobra.ExactArgs(1),
 	Long: `View logs from a cron job container.
 
 Example:
@@ -78,9 +80,10 @@ Example:
 }
 
 var cronRunCmd = &cobra.Command{
-	Use:   "run <name>",
-	Short: "Run a cron job immediately",
-	Args:  cobra.ExactArgs(1),
+	Use:         "run <name>",
+	Annotations: map[string]string{releaseAnnotation: releaseRunning},
+	Short:       "Run a cron job immediately",
+	Args:        cobra.ExactArgs(1),
 	Long: `Execute a cron job immediately without waiting for its schedule.
 
 Example:
@@ -89,8 +92,9 @@ Example:
 }
 
 var cronListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all cron jobs",
+	Use:         "list",
+	Annotations: anyState,
+	Short:       "List all cron jobs",
 	Long: `List all configured cron jobs and their status.
 
 Example:
@@ -178,8 +182,12 @@ func runCronBoot(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			recreate := existing.needsRecreate(cronConfig.Lock)
+			specChanged := cfg.Agent.Configured() && existing.specDiffers(cfg.CronSpec(name))
 			if recreate {
 				log.Host(host, "Recreating cron %s to narrow its lock mount...", name)
+			} else if specChanged {
+				recreate = true
+				log.Host(host, "Recreating cron %s: its image or spec differs from the release...", name)
 			} else {
 				// Check if already running
 				running, err := containerManager.IsRunning(host, containerName)
@@ -654,6 +662,7 @@ type cronContainerState struct {
 	Exists      bool
 	LegacyMount bool
 	LockLabel   string
+	Spec        string
 }
 
 // needsRecreate reports whether a scheduled container must be replaced so it
@@ -663,6 +672,13 @@ func (s cronContainerState) needsRecreate(lock bool) bool {
 		return false
 	}
 	return s.LegacyMount || (lock && s.LockLabel != cronLockLabelValue)
+}
+
+// specDiffers reports whether a scheduled container was created from anything but
+// spec. One with no label is included: a cron container holds no data, and creating
+// it again is what gives it a label.
+func (s cronContainerState) specDiffers(spec string) bool {
+	return s.Exists && s.Spec != spec
 }
 
 func parseCronContainerInspect(raw string) (cronContainerState, error) {
@@ -683,6 +699,7 @@ func parseCronContainerInspect(raw string) (cronContainerState, error) {
 	containerState := cronContainerState{
 		Exists:    true,
 		LockLabel: payload[0].Config.Labels[cronLockLabel],
+		Spec:      payload[0].Config.Labels[config.SpecLabel],
 	}
 	for _, mount := range payload[0].Mounts {
 		if strings.TrimSuffix(mount.Destination, "/") == legacyCronStateMount {
@@ -777,6 +794,9 @@ func buildCronContainerConfig(name string, cronConfig config.CronConfig) *podman
 			"azud.cron.schedule": cronConfig.Schedule,
 		},
 		Env: make(map[string]string),
+	}
+	if cfg.Agent.Configured() {
+		containerConfig.Labels[config.SpecLabel] = cfg.CronSpec(name)
 	}
 
 	// Add environment variables from app config

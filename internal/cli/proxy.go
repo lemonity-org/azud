@@ -19,8 +19,9 @@ var proxyCmd = &cobra.Command{
 }
 
 var proxyBootCmd = &cobra.Command{
-	Use:   "boot",
-	Short: "Start the proxy on servers",
+	Use:         "boot",
+	Annotations: map[string]string{releaseAnnotation: releaseNone, readsSecretsAnnotation: "true"},
+	Short:       "Start the proxy on servers",
 	Long: `Start the Caddy reverse proxy on all deployment servers.
 
 The proxy handles:
@@ -36,8 +37,9 @@ Example:
 }
 
 var proxyStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stop the proxy on servers",
+	Use:         "stop",
+	Annotations: anyState,
+	Short:       "Stop the proxy on servers",
 	Long: `Stop the Caddy reverse proxy on deployment servers.
 
 Example:
@@ -46,8 +48,9 @@ Example:
 }
 
 var proxyRebootCmd = &cobra.Command{
-	Use:   "reboot",
-	Short: "Restart the proxy on servers",
+	Use:         "reboot",
+	Annotations: map[string]string{releaseAnnotation: releaseNone, readsSecretsAnnotation: "true"},
+	Short:       "Restart the proxy on servers",
 	Long: `Restart the Caddy reverse proxy on deployment servers.
 
 Example:
@@ -56,8 +59,9 @@ Example:
 }
 
 var proxyLogsCmd = &cobra.Command{
-	Use:   "logs",
-	Short: "View proxy logs",
+	Use:         "logs",
+	Annotations: anyState,
+	Short:       "View proxy logs",
 	Long: `View logs from the Caddy reverse proxy.
 
 Example:
@@ -68,8 +72,9 @@ Example:
 }
 
 var proxyStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show proxy status",
+	Use:         "status",
+	Annotations: anyState,
+	Short:       "Show proxy status",
 	Long: `Show the status of the Caddy reverse proxy on all servers.
 
 Example:
@@ -78,8 +83,9 @@ Example:
 }
 
 var proxyRemoveCmd = &cobra.Command{
-	Use:   "remove",
-	Short: "Remove the proxy container",
+	Use:         "remove",
+	Annotations: anyState,
+	Short:       "Remove the proxy container",
 	Long: `Remove the Caddy proxy container from servers.
 
 This will stop and remove the container. Use with caution.

@@ -17,8 +17,9 @@ import (
 )
 
 var systemdCmd = &cobra.Command{
-	Use:   "systemd",
-	Short: "Manage systemd/quadlet units for Azud",
+	Use:         "systemd",
+	Annotations: scopedServer,
+	Short:       "Manage systemd/quadlet units for Azud",
 }
 
 var systemdEnableCmd = &cobra.Command{

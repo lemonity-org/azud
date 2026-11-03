@@ -15,8 +15,8 @@ func TestCommandSkipsConfig(t *testing.T) {
 	agentGroup := &cobra.Command{Use: "agent"}
 	agentGroup.AddCommand(&cobra.Command{Use: "init"})
 	root.AddCommand(
-		&cobra.Command{Use: "init"},
-		&cobra.Command{Use: "version"},
+		&cobra.Command{Use: "init", Annotations: scopedNone},
+		&cobra.Command{Use: "version", Annotations: scopedNone},
 		&cobra.Command{Use: "help"},
 		completion,
 		&cobra.Command{Use: cobra.ShellCompRequestCmd},

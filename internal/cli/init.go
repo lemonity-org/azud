@@ -13,8 +13,9 @@ import (
 )
 
 var initCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Create a new deployment configuration",
+	Use:         "init",
+	Annotations: scopedNone,
+	Short:       "Create a new deployment configuration",
 	Long: `Initialize a new Azud deployment configuration.
 
 This creates:

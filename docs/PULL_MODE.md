@@ -270,6 +270,72 @@ agent kept records is recorded when it is first needed, with the configuration o
 disk at that moment. Deployment history is recorded on the server, as for any
 deploy run there.
 
+## Commands on a server with an agent
+
+With an `agent` section, commands that act on what runs here read the agent's state, on
+each call, instead of the file as written. A configuration with no `agent` section,
+such as a repository's `config/deploy.yml` without `-d agent`, behaves as it always did.
+
+| Commands | What they read |
+|---|---|
+| `azud app`, `accessory`, `cron`, `proxy`, `history` | What is running: the current release's configuration, with `image` pinned by digest, and every trust setting from this server's |
+| `azud agent`, `preflight` | This server's configuration as written |
+| `azud release`, `build` | The repository's configuration |
+| `azud env`, `config`, `hooks` | The configuration you point them at, as written |
+
+Run these on the server, as `ssh.user`: the agent's state is there. They read it without
+a lock, so they work while the agent is deploying.
+
+- **Before the first deploy.** A command that needs a release, such as `azud cron boot`,
+  fails and says what to do. One that only reads says nothing is deployed, and runs.
+  To create a database first, see [below](#an-accessory-before-the-first-deploy).
+- **While a deploy has not finished.** The server may be running parts of two releases.
+  `azud cron boot`, `azud accessory boot` and `azud proxy reconcile --repair` refuse, and
+  name `azud agent run --once`, which finishes or undoes the deploy. Commands that read
+  use the last whole release. So does `azud cron run` with images, which leaves nothing
+  behind. With bundles it refuses too, because the secrets file may already hold the new
+  release's secrets.
+  `azud proxy boot` and `reboot` still run, because they apply this server's own proxy
+  settings and are the way back if the proxy is down.
+- **Inside a `deploy_command` script.** The journal open around the script is its own, so
+  nothing is refused, and commands read the release it is deploying.
+- **Image mode.** A release's configuration is what the file held when the agent applied
+  it. An edit applies with the next release, and commands that write from the release warn
+  when the file differs.
+
+A deploy leaves accessories and cron jobs as they are. `azud cron boot` brings cron jobs to
+the release, recreating any whose image or spec differs. Accessories hold data, so nothing
+recreates them for you: to apply a change, run `azud accessory remove <name>`, then
+`azud accessory boot <name>`. Containers carry an `azud.spec` label with a hash of their
+spec, which is how a difference is found. One with no label came from an earlier version,
+so it counts as unknown, and `azud cron boot` recreates it to give it one.
+
+Commands that do not read secrets do not load them, so a slow or hostile `secrets_command`
+cannot run for `azud app logs` or `azud history`. See the
+[CLI reference](CLI_REFERENCE.md#azud-config) for the list.
+
+### An accessory before the first deploy
+
+With release bundles, a database that the first release needs can come from that release:
+
+```bash
+azud accessory boot db --release production -d agent
+```
+
+This resolves the tag, verifies the release with `verify_command`, fetches it, and boots
+`db` from the release's spec and secrets. It applies nothing else: the agent's state and
+the runtime secrets file do not change, and the secrets reach Podman through a private
+file that is removed afterwards. If the container exists it is started, not replaced, as
+with any `azud accessory boot`. The image is pulled with whatever registry login this
+server already has.
+
+It refuses an accessory the release places on another server, so an empty database never
+starts here by mistake, and one with `files`, because those name paths on this machine.
+
+With `agent.source: image` it refuses and explains. A release is then only an image, which
+says nothing about an accessory, so verifying it would prove nothing. The accessory's spec
+is this server's configuration, so `azud accessory boot db` boots it, with no release.
+
 ## Release bundles
 
 A release bundle is one OCI artifact per release, in the image's repository,
@@ -355,7 +421,7 @@ What the agent does for each bundle:
 - **What it does not apply:** accessories and cron jobs that differ from this
   server's configuration, and accessories running with secret values other than
   the release's. It deploys the app, and `azud agent status` lists them with the
-  command to run from a workstation, with every release until they match.
+  command to run, with every release until they match.
 - **Storage:** each applied release (configuration, `release.json`, encrypted
   secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`, in a
   directory named for its digest.
@@ -366,4 +432,6 @@ What the agent does for each bundle:
 - With image tags, `config/deploy.yml` on the server is what the agent uses; a
   change in the repository reaches the server only when you copy it there.
   Release bundles carry the configuration instead.
-- `azud setup`, `azud proxy`, and accessory commands still run in push mode.
+- `azud setup`, `azud proxy`, and accessory and cron commands still reach the server
+  through their SSH settings, even when run on it, so they need `ssh.*` to work there.
+  `azud accessory boot --release` is the exception: it runs on this machine.

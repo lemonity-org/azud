@@ -21,8 +21,9 @@ import (
 )
 
 var setupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Setup servers and deploy",
+	Use:         "setup",
+	Annotations: scopedServer,
+	Short:       "Setup servers and deploy",
 	Long: `Setup servers and deploy the application.
 
 This command performs a complete setup:
@@ -375,6 +376,9 @@ func deployAccessoriesOnHost(sshClient local.Runner, log *output.Logger, selecte
 				},
 				Env:     make(map[string]string),
 				Volumes: accessory.Volumes,
+			}
+			if cfg.Agent.Configured() {
+				containerConfig.Labels[config.SpecLabel] = cfg.AccessorySpec(name)
 			}
 
 			// Add port mapping

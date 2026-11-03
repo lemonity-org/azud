@@ -390,6 +390,11 @@ downgrade, run `azud cron stop <job>` first and then the older release's
 `azud cron boot`, because older releases leave a running cron container as it
 is.
 
+With an `agent` section, a scheduled job runs the deployed digest rather than `image`,
+and `azud cron boot` recreates a job whose image or spec differs from the release.
+Secret values are not part of the spec: to give a running job a new value with the
+same image, run `azud cron stop <job>`, then `azud cron boot <job>`.
+
 ## SSH and Security
 
 ```yaml
@@ -425,7 +430,8 @@ secrets_remote_path: "~/.azud/secrets"
 ```
 
 With `secrets_provider: command`, Azud runs `secrets_command` locally with
-`sh -c` and reads `KEY=VALUE` lines from its stdout only. stderr is shown as
+`sh -c`, only for commands that read secrets (`azud app logs` and `azud history`,
+for example, do not), and reads `KEY=VALUE` lines from its stdout only. stderr is shown as
 the command writes it and is never parsed as secrets, so keep secret values
 off stderr (for example, avoid `set -x`). If the command fails, Azud reports
 only its exit status, never its output. The command must finish within 30

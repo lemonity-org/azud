@@ -21,8 +21,9 @@ import (
 )
 
 var envCmd = &cobra.Command{
-	Use:   "env",
-	Short: "Manage environment variables",
+	Use:         "env",
+	Annotations: scopedEither,
+	Short:       "Manage environment variables",
 	Long: `Commands for managing environment variables and secrets.
 
 Environment variables can be stored in the local .azud/secrets file

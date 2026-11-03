@@ -56,6 +56,9 @@ type harness struct {
 	httpsPort    int
 	registry     *http.Client
 	web          *http.Client
+	sshPort      int
+	sshKey       string
+	stopSSH      func()
 }
 
 func TestMain(m *testing.M) {
@@ -101,6 +104,10 @@ func runTests(m *testing.M) (int, error) {
 	if err := h.startRegistry(); err != nil {
 		return 0, err
 	}
+	if err := h.startSSH(); err != nil {
+		return 0, err
+	}
+	defer h.stopSSH()
 	return m.Run(), nil
 }
 
@@ -314,6 +321,7 @@ func newService(t *testing.T, name string) *service {
 // renderConfig is a server's config for the v1 agent. verify_command stands in for
 // cosign: only a digest the test has signed passes, which is the gate under test.
 // ssh.command_timeout is written out so the tests about that limit can replace this line.
+// The other ssh keys are for commands that still dial, through startSSH.
 func (s *service) renderConfig() string {
 	rootless := !h.root
 	return fmt.Sprintf(`service: %s
@@ -345,13 +353,16 @@ podman:
 
 ssh:
   user: %s
+  port: %d
+  keys: [%s]
+  insecure_ignore_host_key: true
   command_timeout: 5m
 
 agent:
   track: %s
   interval: 1m
   verify_command: test -f "%s/$$AZUD_AGENT_DIGEST"
-`, s.name, s.repo, s.host, h.proxyRootful, h.httpPort, h.httpsPort, rootless, h.user, trackTag, s.signed)
+`, s.name, s.repo, s.host, h.proxyRootful, h.httpPort, h.httpsPort, rootless, h.user, h.sshPort, h.sshKey, trackTag, s.signed)
 }
 
 // roleContainer is the stable name azud gives the web role: the service name.

@@ -19,8 +19,9 @@ import (
 )
 
 var releaseCmd = &cobra.Command{
-	Use:   "release",
-	Short: "Publish signed release bundles for pull-mode servers",
+	Use:         "release",
+	Annotations: scopedRepo,
+	Short:       "Publish signed release bundles for pull-mode servers",
 	Long: `Publish release bundles: one OCI artifact per release that carries the
 image digest, the configuration files as written, and the runtime secrets
 encrypted to the servers in release.recipients.

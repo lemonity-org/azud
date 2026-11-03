@@ -12,9 +12,10 @@ import (
 )
 
 var registryCmd = &cobra.Command{
-	Use:   "registry",
-	Short: "Manage container registry authentication",
-	Long:  `Commands for managing container registry authentication on deployment servers.`,
+	Use:         "registry",
+	Annotations: scopedServer,
+	Short:       "Manage container registry authentication",
+	Long:        `Commands for managing container registry authentication on deployment servers.`,
 }
 
 var registryLoginCmd = &cobra.Command{

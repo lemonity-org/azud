@@ -20,8 +20,9 @@ var appCmd = &cobra.Command{
 }
 
 var appLogsCmd = &cobra.Command{
-	Use:   "logs",
-	Short: "View application logs",
+	Use:         "logs",
+	Annotations: anyState,
+	Short:       "View application logs",
 	Long: `View logs from the application containers.
 
 Example:
@@ -33,8 +34,9 @@ Example:
 }
 
 var appExecCmd = &cobra.Command{
-	Use:   "exec [flags] -- command",
-	Short: "Execute command in application container",
+	Use:         "exec [flags] -- command",
+	Annotations: anyState,
+	Short:       "Execute command in application container",
 	Long: `Execute a command inside the application container.
 
 Example:
@@ -45,8 +47,9 @@ Example:
 }
 
 var appStartCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the application",
+	Use:         "start",
+	Annotations: anyState,
+	Short:       "Start the application",
 	Long: `Start the application containers on all servers.
 
 Example:
@@ -55,8 +58,9 @@ Example:
 }
 
 var appStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stop the application",
+	Use:         "stop",
+	Annotations: anyState,
+	Short:       "Stop the application",
 	Long: `Stop the application containers on all servers.
 
 Example:
@@ -65,8 +69,9 @@ Example:
 }
 
 var appRestartCmd = &cobra.Command{
-	Use:   "restart",
-	Short: "Restart the application",
+	Use:         "restart",
+	Annotations: anyState,
+	Short:       "Restart the application",
 	Long: `Restart the application containers on all servers.
 
 Example:
@@ -75,8 +80,9 @@ Example:
 }
 
 var appDetailsCmd = &cobra.Command{
-	Use:   "details",
-	Short: "Show application details",
+	Use:         "details",
+	Annotations: anyState,
+	Short:       "Show application details",
 	Long: `Show detailed information about the application containers.
 
 Example:
@@ -390,41 +396,56 @@ var accessoryCmd = &cobra.Command{
 }
 
 var accessoryBootCmd = &cobra.Command{
-	Use:   "boot <name>",
+	Use: "boot <name>",
+	Annotations: map[string]string{
+		releaseAnnotation:        releaseSpec,
+		serverWithFlagAnnotation: "release",
+		readsSecretsAnnotation:   "true",
+	},
 	Short: "Start an accessory",
 	Long: `Start an accessory container.
 
+With --release, run on the server with agent.source: bundle, it verifies that
+release with agent.verify_command and boots the accessory from the release's
+spec and secrets, so a database can exist before the first deploy. It applies
+nothing else: the agent's state and the runtime secrets file do not change.
+
 Example:
   azud accessory boot mysql
-  azud accessory boot redis`,
+  azud accessory boot redis
+  azud accessory boot mysql --release production`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAccessoryBoot,
 }
 
 var accessoryStopCmd = &cobra.Command{
-	Use:   "stop <name>",
-	Short: "Stop an accessory",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAccessoryStop,
+	Use:         "stop <name>",
+	Annotations: anyState,
+	Short:       "Stop an accessory",
+	Args:        cobra.ExactArgs(1),
+	RunE:        runAccessoryStop,
 }
 
 var accessoryLogsCmd = &cobra.Command{
-	Use:   "logs <name>",
-	Short: "View accessory logs",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAccessoryLogs,
+	Use:         "logs <name>",
+	Annotations: anyState,
+	Short:       "View accessory logs",
+	Args:        cobra.ExactArgs(1),
+	RunE:        runAccessoryLogs,
 }
 
 var accessoryExecCmd = &cobra.Command{
-	Use:   "exec <name> -- command",
-	Short: "Execute command in accessory",
-	Args:  cobra.MinimumNArgs(1),
-	RunE:  runAccessoryExec,
+	Use:         "exec <name> -- command",
+	Annotations: anyState,
+	Short:       "Execute command in accessory",
+	Args:        cobra.MinimumNArgs(1),
+	RunE:        runAccessoryExec,
 }
 
 var accessoryRemoveCmd = &cobra.Command{
-	Use:   "remove <name>",
-	Short: "Stop and remove an accessory container",
+	Use:         "remove <name>",
+	Annotations: anyState,
+	Short:       "Stop and remove an accessory container",
 	Long: `Stop and remove an accessory container from the remote host.
 
 This will stop the running container and remove it. Use --yes to skip
@@ -440,6 +461,7 @@ Example:
 var (
 	accessoryRemoveYes bool
 	accessoryHost      string
+	accessoryRelease   string
 )
 
 func init() {
@@ -448,6 +470,7 @@ func init() {
 	accessoryLogsCmd.Flags().BoolVar(&appRaw, "raw", false, rawOutputFlagUsage)
 	accessoryExecCmd.Flags().BoolVar(&appRaw, "raw", false, rawOutputFlagUsage)
 	accessoryBootCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
+	accessoryBootCmd.Flags().StringVar(&accessoryRelease, "release", "", "Boot from this release (tag or bundle digest), run on the server, before the first deploy")
 	accessoryStopCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
 	accessoryLogsCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
 	accessoryExecCmd.Flags().StringVar(&accessoryHost, "host", "", "Specific configured host")
@@ -470,9 +493,16 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 
 	name := args[0]
 
+	if cmd.Flags().Changed("release") {
+		return runAccessoryBootRelease(cmd.Context(), log, name, accessoryRelease)
+	}
+
 	accessory, ok := cfg.Accessories[name]
 	if !ok {
 		return fmt.Errorf("accessory %s not found", name)
+	}
+	if err := checkAccessoryFiles(cfg, name, accessory); err != nil {
+		return err
 	}
 
 	hosts, err := selectedAccessoryHosts(name, accessory, false)
@@ -733,7 +763,7 @@ is not read.
 Example:
   azud config
   azud config -d staging`,
-	Annotations: map[string]string{skipSecretsAnnotation: "true"},
+	Annotations: map[string]string{scopeAnnotation: scopeEither, skipSecretsAnnotation: "true"},
 	RunE:        runConfig,
 }
 

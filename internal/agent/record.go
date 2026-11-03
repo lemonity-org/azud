@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
@@ -77,6 +79,13 @@ func (r *Record) Config(server *config.Config) (*config.Config, []string, error)
 		}
 	}
 	return config.FromRelease(base, dest, server)
+}
+
+// HasFiles reports whether files are the record's configuration files as written.
+func (r *Record) HasFiles(files []release.File) bool {
+	return slices.EqualFunc(r.Files, files, func(a, b release.File) bool {
+		return a.Name == b.Name && bytes.Equal(a.Data, b.Data)
+	})
 }
 
 // bundleNotes is notes.json.

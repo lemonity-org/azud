@@ -17,9 +17,10 @@ import (
 )
 
 var sshCmd = &cobra.Command{
-	Use:   "ssh",
-	Short: "Manage SSH trust and connectivity",
-	Long:  `Commands for managing SSH trust and connectivity to deployment hosts.`,
+	Use:         "ssh",
+	Annotations: scopedServer,
+	Short:       "Manage SSH trust and connectivity",
+	Long:        `Commands for managing SSH trust and connectivity to deployment hosts.`,
 }
 
 var sshTrustCmd = &cobra.Command{
