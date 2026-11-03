@@ -77,7 +77,7 @@ func IsProxyRole(role string) bool {
 
 // NewAppContainerConfig creates a standard role-aware application container
 // configuration. The extra labels parameter allows callers to add
-// deployment-specific labels (for example canary or scale markers).
+// deployment-specific labels (for example canary markers).
 //
 // The Podman HEALTHCHECK is configured with the liveness probe path
 // (healthcheck.liveness_path, falling back to healthcheck.path). This
@@ -259,11 +259,6 @@ func probeAdmitsTraffic(readinessConfigured, readinessHealthy, livenessHealthy b
 		return readinessHealthy
 	}
 	return livenessHealthy
-}
-
-// WaitForContainerReady exposes readiness checks for callers outside deploy.
-func WaitForContainerReady(cfg *config.Config, podmanClient *podman.Client, sshClient *ssh.Client, host, container string) error {
-	return waitForContainerHealthy(cfg, podmanClient, sshClient, host, container)
 }
 
 func readinessProbe(sshClient *ssh.Client, host string, candidates []string, helperCmd string) bool {

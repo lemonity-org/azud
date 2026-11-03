@@ -448,40 +448,6 @@ hosts as `registry login`.
 
 ---
 
-### Scaling
-
-#### `azud scale`
-
-Dynamically scale the number of container instances for a role.
-Roles configured with `strategy: stop_first` are intentionally rejected because
-their lifecycle is limited to zero or one process.
-
-**Usage:**
-```bash
-azud scale <role>=<count> [flags]
-```
-
-**Flags:**
-*   `--host string`: Scale on a specific host only.
-
-**Examples:**
-```bash
-azud scale web=3        # Set to exactly 3 instances
-azud scale web=+1       # Add 1 instance
-azud scale web=-1       # Remove 1 instance
-```
-
-#### `azud scale status`
-
-Show the current number of running instances for each role.
-
-**Usage:**
-```bash
-azud scale status
-```
-
----
-
 ### Canary Deployments
 
 Manage gradual rollouts using traffic splitting.
@@ -756,8 +722,7 @@ singleton that must not overlap its previous process. The typed `runtime`
 mapping supports `user`, `read_only`, `cap_drop`, `no_new_privileges`,
 bounded `tmpfs`, `disable_healthcheck`, and `stop_timeout`; Azud validates
 these fields before constructing Podman commands. `stop_first` requires exactly
-one host, cannot be managed with `azud scale`, and is refused while the role's
-systemd unit is active. See
+one host and is refused while the role's systemd unit is active. See
 [Stop timeouts](CONFIG_REFERENCE.md#stop-timeouts) for how `stop_timeout`
 interacts with `ssh.command_timeout`.
 

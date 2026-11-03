@@ -101,19 +101,13 @@ GitHub issues show recurring problems:
 access-controlled local journal records deployment and canary transitions so a
 clean CI checkout can roll back or continue an in-progress operation safely.
 
-### 6. No Process Scaling Without Restart
-
-Can't scale processes dynamically - requires app restart.
-
-**Azud's approach:** Dynamic scaling support. Add or remove container instances without affecting running services.
-
-### 7. Bash Script Origins
+### 6. Bash Script Origins
 
 Started as a 100-line bash script. While improved, some architectural decisions are constrained by this history.
 
 **Azud's approach:** Purpose-built in Go with clean architecture. No legacy constraints.
 
-### 8. Nginx Config Validation
+### 7. Nginx Config Validation
 
 No pre-validation of nginx configurations before deployment - failures happen at deploy time.
 

@@ -58,15 +58,6 @@ azud registry login
 azud registry logout
 ```
 
-## Scaling
-
-```bash
-azud scale web=3
-azud scale web=+1
-azud scale web=-1
-azud scale status
-```
-
 ## Canary Deployments
 
 ```bash

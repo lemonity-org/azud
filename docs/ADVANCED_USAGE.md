@@ -174,9 +174,8 @@ retiring the previous container. `stop_first` validates the candidate
 configuration first, then guarantees that the previous and replacement
 processes never run simultaneously. On activation failure, Azud stops the
 candidate before restarting the preserved previous container. The role must
-have exactly one host and cannot be managed with `azud scale`; use
-`azud app start/stop --role <role>` for its zero/one lifecycle. Azud also
-reconciles interrupted `-old-*` and `-new-*` transitions before the next deploy.
+have exactly one host; use `azud app start/stop --role <role>` for its zero/one
+lifecycle. Azud also reconciles interrupted `-old-*` and `-new-*` transitions before the next deploy.
 
 Two conditions make the singleton guarantee enforceable, and Azud fails the
 deployment rather than proceeding without them:

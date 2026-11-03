@@ -128,7 +128,6 @@ func TestSetupIntegration(t *testing.T) {
 	assertRemoteContains(t, client, host,
 		"podman ps --filter label=azud.service=azud-it --filter label=azud.role=worker --format '{{.Names}}' | wc -l",
 		"1")
-	runAzudExpectFailure(t, binaryPath, configPath, stateDir, tempDir, "scale", "worker=2", "--host", host)
 
 	// Simulate a process interruption immediately after preserving the current
 	// singleton under its backup name. The next deployment must reconcile the
@@ -139,15 +138,6 @@ func TestSetupIntegration(t *testing.T) {
 	assertRemoteContains(t, client, host,
 		"podman ps -a --filter label=azud.service=azud-it --filter label=azud.role=worker --format '{{.Names}}' | grep -E '^azud-it-worker-(old|new)-' | wc -l",
 		"0")
-
-	// Scaling uses the exact managed labels and must return to one stable web
-	// instance before canary traffic tests begin.
-	runAzud(t, binaryPath, configPath, stateDir, tempDir, "scale", "web=2", "--host", host)
-	assertRemoteContains(t, client, host,
-		"podman ps --filter label=azud.service=azud-it --filter label=azud.role=web --format '{{.Names}}' | wc -l",
-		"2")
-	runAzud(t, binaryPath, configPath, stateDir, tempDir, "scale", "web=1", "--host", host)
-	assertHTTPAvailable(t, client, host, httpPort)
 
 	// Canary state is deliberately consumed from a second clean working
 	// directory while sharing only AZUD_STATE_DIR.

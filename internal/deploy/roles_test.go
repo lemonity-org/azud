@@ -707,7 +707,7 @@ func TestReconcileStopFirstRejectsUnrecognizedManagedInstance(t *testing.T) {
 
 	_, err := deployer.reconcileStopFirstStandaloneRole("host", "worker", "shop-worker")
 	if err == nil || !strings.Contains(err.Error(), "unrecognized managed container") {
-		t.Fatalf("expected scaled singleton instance rejection, got %v", err)
+		t.Fatalf("expected unrecognized instance rejection, got %v", err)
 	}
 }
 

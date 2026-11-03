@@ -14,9 +14,9 @@ const StopTimeoutOverhead = 5 * time.Second
 const WebRoleName = "web"
 
 // Supported role deployment strategies. Comparing against these constants
-// instead of bare literals keeps the validator, the deployer, and the scale
-// guard from drifting apart: a typo in any one of them would silently disable
-// a singleton safety check.
+// instead of bare literals keeps the validator and the deployer from drifting
+// apart: a typo in either of them would silently disable a singleton safety
+// check.
 const (
 	// StrategyRolling starts the replacement container before retiring the
 	// previous one. It is the default when strategy is unset.

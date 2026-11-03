@@ -2966,7 +2966,7 @@ func (m *Manager) BootAll(hosts []string, config *ProxyConfig) error {
 
 // SetCanaryWeights atomically replaces a two-upstream route with the requested
 // stable/canary percentages and reads it back before success. It rejects extra
-// upstreams so scaling and canary cannot silently produce misleading weights.
+// upstreams so the route cannot silently produce misleading weights.
 func (m *Manager) SetCanaryWeights(host, serviceHost, stable string, stableWeight int, canary string, canaryWeight int) error {
 	if stable == "" || canary == "" || stable == canary {
 		return fmt.Errorf("stable and canary upstreams must be distinct and non-empty")
@@ -2985,7 +2985,7 @@ func (m *Manager) SetCanaryWeights(host, serviceHost, stable string, stableWeigh
 					stableFound = true
 				case canary:
 				default:
-					transformErr = fmt.Errorf("route contains unexpected upstream %s; scale the web role to one instance before canary deployment", upstream.Dial)
+					transformErr = fmt.Errorf("route contains unexpected upstream %s; remove it before canary deployment", upstream.Dial)
 					return
 				}
 			}
