@@ -305,7 +305,7 @@ jobs:
         run: |
           set -o pipefail
           test_log=$(mktemp)
-          if go test ./... -run TestSetupIntegration -count=1 2>&1 | tee "$test_log"; then
+          if go test ./... -run 'TestSetupIntegration|TestSSHIntegration' -count=1 2>&1 | tee "$test_log"; then
             exit 0
           fi
           annotation=$(tail -c 12000 "$test_log")
