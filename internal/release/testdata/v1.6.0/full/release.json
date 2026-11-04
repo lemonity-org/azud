@@ -1,0 +1,1 @@
+{"format":1,"service":"fixture","repository":"ghcr.io/acme/fixture","image":"sha256:21d94c4ae81f56d81b98c4468796264cbff924c3fae1fd9e8379120a7d264f31","destination":"production","commit":"abc1234","created":"2026-10-31T12:00:00Z","secrets":["DATABASE_URL"],"recipients":["age1jj2dzlauutawpmt500nssnywk06suh7f5v0pqe026pc0cfqgketslj43y4"]}

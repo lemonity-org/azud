@@ -1,0 +1,8 @@
+service: fixture
+image: ghcr.io/acme/fixture
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: fixture.example.com
+  app_port: 3000

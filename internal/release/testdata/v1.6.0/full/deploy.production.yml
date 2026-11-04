@@ -1,0 +1,6 @@
+servers:
+  worker:
+    hosts: [app-1]
+    cmd: bin/worker --production
+proxy:
+  host: www.fixture.example.com
