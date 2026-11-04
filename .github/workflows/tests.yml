@@ -113,12 +113,20 @@ jobs:
           go test -c -tags e2e -o /tmp/azud-e2e/e2e.test ./e2e
           chmod -R a+rX /tmp/azud-e2e
 
+      - name: Build v1.6.0 for the upgrade test
+        if: matrix.user == 'root'
+        run: |
+          git fetch --depth=1 --no-tags origin tag v1.6.0
+          git worktree add --detach /tmp/azud-v160-src v1.6.0
+          go -C /tmp/azud-v160-src build -o /tmp/azud-e2e/azud-v160 ./cmd/azud
+          chmod a+rx /tmp/azud-e2e/azud-v160
+
       - name: Run as root
         if: matrix.user == 'root'
         working-directory: /tmp/azud-e2e
         run: |
-          sudo env AZUD_E2E_BINARY=/tmp/azud-e2e/azud AZUD_E2E_REQUIRE_SYSTEMD=1 \
-            ./e2e.test -test.v -test.timeout=60m
+          sudo env AZUD_E2E_BINARY=/tmp/azud-e2e/azud AZUD_E2E_V160=/tmp/azud-e2e/azud-v160 \
+            AZUD_E2E_REQUIRE_SYSTEMD=1 ./e2e.test -test.v -test.timeout=60m
 
       - name: Run as a rootless user
         if: matrix.user == 'deploy'
