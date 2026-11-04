@@ -247,6 +247,9 @@ func runAppStart(cmd *cobra.Command, args []string) error {
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	hosts := getAppHosts()
+	if err := recordRolesStarted(); err != nil {
+		return err
+	}
 	return deployer.StartRoles(hosts, selectedAppRoles())
 }
 
@@ -260,6 +263,9 @@ func runAppStop(cmd *cobra.Command, args []string) error {
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	hosts := getAppHosts()
+	if err := recordRolesStopped(); err != nil {
+		return err
+	}
 	return deployer.StopRoles(hosts, selectedAppRoles())
 }
 
@@ -273,6 +279,9 @@ func runAppRestart(cmd *cobra.Command, args []string) error {
 	deployer := deploy.NewDeployer(cfg, sshClient, log)
 
 	hosts := getAppHosts()
+	if err := recordRolesStarted(); err != nil {
+		return err
+	}
 	return deployer.RestartRoles(hosts, selectedAppRoles())
 }
 
@@ -515,8 +524,14 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 
 	log.Info("Starting accessory %s on %s...", name, strings.Join(hosts, ", "))
 
+	if err := recordAccessoryStarted(name); err != nil {
+		return err
+	}
 	return deployAccessoriesOnHost(sshClient, log, accessoryHost, name)
 }
+
+// accessoryStopTimeout is how many seconds an accessory gets to stop.
+const accessoryStopTimeout = 30
 
 func runAccessoryStop(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
@@ -544,9 +559,13 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 
 	log.Info("Stopping accessory %s...", name)
 
+	if err := recordAccessoryStopped(name); err != nil {
+		return err
+	}
+
 	var stopErrors []string
 	for _, host := range hosts {
-		if err := containerManager.Stop(host, containerName, 30); err != nil {
+		if err := containerManager.Stop(host, containerName, accessoryStopTimeout); err != nil {
 			stopErrors = append(stopErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
@@ -601,6 +620,10 @@ func runAccessoryRemove(cmd *cobra.Command, args []string) error {
 
 	podmanClient := podman.NewClient(sshClient)
 	containerManager := podman.NewContainerManager(podmanClient)
+
+	if err := recordAccessoryStarted(name); err != nil {
+		return err
+	}
 
 	var removeErrors []string
 	for _, host := range hosts {

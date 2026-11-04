@@ -146,7 +146,7 @@ func warnConfigEdited(effective *agent.Effective) {
 	if err != nil || rec.HasFiles(files) {
 		return
 	}
-	output.DefaultLogger.WarnStderr("The configuration on disk changed after release %s was applied. This uses the release's; an edit applies with the next release", effective.Config.Image)
+	output.DefaultLogger.WarnStderr("The configuration on disk changed after release %s was applied. This uses the release's; azud redeploy or the next release applies an edit", effective.Config.Image)
 }
 
 func readEffective(server *config.Config) (*agent.Effective, error) {
@@ -159,12 +159,18 @@ func readEffective(server *config.Config) (*agent.Effective, error) {
 
 // deployCommandConfig returns the configuration for a command that agent.deploy_command
 // runs for the release it is deploying, or nil for any other command. The journal open
-// around the script is its own, and the release it deploys is the one it means. A
-// deploy_command deploys images, so its configuration is on disk.
+// around the script is its own, and the release it deploys is the one it means, which may
+// be one a rollback returns to. With no record to read, it is the file on disk.
 func deployCommandConfig(server *config.Config, effective *agent.Effective) *config.Config {
 	digest := os.Getenv("AZUD_AGENT_DIGEST")
 	if server.Agent.DeployCommand == "" || digest == "" || effective.Journal == nil || effective.Journal.Digest != digest {
 		return nil
+	}
+	if rec := effective.Target; rec != nil {
+		if cfg, _, err := rec.Config(server); err == nil {
+			cfg.Image = rec.Image
+			return cfg
+		}
 	}
 	pinned := *server
 	pinned.Image = config.RepositoryOf(server.Image) + "@" + digest

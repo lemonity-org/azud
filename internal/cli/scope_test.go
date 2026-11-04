@@ -39,6 +39,8 @@ func TestEveryCommandHasKnownScope(t *testing.T) {
 	want := []struct{ prefix, scope string }{
 		{"azud agent ", scopeServer},
 		{"azud preflight", scopeServer},
+		{"azud status", scopeServer},
+		{"azud sync", scopeServer},
 		{"azud release ", scopeRepo},
 		{"azud build", scopeRepo},
 		{"azud env ", scopeEither},
@@ -131,6 +133,7 @@ func TestCommandsThatLoadSecrets(t *testing.T) {
 		"azud server exec",
 		"azud setup",
 		"azud ssh trust",
+		"azud sync",
 		"azud systemd enable",
 	}
 	for _, c := range runnableCommands(rootCmd) {
@@ -499,6 +502,43 @@ func TestDeployCommandScriptActsForTheReleaseItIsDeploying(t *testing.T) {
 	t.Setenv("AZUD_AGENT_DIGEST", digestOne)
 	if _, err := loadConfig(cronBootCmd); err == nil {
 		t.Error("a digest other than the journal's must not lift the refusal")
+	}
+}
+
+// A rollback's script means the release it returns to, whatever the file says now.
+func TestDeployCommandScriptReadsTheRecordOfWhatItIsDeploying(t *testing.T) {
+	section := "agent:\n  track: production\n  insecure_skip_verify: true\n  deploy_command: exec deploy \"$$AZUD_AGENT_IMAGE\"\n"
+	s := newEffectiveServer(t, section)
+	s.deployed(digestOne, nil)
+
+	id := strings.TrimPrefix(digestTwo, "sha256:") + "-abcd1234"
+	files, err := config.ResolveEnvReferences([]byte(strings.Replace(s.config(section), "bin/backup", "bin/backup-of-the-release", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &agent.Record{ID: id, Source: agent.SourceImage, Origin: agent.OriginVerified, Digest: digestTwo, Image: "registry.test/shop@" + digestTwo, Files: []release.File{{Name: "deploy.yml", Data: files}}}
+	if err := s.store.Records("registry.test/shop").Store(rec); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Journal = &agent.Journal{Target: id, Digest: digestTwo, Phase: agent.PhaseForward, Move: true}
+	if err := s.store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AZUD_AGENT_DIGEST", digestTwo)
+	loaded, err := loadConfig(cronBootCmd)
+	if err != nil {
+		t.Fatalf("cron boot from the release's own script: %v", err)
+	}
+	if want := "registry.test/shop@" + digestTwo; loaded.Image != want {
+		t.Errorf("image = %q, want %q", loaded.Image, want)
+	}
+	if !strings.Contains(fmt.Sprint(loaded.Cron), "bin/backup-of-the-release") {
+		t.Errorf("cron = %+v, want the record's", loaded.Cron)
 	}
 }
 

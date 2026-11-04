@@ -94,7 +94,7 @@ func (s *bundleService) pendingFile() string {
 	return filepath.Join(s.state, "agent", s.name, "releases", "pending")
 }
 
-func (s *bundleService) running(container string) bool {
+func (s *service) running(container string) bool {
 	out, err := podman("inspect", "--format", "{{.State.Running}}", container)
 	return err == nil && strings.TrimSpace(out) == "true"
 }

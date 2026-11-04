@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,7 @@ type deploymentProxy interface {
 	AddUpstream(host, serviceHost, upstream string) error
 	RemoveUpstream(host, serviceHost, upstream string) error
 	DrainUpstream(host, upstream string, timeout time.Duration) error
+	ReconcileService(host string, service *proxy.ServiceConfig, repair bool) (proxy.ReconcileStatus, error)
 }
 
 // Deployer orchestrates zero-downtime application deployments across hosts.
@@ -1560,6 +1562,120 @@ func (d *Deployer) Rollback(ctx context.Context, version, destination string, ho
 func (d *Deployer) Redeploy(ctx context.Context, opts *DeployOptions) error {
 	d.log.Header("Redeploying %s", d.cfg.Service)
 	return d.Deploy(ctx, opts)
+}
+
+// RestoreRoles brings this configuration's role containers back on host, as after the
+// server restarted. It boots the proxy, leaves a running container as it is, starts one
+// that exists, and with recreate creates a missing one from the pinned image, which needs
+// no registry while the image is on host. It runs no pre-deploy command and writes no
+// history, and the caller holds the deploy lock. Roles that stopped reports are left as
+// they are. Every role is tried, whatever happens to the others.
+func (d *Deployer) RestoreRoles(ctx context.Context, host string, stopped func(role string) bool, recreate bool) error {
+	targets, err := d.getTargets(&DeployOptions{Hosts: []string{host}})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	if slices.ContainsFunc(targets, func(t deploymentTarget) bool { return IsProxyRole(t.Role) }) {
+		if err := d.proxy.Boot(host, newProxyConfigFromCfg(d.cfg)); err != nil {
+			errs = append(errs, fmt.Errorf("failed to boot proxy: %w", err))
+		}
+	}
+	for _, target := range targets {
+		if stopped(target.Role) {
+			d.log.Host(host, "An operator stopped the %s role; leaving it stopped", target.Role)
+			continue
+		}
+		err := d.restoreTarget(ctx, target, recreate)
+		// A stop takes no lock and records itself first, so one that came during the
+		// start may have found nothing to stop, and only this sees it.
+		if stopped(target.Role) {
+			d.log.Host(host, "An operator stopped the %s role during the restore; stopping it", target.Role)
+			err = errors.Join(err, d.stopContainerConfirmed(host, RoleContainerName(d.cfg, target.Role), d.cfg.GetRoleStopTimeout(target.Role)))
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s role: %w", target.Role, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (d *Deployer) restoreTarget(ctx context.Context, target deploymentTarget, recreate bool) error {
+	host, role := target.Host, target.Role
+	name := RoleContainerName(d.cfg, role)
+	running, err := d.containers.IsRunning(host, name)
+	if err != nil {
+		return fmt.Errorf("failed to determine whether %s is running: %w", name, err)
+	}
+	if running {
+		return d.ensureRoute(target)
+	}
+	exists, err := d.containers.Exists(host, name)
+	if err != nil {
+		return fmt.Errorf("failed to determine whether %s exists: %w", name, err)
+	}
+	if !exists {
+		if !recreate {
+			d.log.Warn("%s does not exist on %s, and is not created now, because the secrets file may not be this release's", name, host)
+			return nil
+		}
+		return d.recreateTarget(ctx, target)
+	}
+
+	d.log.Host(host, "Starting %s...", name)
+	if err := d.startContainerConfirmed(host, name); err != nil {
+		return err
+	}
+	var notReady error
+	if IsProxyRole(role) && HasReadinessProbe(d.cfg) {
+		notReady = d.waitForHealthy(host, name)
+	} else if !IsProxyRole(role) {
+		notReady = d.containers.WaitRunning(host, name, d.cfg.Deploy.ReadinessDelay)
+	}
+	// A slow start must not cost the route: it is this release's, and the proxy's own
+	// health checks decide when traffic reaches it.
+	return errors.Join(notReady, d.ensureRoute(target))
+}
+
+// recreateTarget creates a role's missing container, with the steps of a deploy.
+func (d *Deployer) recreateTarget(ctx context.Context, target deploymentTarget) error {
+	host := target.Host
+	image := d.cfg.Image
+	d.log.Host(host, "Creating %s from %s...", RoleContainerName(d.cfg, target.Role), image)
+	if err := d.ensureRemoteSecrets([]string{host}); err != nil {
+		return err
+	}
+	present, err := d.images.Exists(host, image)
+	if err != nil {
+		return fmt.Errorf("failed to determine whether %s is on this server: %w", image, err)
+	}
+	if !present {
+		if d.cfg.Registry.Server != "" {
+			if err := d.loginToRegistry([]string{host}); err != nil {
+				return fmt.Errorf("failed to login to registry: %w", err)
+			}
+		}
+		if err := d.pullImageOnHosts([]string{host}, image); err != nil {
+			return fmt.Errorf("failed to pull image: %w", err)
+		}
+	}
+	return d.deployToTarget(ctx, target, image, image, &DeployOptions{LockHeld: true})
+}
+
+// ensureRoute repairs the service's route if it does not name this container. It
+// changes nothing on the proxy when the route is right.
+func (d *Deployer) ensureRoute(target deploymentTarget) error {
+	if !IsProxyRole(target.Role) {
+		return nil
+	}
+	upstream, err := d.upstreamAddr(target.Host, RoleContainerName(d.cfg, target.Role))
+	if err != nil {
+		return err
+	}
+	if _, err := d.proxy.ReconcileService(target.Host, BuildProxyServiceConfig(d.cfg, []string{upstream}), true); err != nil {
+		return fmt.Errorf("failed to repair the proxy route: %w", err)
+	}
+	return nil
 }
 
 func (d *Deployer) Stop(hosts []string) error {

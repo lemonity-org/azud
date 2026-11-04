@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 	"github.com/lemonity-org/azud/internal/registry"
+	"github.com/lemonity-org/azud/internal/release"
 	"github.com/lemonity-org/azud/internal/state"
 	"github.com/lemonity-org/azud/pkg/version"
 )
@@ -45,10 +47,15 @@ var agentRunCmd = &cobra.Command{
 	Short: "Follow agent.track and deploy each new image",
 	Long: `Follow agent.track and deploy each new image on this server.
 
-Without --once the agent checks the tag every agent.interval until it is
-stopped. A deploy that has started runs to completion before the agent
-exits. A release that fails verification or deployment is not tried again
-until the tag moves; use --once --retry-failed to try it again.
+Without --once the agent restores this server, then checks the tag every
+agent.interval until it is stopped. Restoring needs no registry while the images
+are here: it starts accessories, finishes or undoes an open journal, boots the
+proxy, starts or recreates role containers from the current release, and starts
+cron jobs, leaving what an operator stopped. It applies no spec changes.
+
+A deploy that has started runs to completion before the agent exits. A release
+that fails verification or deployment is not tried again until the tag moves;
+use azud sync --retry to try it again.
 
 Example:
   azud agent run                        # Run until stopped (systemd)
@@ -131,30 +138,73 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	if agentAllowDowngrade && !cfg.Agent.Bundles() {
 		return fmt.Errorf("--allow-downgrade applies to agent.source: bundle")
 	}
+	if err := checkAgentCanRun(cfg); err != nil {
+		return err
+	}
+
+	log.Header("Agent / %s", cfg.Service)
+
+	a, closeAgent, err := newAgent(cmd)
+	if err != nil {
+		return err
+	}
+	defer closeAgent()
+
+	if !agentOnce {
+		return a.Run(cmd.Context(), cfg.Agent.Interval)
+	}
+
+	outcome, digest, err := a.Reconcile(cmd.Context(), agentRetryFailed || agentAllowDowngrade)
+	switch outcome {
+	case agent.Unchanged:
+		log.Success("%s is deployed (%s)", a.Ref, digest)
+	case agent.Adopted:
+		log.Success("%s is already running; recorded it as deployed", a.Image(digest))
+	case agent.Deployed:
+		log.Success("Deployed %s", a.Image(digest))
+	case agent.SkippedFailed:
+		return fmt.Errorf("%s failed before; run with --retry-failed to try it again", a.Image(digest))
+	case agent.Recovered:
+		log.Warn("Undid the failed deploy of %s; run with --retry-failed to try it again", a.Image(digest))
+	case agent.Waiting:
+		return fmt.Errorf("undoing the failed deploy of %s failed and is waiting to retry; see azud agent status", a.Image(digest))
+	}
+	return err
+}
+
+// checkAgentCanRun refuses what the agent cannot run with, before it prints anything,
+// and a verify_command, deploy_command or hook that asks for it: the agent holds the state
+// lock around those, so this would wait for itself until they time out.
+func checkAgentCanRun(cfg *config.Config) error {
+	if os.Getenv("AZUD_AGENT_DIGEST") != "" || os.Getenv("AZUD_HOOK") != "" {
+		return fmt.Errorf("this takes the agent's state lock, which a running verify_command, deploy_command or hook may already hold, so it would wait for itself. To change what is deployed from there, exit non-zero, or move the tag")
+	}
 	if cfg.Agent.Track == "" {
 		return fmt.Errorf("agent.track is not configured")
 	}
 	if err := checkAgentUser(cfg); err != nil {
 		return err
 	}
-	if err := checkBundleSecretsPaths(cfg); err != nil {
-		return err
-	}
+	return checkBundleSecretsPaths(cfg)
+}
 
-	log.Header("Agent / %s", cfg.Service)
+// newAgent builds the agent for cfg on this machine, for the daemon and for the commands
+// that do what a tick of it does. The returned function closes what it opened.
+func newAgent(cmd *cobra.Command) (*agent.Agent, func(), error) {
+	log := output.DefaultLogger
 
 	host, err := agentHost(cfg)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	repository := imageRepository(cfg.Image)
 	ref, err := registry.ParseReference(repository + ":" + cfg.Agent.Track)
 	if err != nil {
-		return fmt.Errorf("invalid image to follow: %w", err)
+		return nil, nil, fmt.Errorf("invalid image to follow: %w", err)
 	}
 	stateDir, err := state.LocalDir()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	// Deploy commands outlive a stop request: the agent finishes the deploy
@@ -167,15 +217,20 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		LongCommandTimeout: cfg.Deploy.PullTimeout,
 		Host:               host,
 	})
-	defer func() { _ = sshClient.Close() }()
+	closeAgent := func() { _ = sshClient.Close() }
+	failed := func(err error) (*agent.Agent, func(), error) {
+		closeAgent()
+		return nil, nil, err
+	}
 
 	resolver := newRegistryResolver()
 	creds, err := registryCredentials(cfg, ref)
 	if err != nil {
-		return err
+		return failed(err)
 	}
 
 	store := agent.NewStore(stateDir, cfg.Service)
+	containers := podman.NewContainerManager(podman.NewClient(sshClient))
 	a := &agent.Agent{
 		Ref:        repository + ":" + cfg.Agent.Track,
 		Repository: repository,
@@ -189,6 +244,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 			pinned.Image = image
 			client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
 			defer closeClient()
+			present := (opts.Local || opts.NoPull) && imagePresent(podman.NewClient(client), host, image)
+			if opts.NoPull && !present {
+				return fmt.Errorf("image %s is not on this server, and --no-pull does not fetch it: %w", image, deploy.ErrNothingSwitched)
+			}
 			deployer := deploy.NewDeployer(&pinned, client, log)
 			if !opts.Hooks {
 				deployer.WithoutHooks()
@@ -198,10 +257,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 				Destination: GetDestination(),
 				LockHeld:    true,
 				Undo:        opts.Undo,
-				// A later role must not switch to a release that failed. An undo
-				// keeps going, to return as many roles as it can.
-				StopOnFailure: !opts.Undo,
-				SkipPull:      opts.Local && imagePresent(podman.NewClient(client), host, image),
+				// A later role must not switch to a release that failed, or to a
+				// move that a failure undoes. An undo keeps going, to return as many
+				// roles as it can.
+				StopOnFailure: !opts.Undo || opts.Move,
+				SkipPull:      present,
 			})
 		},
 		Lock: deployLock(cfg, sshClient, host),
@@ -210,18 +270,26 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 			defer closeClient()
 			return deploy.NewDeployer(release, client, log).StopRoles([]string{host}, roles)
 		},
-		RunningRoles: runningRoles(podman.NewContainerManager(podman.NewClient(sshClient)), host),
-		State:        store,
-		Log:          log,
+		RunningRoles: runningRoles(containers, host),
+		RestoreRoles: func(ctx context.Context, release *config.Config, image string, stopped func(string) bool, recreate bool) error {
+			pinned := *release
+			pinned.Image = image
+			client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
+			defer closeClient()
+			return deploy.NewDeployer(&pinned, client, log).WithoutHooks().RestoreRoles(ctx, host, stopped, recreate)
+		},
+		StartExisting: startExisting(containers, cfg.Service, host, log),
+		State:         store,
+		Log:           log,
 	}
 	if cfg.Agent.Bundles() {
 		identity, err := agentIdentityPath(cfg)
 		if err != nil {
-			return err
+			return failed(err)
 		}
 		secretsPath, err := localPath(config.RemoteSecretsPath(cfg))
 		if err != nil {
-			return err
+			return failed(err)
 		}
 		a.Source = &agent.BundleSource{
 			Server:         cfg,
@@ -244,9 +312,15 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		}
 		files, err := agent.ReadConfigFiles(path, GetDestination())
 		if err != nil {
-			return err
+			return failed(err)
 		}
-		a.Source = &agent.ImageSource{Server: cfg, Files: files, Destination: GetDestination(), Repository: repository}
+		a.Source = &agent.ImageSource{
+			Server:      cfg,
+			Files:       files,
+			Reload:      func() ([]release.File, error) { return agent.ReadConfigFiles(path, GetDestination()) },
+			Destination: GetDestination(),
+			Repository:  repository,
+		}
 	}
 	if cfg.Agent.DeployCommand != "" {
 		command := commandDeploy(cfg, a.Ref, os.Stdout)
@@ -257,27 +331,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		log.Info("Releases deploy through agent.deploy_command")
 	}
 	a.Verify = agentVerifier(cfg, a.Ref, log)
-
-	if !agentOnce {
-		return a.Run(cmd.Context(), cfg.Agent.Interval)
-	}
-
-	outcome, digest, err := a.Reconcile(cmd.Context(), agentRetryFailed || agentAllowDowngrade)
-	switch outcome {
-	case agent.Unchanged:
-		log.Success("%s is deployed (%s)", a.Ref, digest)
-	case agent.Adopted:
-		log.Success("%s is already running; recorded it as deployed", a.Image(digest))
-	case agent.Deployed:
-		log.Success("Deployed %s", a.Image(digest))
-	case agent.SkippedFailed:
-		return fmt.Errorf("%s failed before; run with --retry-failed to try it again", a.Image(digest))
-	case agent.Recovered:
-		log.Warn("Undid the failed deploy of %s; run with --retry-failed to try it again", a.Image(digest))
-	case agent.Waiting:
-		return fmt.Errorf("undoing the failed deploy of %s failed and is waiting to retry; see azud agent status", a.Image(digest))
-	}
-	return err
+	return a, closeAgent, nil
 }
 
 func runAgentStatus(cmd *cobra.Command, args []string) error {
@@ -435,8 +489,8 @@ func agentVerifier(cfg *config.Config, ref string, log *output.Logger) func(cont
 // commandDeploy runs agent.deploy_command for an image. The agent holds the host's
 // deploy lock around it, the lock a pushed `azud deploy` takes, so the two never
 // overlap. The command learns the lock's absolute path from AZUD_DEPLOY_LOCK and
-// must not wait for that lock, or start an `azud deploy` or `azud rollback` of its
-// own, which would wait for it.
+// must not wait for that lock, or start an `azud deploy` of its own, which would wait
+// for it. `azud sync`, `rollback` and `redeploy` refuse there, for the same reason.
 func commandDeploy(cfg *config.Config, ref string, out io.Writer) func(context.Context, string) error {
 	lockFile, _ := deploy.DeployLock(cfg)
 	return func(ctx context.Context, image string) error {
@@ -523,6 +577,55 @@ func runningRoles(containers *podman.ContainerManager, host string) func(*config
 		}
 		return running, nil
 	}
+}
+
+// startExisting returns a function that starts this service's stopped containers of a
+// kind, except those stopped reports, as they are. Each keeps the image, spec and
+// environment it was created with, so this applies nothing and reads no secrets file.
+func startExisting(containers *podman.ContainerManager, service, host string, log *output.Logger) func(string, func(string) bool) error {
+	return func(kind string, stopped func(string) bool) error {
+		list, err := containers.List(host, true, map[string]string{"label": "azud.service=" + service})
+		if err != nil {
+			return err
+		}
+		var errs []error
+		for _, container := range list {
+			name := containerNameOfKind(kind, container)
+			switch {
+			case name == "", container.State == "running", container.State == "paused":
+				continue
+			case stopped(name):
+				log.Host(host, "An operator stopped %s; leaving it stopped", container.Name)
+				continue
+			}
+			log.Host(host, "Starting %s...", container.Name)
+			err := containers.Start(host, container.Name)
+			// A stop takes no lock and records itself first, so one that came during
+			// the start may have found nothing to stop, and only this sees it.
+			if stopped(name) {
+				log.Host(host, "An operator stopped %s during the restore; stopping it", container.Name)
+				err = errors.Join(err, containers.Stop(host, container.Name, accessoryStopTimeout))
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", container.Name, err))
+			}
+		}
+		return errors.Join(errs...)
+	}
+}
+
+// containerNameOfKind returns the name the configuration knows container by if it is of
+// kind, and "" otherwise. A manual `cron run` container goes away by itself.
+func containerNameOfKind(kind string, container podman.Container) string {
+	switch kind {
+	case agent.DriftAccessory:
+		return container.Labels["azud.accessory"]
+	case agent.DriftCron:
+		if container.Labels["azud.cron.run"] == "" {
+			return container.Labels["azud.cron"]
+		}
+	}
+	return ""
 }
 
 // checkBundleSecretsPaths refuses a server whose own secrets file is also the
@@ -616,20 +719,21 @@ func registryCredentials(cfg *config.Config, ref registry.Reference) (*registry.
 }
 
 // runningDigest reports the digest every role container runs, or "" when a
-// role is missing, runs a different image, or was deployed by tag.
+// role is missing, is stopped, runs a different image, or was deployed by tag.
 func runningDigest(podmanClient *podman.Client, cfg *config.Config, host, repository string) func(context.Context) (string, error) {
 	return func(context.Context) (string, error) {
 		digest := ""
 		for _, role := range cfg.GetRoles() {
-			result, err := podmanClient.Execute(host, "container", "inspect", "--format", "{{.ImageName}}", deploy.RoleContainerName(cfg, role))
+			result, err := podmanClient.Execute(host, "container", "inspect", "--format", "{{.State.Running}} {{.ImageName}}", deploy.RoleContainerName(cfg, role))
 			if err != nil {
 				return "", err
 			}
 			if result.ExitCode != 0 {
 				return "", nil
 			}
-			name, roleDigest, pinned := strings.Cut(strings.TrimSpace(result.Stdout), "@")
-			if !pinned || name != repository || (digest != "" && roleDigest != digest) {
+			running, image, _ := strings.Cut(strings.TrimSpace(result.Stdout), " ")
+			name, roleDigest, pinned := strings.Cut(image, "@")
+			if running != "true" || !pinned || name != repository || (digest != "" && roleDigest != digest) {
 				return "", nil
 			}
 			digest = roleDigest

@@ -50,6 +50,12 @@ func (s *service) imageOf(container string) string {
 // command it reached stops with it.
 func (s *service) killAgentAt(pattern string) {
 	s.t.Helper()
+	s.killAt(pattern, "agent", "run", "--once")
+}
+
+// killAt runs azud with args and kills it as killAgentAt does.
+func (s *service) killAt(pattern string, args ...string) {
+	s.t.Helper()
 	realPodman, err := exec.LookPath("podman")
 	if err != nil {
 		s.t.Fatal(err)
@@ -71,7 +77,7 @@ func (s *service) killAgentAt(pattern string) {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	command := exec.Command(h.binary, "agent", "run", "--once", "-c", s.config)
+	command := exec.Command(h.binary, append(args, "-c", s.config)...)
 	command.Dir = s.dir
 	command.Env = append(os.Environ(), "AZUD_STATE_DIR="+s.state, "SSL_CERT_FILE="+h.caFile, "PATH="+bin+":"+os.Getenv("PATH"))
 	command.Stdout, command.Stderr = logFile, logFile

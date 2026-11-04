@@ -40,10 +40,36 @@ func (a *Agent) apply(ctx context.Context, st *State, digest string) (Outcome, s
 		candidate.Record.Origin = OriginVerifySkipped
 	}
 	candidate.Record.StoredAt = a.now()
-	if err := a.records().Store(candidate.Record); err != nil {
+	if err := a.storeCandidate(candidate); err != nil {
 		return a.recordFailure(st, digest, fmt.Errorf("deploy of %s failed: %w", image, err))
 	}
 	return a.forward(ctx, st, candidate, previous, DeployOptions{})
+}
+
+// storeCandidate stores what candidate names. Records are immutable, and everything after
+// this reads the record, so a bundle that is already stored, as after an earlier attempt,
+// deploys what is stored and not what its environment references resolve to now.
+func (a *Agent) storeCandidate(candidate *Candidate) error {
+	rec := candidate.Record
+	if err := a.records().Store(rec); err != nil {
+		return err
+	}
+	if rec.Source != SourceBundle {
+		return nil
+	}
+	stored, err := a.records().Load(rec.ID)
+	if err != nil || stored == nil {
+		return err
+	}
+	if stored.resolvedLike(rec) {
+		return nil
+	}
+	cfg, _, err := stored.Config(a.Server)
+	if err != nil {
+		return err
+	}
+	candidate.Record, candidate.Config = stored, cfg
+	return nil
 }
 
 // resume runs the journal's target forward again from its stored record, with no
@@ -57,7 +83,12 @@ func (a *Agent) resume(ctx context.Context, st *State, outage error) (Outcome, s
 		return a.resumeFailed(context.WithoutCancel(ctx), st, err)
 	}
 	if rec == nil {
-		if outage != nil {
+		switch {
+		case j.Move:
+			// The checks a release from the registry passes are not what an operator
+			// asked for, and a move's target was stored before its journal was saved.
+			return a.resumeFailed(context.WithoutCancel(ctx), st, errors.New("it is not stored on this server"))
+		case outage != nil:
 			return Failed, j.Digest, outage
 		}
 		return a.apply(ctx, st, j.Digest)
@@ -74,7 +105,7 @@ func (a *Agent) resume(ctx context.Context, st *State, outage error) (Outcome, s
 		}
 	}
 	a.log().Warn("Resuming the interrupted deploy of %s", a.Image(j.Digest))
-	return a.forward(ctx, st, &Candidate{Record: rec, Config: cfg}, previous, DeployOptions{Local: true})
+	return a.forward(ctx, st, &Candidate{Record: rec, Config: cfg}, previous, DeployOptions{Local: true, NoPull: j.NoPull, Undo: j.Back, Move: j.Move})
 }
 
 // resumeFailed handles a target that cannot be read back: it is undone, as a
@@ -104,9 +135,10 @@ func (a *Agent) forward(ctx context.Context, st *State, candidate *Candidate, pr
 	})
 	if err != nil {
 		err = fmt.Errorf("deploy of %s failed: failed to acquire deployment lock: %w", a.Image(rec.Digest), err)
-		if st.Journal != nil && st.Journal.Target == rec.ID {
+		if st.Journal != nil && st.Journal.Target == rec.ID || candidate.Move != nil {
 			// A busy lock says nothing about a release already under way, and
-			// the journal stays open for the next check.
+			// the journal stays open for the next check. An operator's move says
+			// nothing about what the tag names.
 			return Failed, rec.Digest, a.saved(st, err)
 		}
 		return a.recordFailure(st, rec.Digest, err)
@@ -125,13 +157,11 @@ func (a *Agent) forwardLocked(ctx context.Context, st *State, candidate *Candida
 	// roles, whatever this attempt manages to do.
 	fresh := st.Journal == nil
 	if err := a.openJournal(st, candidate, previous); err != nil {
-		_, _, err := a.recordFailure(st, rec.Digest, fmt.Errorf("deploy of %s failed: %w", image, err))
-		return Failed, err
+		return Failed, a.refused(st, candidate, fmt.Errorf("deploy of %s failed: %w", image, err))
 	}
-	if a.stopAbandoned(st.Journal, candidate.Config.HasRole) {
+	if !a.DeployUndoes && a.stopAbandoned(st.Journal, candidate.Config.HasRole) {
 		if err := a.State.Save(*st); err != nil {
-			_, _, err := a.recordFailure(st, rec.Digest, fmt.Errorf("deploy of %s failed: %w", image, err))
-			return Failed, err
+			return Failed, a.refused(st, candidate, fmt.Errorf("deploy of %s failed: %w", image, err))
 		}
 	}
 
@@ -145,7 +175,10 @@ func (a *Agent) forwardLocked(ctx context.Context, st *State, candidate *Candida
 		return a.fail(ctx, st, previous, fresh && nothingSwitched, fmt.Errorf("deploy of %s failed: %w", image, err))
 	}
 
-	a.recordDeployed(st, rec, candidate.Config.Deploy.RetainHistory)
+	if st.Journal.Move {
+		a.stopLeftBehind(previous, candidate.Config)
+	}
+	a.recordFinished(st, rec, candidate.Config.Deploy.RetainHistory)
 	if err := a.State.Save(*st); err != nil {
 		return Deployed, err
 	}
@@ -158,6 +191,16 @@ func (a *Agent) forwardLocked(ctx context.Context, st *State, candidate *Candida
 	return Deployed, nil
 }
 
+// refused records why a release could not start: against the tag if the tag named it,
+// and not at all if an operator's move did, since that says nothing about the tag.
+func (a *Agent) refused(st *State, candidate *Candidate, cause error) error {
+	if candidate.Move != nil {
+		return cause
+	}
+	_, _, err := a.recordFailure(st, candidate.Record.Digest, cause)
+	return err
+}
+
 // openJournal saves the journal before anything changes. A journal already open
 // for this target goes forward again. One open for another target is replaced,
 // and its answer on what ran before carries over, since the roles it started are
@@ -166,6 +209,7 @@ func (a *Agent) openJournal(st *State, candidate *Candidate, previous *Record) e
 	rec := candidate.Record
 	if j := st.Journal; j != nil && j.Target == rec.ID {
 		j.Phase, j.Tries, j.NextTry = PhaseForward, 0, time.Time{}
+		candidate.Move.mark(j)
 		return a.State.Save(*st)
 	}
 	first, err := a.isFirstRelease(st, candidate.Config, previous)
@@ -185,6 +229,7 @@ func (a *Agent) openJournal(st *State, candidate *Candidate, previous *Record) e
 	if replaced := st.Journal; replaced != nil {
 		j.Abandoned = append(slices.Clone(replaced.Abandoned), replaced.Target)
 	}
+	candidate.Move.mark(j)
 	st.Journal = j
 	return a.State.Save(*st)
 }
@@ -254,8 +299,10 @@ func (a *Agent) stopAbandonedRelease(id string, keep func(role string) bool) boo
 // so the next check tries again without the tag moving, as a full undo.
 func (a *Agent) fail(ctx context.Context, st *State, previous *Record, nothingSwitched bool, cause error) (Outcome, error) {
 	j := st.Journal
-	st.FailedDigest = j.Digest
-	st.FailedAt = a.now()
+	if !j.Move {
+		st.FailedDigest = j.Digest
+		st.FailedAt = a.now()
+	}
 	st.LastError = cause.Error()
 	if a.DeployUndoes {
 		st.Journal = nil
@@ -394,12 +441,19 @@ func (a *Agent) failedConfig(j *Journal) *config.Config {
 	return cfg
 }
 
-// deploy deploys rec with cfg. The deploy lock is held.
+// deploy deploys rec with cfg. The deploy lock is held. A deploy starts every role, so
+// it ends what an operator asked for with `azud app stop`.
 func (a *Agent) deploy(ctx context.Context, cfg *config.Config, rec *Record, opts DeployOptions) error {
 	release := *cfg
 	release.Deploy.RollbackOnFailure = false
 	opts.Hooks = rec.Source == SourceImage
-	return a.Deploy(ctx, &release, rec.Image, opts)
+	if err := a.Deploy(ctx, &release, rec.Image, opts); err != nil {
+		return err
+	}
+	if err := a.State.UpdateIntent(func(intent *Intent) { intent.Roles = nil }); err != nil {
+		a.log().Warn("Cannot record that the deploy started every role, so a restart may leave them stopped: %v", err)
+	}
+	return nil
 }
 
 func (a *Agent) lock(fn func() error) error {
@@ -457,6 +511,69 @@ func (a *Agent) recordDeployed(st *State, rec *Record, retain int) {
 	st.FailedDigest = ""
 	st.FailedAt = time.Time{}
 	st.LastError = ""
+}
+
+// stopLeftBehind stops the roles of the release a move left, except those target has, so
+// that a role it added does not keep running the release an operator moved away from. It
+// runs before the journal closes, so a crash comes back here. It never holds up the move:
+// a role that will not stop keeps running until something else stops it.
+func (a *Agent) stopLeftBehind(previous *Record, target *config.Config) {
+	if previous == nil || a.DeployUndoes {
+		return
+	}
+	cfg, _, err := previous.Config(a.Server)
+	if err != nil {
+		a.log().Warn("Cannot read release %s to stop what only it has: %v", short(previous.Digest), err)
+		return
+	}
+	running, err := a.RunningRoles(cfg)
+	if err != nil {
+		a.log().Warn("Cannot find roles only release %s has: %v", short(previous.Digest), err)
+		return
+	}
+	stale := slices.DeleteFunc(running, target.HasRole)
+	if len(stale) == 0 {
+		return
+	}
+	a.log().Warn("Stopping roles only release %s has: %s", short(previous.Digest), strings.Join(stale, ", "))
+	if err := a.StopRoles(cfg, stale); err != nil {
+		a.log().Warn("Cannot stop roles only release %s has: %v", short(previous.Digest), err)
+	}
+}
+
+// recordFinished records rec as deployed when its journal ends. A move keeps the tag
+// held, and leaves out of Applied what it moved away from, so the next rollback goes
+// further back.
+func (a *Agent) recordFinished(st *State, rec *Record, retain int) {
+	j := st.Journal
+	if j == nil || !j.Move {
+		a.recordDeployed(st, rec, retain)
+		return
+	}
+	held := *st
+	if i := slices.Index(st.Applied, rec.ID); i > 0 {
+		st.Applied = st.Applied[i:]
+	}
+	a.recordDeployed(st, rec, retain)
+	hold := j.Hold
+	// The tag moved while this journal was open, to a release that failed: that is what
+	// the tag names now, and what stays held.
+	if held.FailedDigest != "" && held.FailedDigest == held.LastSeenDigest {
+		hold = held.FailedDigest
+	}
+	a.hold(st, held, hold)
+}
+
+// hold makes FailedDigest digest, unless that is what is deployed. If it is what held
+// already had as failed, the failure stays on record.
+func (a *Agent) hold(st *State, held State, digest string) {
+	if digest == "" || digest == st.DeployedDigest {
+		return
+	}
+	st.FailedDigest, st.FailedAt, st.LastError = digest, a.now(), ""
+	if digest == held.FailedDigest {
+		st.FailedAt, st.LastError = held.FailedAt, held.LastError
+	}
 }
 
 func (a *Agent) recordFailure(st *State, digest string, cause error) (Outcome, string, error) {

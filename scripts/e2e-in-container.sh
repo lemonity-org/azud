@@ -9,6 +9,9 @@
 #   mixed   a rootless user runs the app, and a rootful proxy listens on 80 and 443
 #
 # Usage: scripts/e2e-in-container.sh [root|deploy|mixed] [flags, e.g. -test.run=TestFirstDeploy]
+#
+# AZUD_E2E_V160 names a Linux azud binary built from the v1.6.0 tag, for the container's
+# architecture. Without it, TestV160BinarySwap skips.
 set -eu
 
 mode=${1:-deploy}
@@ -38,6 +41,11 @@ trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 go build -o "$work/azud" ./cmd/azud
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 go test -c -tags e2e -o "$work/e2e.test" ./e2e
+v160=
+if [ -n "${AZUD_E2E_V160:-}" ]; then
+	cp "$AZUD_E2E_V160" "$work/azud-v160"
+	v160=/e2e/azud-v160
+fi
 # mktemp makes the directory 0700, which the container's deploy user may not enter.
 chmod -R a+rX "$work"
 
@@ -69,8 +77,8 @@ done
 docker exec "$name" chown -R deploy:deploy /home/deploy
 
 if [ "$mode" = root ]; then
-	docker exec -e AZUD_E2E_BINARY=/e2e/azud -e AZUD_E2E_REQUIRE_SYSTEMD=1 -w /e2e "$name" \
-		/e2e/e2e.test -test.v -test.timeout=30m "$@"
+	docker exec -e AZUD_E2E_BINARY=/e2e/azud -e AZUD_E2E_REQUIRE_SYSTEMD=1 -e AZUD_E2E_V160="$v160" -w /e2e "$name" \
+		/e2e/e2e.test -test.v -test.timeout=60m "$@"
 else
 	proxy_rootful=false
 	[ "$mode" = mixed ] && proxy_rootful=true
@@ -85,5 +93,6 @@ else
 		-e DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
 		-e AZUD_E2E_BINARY=/e2e/azud -e AZUD_E2E_REQUIRE_SYSTEMD=1 \
 		-e AZUD_E2E_PROXY_ROOTFUL="$proxy_rootful" \
-		"$name" /e2e/e2e.test -test.v -test.timeout=30m "$@"
+		-e AZUD_E2E_V160="$v160" \
+		"$name" /e2e/e2e.test -test.v -test.timeout=60m "$@"
 fi

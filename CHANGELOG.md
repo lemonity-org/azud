@@ -6,6 +6,46 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added `azud status`, for a server with an `agent` section: what is deployed and
+  since when, what the tag names, a failed release and why, a deploy that has not
+  finished and what happens next, and accessories and cron jobs that differ from the
+  release, with the command that applies each. `--details` adds containers. It changes
+  nothing, and if the registry cannot be reached it says so and shows the rest.
+- Added `azud sync`, which runs one check now under the agent's locks. `--retry` tries
+  a failed release again, and `--digest` moves to a digest or stored release instead of
+  what the tag names. A stored release is not verified again. An unknown digest is
+  verified, unless `--no-verify`.
+- `azud sync`, `azud rollback`, `azud redeploy` and `azud agent run` refuse inside a
+  `verify_command`, `deploy_command` or hook, where the agent may hold the lock they need.
+- The agent no longer records a digest as deployed because stopped containers carry it:
+  every role must be running it.
+- With an `agent` section, `azud rollback` and `azud redeploy` now run on the server,
+  through the agent's transaction, and refuse `--host` and `--role`. They keep their old
+  behaviour with no `agent` section.
+  - `azud rollback [digest] [--no-pull]` needs no registry when the release is stored
+    and its image is here. With no digest it goes to the release before this one, so a
+    second rollback goes further back. It holds what the tag names until the tag moves.
+    It skips the downgrade check, runs no pre-deploy command, stops roles only the release
+    it left has, and works for a release v1.6.0 stored.
+  - `azud redeploy` re-applies the current release. With `agent.source: image` it uses
+    the configuration on disk, which is how an edit to `deploy.yml` gets applied: it makes
+    a new record for the same digest, and a rollback returns to the one before.
+- `azud agent run` now restores this server when it starts, with no registry while the
+  images are here, and retries each interval until that works: it starts accessories,
+  finishes or undoes an open journal, boots the proxy, starts or recreates role containers
+  from the current record, and starts cron containers. It applies no spec changes.
+  - With `agent.deploy_command` it leaves role containers and the proxy to the command.
+- With an `agent` section, `azud app stop` and `azud accessory stop` record that an operator
+  stopped it, so it stays stopped when the agent restores this server. `azud app start`
+  and `restart`, `azud accessory boot` and `remove` end that, and a deploy ends it for
+  roles, because it starts them. `azud proxy stop` is not recorded: the agent boots the
+  proxy when it starts, as a deploy does, because other services may use it.
+- Added `azud release republish <digest>`, which publishes an old release again with a
+  new creation time, so CI can roll back with no access to the server. It needs no
+  secrets, and copies the encrypted secrets as they are. The new digest must be signed
+  before it is promoted. Its origin is in a manifest annotation, so v1 agents can read it.
+- A release bundle's stored record now keeps its configuration with environment references
+  resolved, so a rollback from a shell deploys what it meant when the agent accepted it.
 - On a configuration with an `agent` section, `azud app`, `accessory`, `cron`,
   `proxy` and `history` commands now read what is running: the agent's current
   release, with its image pinned by digest and every trust setting from this
@@ -21,7 +61,8 @@ release notes for the corresponding signed tag.
     `deploy_command` script is not refused for the release it is deploying, and its
     commands read that release.
   - With `agent.source: image`, an edit to the configuration on disk applies with
-    the next release. Commands that write from the release warn when the file differs.
+    `azud redeploy` or the next release, even if the agent was running when it was edited.
+    Commands that write from the release warn when the file differs.
   - An accessory's `files` are refused when they come from a bundle, because they
     name paths on the machine running Azud.
 - Added `azud accessory boot <name> --release <tag>`, which verifies a release with
