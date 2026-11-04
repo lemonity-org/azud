@@ -114,6 +114,9 @@ func runAccessoryBootRelease(ctx context.Context, log *output.Logger, name, rele
 	defer func() { _ = runner.Close() }()
 
 	log.Info("Starting accessory %s from release %s...", name, digest)
+	if err := recordAccessoryStarted(name); err != nil {
+		return err
+	}
 	if err := deployAccessoriesOnHost(runner, log, host, name); err != nil {
 		return err
 	}

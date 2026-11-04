@@ -148,11 +148,12 @@ func TestRunningDigestRequiresEveryRoleOnTheSameDigest(t *testing.T) {
 		web, worker string
 		want        string
 	}{
-		{"both roles on the digest", "echo ghcr.io/o/app@" + digest, "echo ghcr.io/o/app@" + digest, digest},
-		{"roles on different digests", "echo ghcr.io/o/app@" + digest, "echo ghcr.io/o/app@" + other, ""},
-		{"a role deployed by tag", "echo ghcr.io/o/app@" + digest, "echo ghcr.io/o/app:latest", ""},
-		{"a role missing", "echo ghcr.io/o/app@" + digest, "exit 125", ""},
-		{"another image", "echo ghcr.io/o/other@" + digest, "echo ghcr.io/o/other@" + digest, ""},
+		{"both roles on the digest", "echo true ghcr.io/o/app@" + digest, "echo true ghcr.io/o/app@" + digest, digest},
+		{"roles on different digests", "echo true ghcr.io/o/app@" + digest, "echo true ghcr.io/o/app@" + other, ""},
+		{"a role deployed by tag", "echo true ghcr.io/o/app@" + digest, "echo true ghcr.io/o/app:latest", ""},
+		{"a role missing", "echo true ghcr.io/o/app@" + digest, "exit 125", ""},
+		{"another image", "echo true ghcr.io/o/other@" + digest, "echo true ghcr.io/o/other@" + digest, ""},
+		{"a role stopped", "echo true ghcr.io/o/app@" + digest, "echo false ghcr.io/o/app@" + digest, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

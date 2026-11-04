@@ -59,8 +59,8 @@ it changes anything. Both work the same for images and for release bundles.
   already running on the server when it started; those roles keep running.
 - **A failed undo.** The agent keeps trying without waiting for the tag to move,
   30 seconds after the first failure and doubling to every 15 minutes, and
-  `azud agent status` shows the next attempt. A new digest on the tag replaces the
-  undo. `--once --retry-failed` goes forward with the failed release instead.
+  `azud status` shows the next attempt. A new digest on the tag replaces the
+  undo. `azud sync --retry` goes forward with the failed release instead.
 - **The agent dies.** The journal stays open, so the next check finishes the job,
   even if the tag has not moved. If the tag still names the release and it has not
   failed, the agent runs it again from its record, without verifying it again. If
@@ -69,6 +69,44 @@ it changes anything. Both work the same for images and for release bundles.
 
 None of this needs the registry while the images are still on the server: a check
 that cannot resolve the tag with a journal open acts on the last digest it saw.
+
+### When the agent starts
+
+The agent restores this server once when it starts, and tries again each interval until
+that works. It needs no registry while the images are on this server, and it applies no
+spec changes: what it creates comes from the current record, whatever the files on disk
+say by then. Reboot survival rests on this, so make sure the unit starts.
+
+1. It starts existing accessory containers. An app may need its database to become ready,
+   so they come first.
+2. It finishes or undoes an open journal. The first attempt after a start does not wait
+   out an undo's backoff, and later ones do.
+3. It boots the proxy.
+4. It starts each role's container, or creates it from the current record if it is gone.
+   It writes the release's secrets file first, with a bundle, and runs no hooks and no
+   pre-deploy command. If the journal could not be closed, it starts only what exists,
+   because the secrets file may not be this release's.
+5. It starts existing cron containers.
+
+What each kind of container gets:
+
+| Container | If it is stopped | If it is gone |
+|---|---|---|
+| Role | Started, unless an operator stopped it | Created from the current record, unless an operator stopped it |
+| Accessory | Started, unless an operator stopped it | Left gone: it holds data, and `azud accessory boot` creates it |
+| Cron job | Started | Left gone: `azud cron stop` removes it, and `azud cron boot` creates it |
+| Proxy | Started | Created. It serves other services too, so `azud proxy stop` does not outlast a restart |
+
+`azud app stop` and `azud accessory stop` record that an operator stopped it, so it stays
+stopped. `azud app start` and `restart`, and `azud accessory boot` and `remove`, end that.
+A deploy of any kind starts every role, so it ends that for roles. Run these commands on
+the server, because the record is kept on the machine they run on. A container stopped with
+`podman stop` is started again, as one left stopped by a reboot is.
+
+With `deploy_command`, the agent finishes an interrupted run of the command and starts
+existing accessories and cron jobs. It leaves role containers and the proxy alone, because
+it does not know what the command made. Whatever the command starts must come back by
+itself after a reboot, as with a restart policy or a unit of its own.
 
 ## Requirements
 
@@ -229,7 +267,9 @@ verification passed, with the variables `verify_command` gets plus
 - **Lock.** It runs while the agent holds the host's deploy lock, the one a
   pushed `azud deploy` takes, so the two never overlap. `AZUD_DEPLOY_LOCK` is
   that lock's absolute path. The agent already holds it, so the command must
-  not wait for it, with `flock` or by running `azud deploy` or `azud rollback`. Other `azud` commands, such as `azud systemd enable` or
+  not wait for it, with `flock` or by running `azud deploy`. `azud sync`, `azud rollback`,
+  `azud redeploy` and `azud agent run` refuse inside the command or a hook, because they
+  would wait for the agent too. Other `azud` commands, such as `azud systemd enable` or
   `azud proxy reconcile`, do not take it.
 - **Result.** Exit 0 records the release as deployed. Any other exit records
   it as failed, with the last 40 output lines, and it is not retried until the
@@ -254,11 +294,72 @@ secrets and configuration in one transaction with Azud's own deploy.
 
 | Task | Command |
 |---|---|
-| See what the agent last saw and deployed | `azud agent status -d agent` |
-| Retry a release that failed | `azud agent run --once --retry-failed -d agent` |
+| See what runs, what the tag names and what happens next | `azud status -d agent` |
+| Check the tag now | `azud sync -d agent` |
+| Retry a release that failed | `azud sync --retry -d agent` |
 | Follow the log | `journalctl --user -u azud-agent-app.service -f` |
-| Roll back | Move the tag back to the previous digest |
+| Roll back on the server | `azud rollback -d agent`, or `azud rollback <digest>` |
+| Roll back with no access to the server | Publish the release again, below |
+| Move to a release the tag does not name | `azud sync --digest <digest> -d agent` |
+| Apply an edit to `deploy.yml` | `azud redeploy -d agent` |
 | Break-glass deploy | `azud deploy` from a workstation still works; the agent adopts the digest if the tag later points to it, unless a journal is open |
+
+### Roll back on the server
+
+`azud rollback` goes to the release before this one. A second rollback goes further back,
+not forward again, because the release it moved away from leaves the list of what was
+applied. It stays stored, so `azud rollback <digest>` can still name it, and a digest also
+names any release v1 stored. If nothing earlier was applied, as on a server just upgraded
+from v1, the error lists what is stored.
+
+```bash
+azud rollback -d agent                  # The release before this one
+azud rollback sha256:... -d agent       # This digest or stored release
+azud rollback --no-pull -d agent        # Fail if the image is not on this server
+```
+
+A stored release needs no registry while its image is on the server, and is not verified
+again. A rollback runs no pre-deploy command, and `post-rollback` in place of the `pre-deploy`
+and `post-deploy` hooks. Without `--no-pull` an image that is gone is pulled. Roles only the
+release it left has are stopped. The agent then holds what the tag names until the tag moves,
+and `azud sync --retry` tries it again. The downgrade check does not apply, because a shell
+on the server already has that authority.
+
+An agent that dies during a rollback finishes it on its next check rather than returning to
+what it left. A rollback that fails returns to what ran before, says why, and changes nothing
+about what the tag may deploy.
+
+`azud sync --digest <digest>` moves the same way, to any release. A digest this server has
+not stored is verified with `verify_command`, unless `--no-verify`. It runs the release's
+pre-deploy command, unless it goes back to a release still in the list of what was applied.
+
+### Roll back with no access to the server
+
+Moving a bundle tag back is refused as a downgrade, so access to the registry alone cannot
+bring back an old release. CI publishes it again instead:
+
+```bash
+azud release republish sha256:... --digest-file bundle.digest
+cosign sign --yes ghcr.io/acme/app@$(cat bundle.digest)
+azud release promote $(cat bundle.digest) --track production
+```
+
+This needs no secrets and no server access, because the encrypted secrets are copied as they
+are. A server added to `release.recipients` since then cannot read them. The new bundle has
+a new creation time, which passes the downgrade check, and a new digest, so the new signature
+is what authorizes it.
+
+### Apply an edit
+
+With `agent.source: image`, an edit to `deploy.yml` does nothing by itself: a check sees the
+tag unchanged, and a restart applies no spec changes. `azud redeploy` applies it now, as a new
+record for the same digest, with the steps of any deploy, without verifying the image again. If
+it fails, the server returns to the record before it, and `azud rollback` does the same later.
+Otherwise it applies with the next release, because a release deploys what the file holds when it
+is applied, even if the agent was running when it was edited. The settings that belong to the
+server, such as `agent`, `registry` and `ssh`, apply only when the agent restarts.
+With a bundle it re-applies the stored release as it is, including writing its secrets file.
+Either way it starts any role an operator stopped, and what the tag was held at stays held.
 
 State lives in `~/.local/share/azud/agent/<service>.json` for non-root users
 (`/var/lib/azud/agent/` for root), with the record of each release in
@@ -279,7 +380,7 @@ such as a repository's `config/deploy.yml` without `-d agent`, behaves as it alw
 | Commands | What they read |
 |---|---|
 | `azud app`, `accessory`, `cron`, `proxy`, `history` | What is running: the current release's configuration, with `image` pinned by digest, and every trust setting from this server's |
-| `azud agent`, `preflight` | This server's configuration as written |
+| `azud agent`, `status`, `sync`, `redeploy`, `rollback`, `preflight` | This server's configuration as written |
 | `azud release`, `build` | The repository's configuration |
 | `azud env`, `config`, `hooks` | The configuration you point them at, as written |
 
@@ -300,15 +401,16 @@ a lock, so they work while the agent is deploying.
 - **Inside a `deploy_command` script.** The journal open around the script is its own, so
   nothing is refused, and commands read the release it is deploying.
 - **Image mode.** A release's configuration is what the file held when the agent applied
-  it. An edit applies with the next release, and commands that write from the release warn
-  when the file differs.
+  it. An edit applies with `azud redeploy` or the next release, and commands that write from
+  the release warn when the file differs.
 
 A deploy leaves accessories and cron jobs as they are. `azud cron boot` brings cron jobs to
 the release, recreating any whose image or spec differs. Accessories hold data, so nothing
 recreates them for you: to apply a change, run `azud accessory remove <name>`, then
 `azud accessory boot <name>`. Containers carry an `azud.spec` label with a hash of their
 spec, which is how a difference is found. One with no label came from an earlier version,
-so it counts as unknown, and `azud cron boot` recreates it to give it one.
+so it counts as unknown, and `azud cron boot` recreates it to give it one. `azud status`
+lists each difference with the command that applies it.
 
 Commands that do not read secrets do not load them, so a slow or hostile `secrets_command`
 cannot run for `azud app logs` or `azud history`. See the
@@ -411,20 +513,24 @@ What the agent does for each bundle:
   Hooks do not run.
 - **Interruption:** a resumed release writes its secrets again from its record.
   The failed release is not deployed again until the tag moves or you run
-  `--once --retry-failed`.
+  `azud sync --retry`.
 - **Version:** a bundle whose `minimum_version` is newer than the agent's
   azud is refused before anything changes.
 - **Downgrades:** a bundle older than the deployed one is refused, so access to
-  the registry alone cannot bring back an old release. To roll back, move the
-  tag to the older bundle and run `azud agent run --once --allow-downgrade -d agent`
-  (or set `agent.allow_downgrade: true`).
+  the registry alone cannot bring back an old release. To roll back, run `azud rollback`
+  on the server, or [publish it again](#roll-back-with-no-access-to-the-server).
+  `azud agent run --once --allow-downgrade -d agent` also works after moving the tag,
+  and `agent.allow_downgrade: true` turns the check off.
 - **What it does not apply:** accessories and cron jobs that differ from this
   server's configuration, and accessories running with secret values other than
   the release's. It deploys the app, and `azud agent status` lists them with the
   command to run, with every release until they match.
 - **Storage:** each applied release (configuration, `release.json`, encrypted
   secrets) is kept in `~/.local/share/azud/agent/<service>/releases/`, in a
-  directory named for its digest.
+  directory named for its digest. Beside the configuration as written is a copy with
+  environment references resolved, so a rollback from a shell deploys what it meant when
+  the agent accepted it. A release v1 stored has no such copy, so its references read the
+  environment of the command that returns to it.
 
 ## Limitations
 
@@ -434,4 +540,7 @@ What the agent does for each bundle:
   Release bundles carry the configuration instead.
 - `azud setup`, `azud proxy`, and accessory and cron commands still reach the server
   through their SSH settings, even when run on it, so they need `ssh.*` to work there.
-  `azud accessory boot --release` is the exception: it runs on this machine.
+  `azud accessory boot --release`, `azud status`, `sync`, and with an `agent` section
+  `redeploy` and `rollback`, are the exceptions: they run on this machine.
+- `azud sync` and `azud rollback` read a new release's environment references from the
+  shell they run in, which may not be the unit's.

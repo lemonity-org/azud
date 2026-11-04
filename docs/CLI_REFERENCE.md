@@ -171,10 +171,47 @@ azud agent run --once                 # Check the tag once
 azud agent run --once --retry-failed  # Retry a release that failed
 ```
 
+Without `--once`, it restores this server when it starts, before its first check, and
+tries again each interval until that works: see
+[When the agent starts](PULL_MODE.md#when-the-agent-starts). `--once` does not restore.
+
 #### `azud agent status`
 
 Show the tag the agent follows, the digest it last saw, the digest it
-deployed, and the last failure.
+deployed, and the last failure. `azud status` shows this and more.
+
+#### `azud status`
+
+Show what this server runs and since when, what the tag names, a failed release and why,
+a deploy that has not finished and what happens next, roles and accessories an operator
+stopped, and accessories and cron jobs that differ from the release, with the command that
+applies each. It reads state and Podman and changes nothing, and if the registry cannot be
+reached it says so and shows the rest. It needs an `agent` section, and runs on this machine.
+It loads secrets only for the registry password, so a failing `secrets_command` costs only
+the line that says what the tag names.
+
+```bash
+azud status
+azud status --details   # Also list containers
+```
+
+#### `azud sync`
+
+Run one check now, the same check as a tick of the agent, under the same locks. It needs
+an `agent` section, and runs on this machine. It exits 0 when the tag is held, and says so.
+
+| Flag | Meaning |
+|---|---|
+| `--retry` | Try a failed release again |
+| `--digest` | Move to this digest or stored release instead of what the tag names, and hold what the tag names until the tag moves |
+| `--no-verify` | With `--digest`, do not verify a digest this server has not stored. A stored release is never verified again |
+
+```bash
+azud sync
+azud sync --retry
+azud sync --digest sha256:...
+azud sync --digest sha256:... --no-verify
+```
 
 #### `azud agent init`
 
@@ -187,7 +224,7 @@ azud agent init -d agent
 ```
 
 `azud agent run --once --allow-downgrade` deploys a bundle older than the
-deployed one: the rollback path for `agent.source: bundle`.
+deployed one. `azud rollback` is the simpler way to do that on the server.
 
 #### `azud agent unit`
 
@@ -236,6 +273,22 @@ files. Secret values are never decrypted. `--config` prints the files.
 azud release inspect production
 ```
 
+#### `azud release republish`
+
+Publish an old bundle again with a new creation time, by digest only, so that it passes the
+downgrade check when promoted: a rollback with no access to the server. It needs no secrets,
+because the encrypted secrets are copied as they are. It never tags, and the new digest must
+be signed before it is promoted, so moving a tag to the old bundle stays refused. The bundle
+it came from is in the manifest annotation `com.lemonity.azud.release.republished-from`.
+
+```bash
+azud release republish sha256:... --digest-file bundle.digest
+```
+
+| Flag | Meaning |
+|---|---|
+| `--digest-file` | Also write the new bundle digest to this file |
+
 ### Build
 
 #### `azud build`
@@ -272,6 +325,11 @@ azud redeploy [flags]
 *   `--host string`: Redeploy on a specific host only.
 *   `--role string`: Redeploy on a specific role only.
 
+With an `agent` section it runs on this machine instead, and re-applies the current release
+through the agent's transaction, with no registry while the image is here. With
+`agent.source: image` it uses the configuration on disk, which is how an edit to `deploy.yml`
+gets applied. `--host` and `--role` are refused.
+
 #### `azud rollback`
 
 Rollback the application to a previous version.
@@ -279,15 +337,23 @@ Rollback the application to a previous version.
 **Usage:**
 ```bash
 azud rollback <version> [flags]
+azud rollback [digest] [--no-pull]   # With an agent section
 ```
 
 **Flags:**
 *   `--host string`: Rollback on a specific host only.
+*   `--no-pull`: With an `agent` section, fail if the image is not on this server.
 
 **Example:**
 ```bash
 azud rollback v1.2.2
 ```
+
+With an `agent` section it runs on this machine instead, and takes a digest or stored release.
+With neither it goes to the release before this one, so a second rollback goes further back. A
+stored release needs no registry while its image is here, is not verified again, and may be one
+v1 stored. The agent then holds what the tag names until the tag moves. `--host` is refused. See
+[Roll back on the server](PULL_MODE.md#roll-back-on-the-server).
 
 #### `azud history`
 

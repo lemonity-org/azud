@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
 	"github.com/lemonity-org/azud/internal/output"
 )
@@ -38,21 +39,34 @@ var redeployCmd = &cobra.Command{
 This is useful when you want to restart the application with the same image,
 or when the image has been pushed separately.
 
+With an agent section, run it on the server. It re-applies the current release
+through the agent's transaction, with no registry while the image is here. With
+agent.source: image it uses the configuration on disk, which is how an edit to
+deploy.yml gets applied. --host and --role do not apply.
+
 Example:
   azud redeploy`,
 	RunE: runRedeploy,
 }
 
 var rollbackCmd = &cobra.Command{
-	Use:         "rollback <version>",
+	Use:         "rollback [version | digest]",
 	Annotations: scopedServer,
 	Short:       "Rollback to a previous version",
 	Long: `Rollback the application to a previous version.
 
+With an agent section, run it on the server. It takes a digest or a stored
+release, and with neither goes to the release before this one, so a second
+rollback goes further back. A stored release needs no registry while its image is
+here, and is not verified again. The agent then holds what the tag names until the
+tag moves. --host does not apply.
+
 Example:
   azud rollback v1.2.2           # Rollback to specific version
-  azud rollback abc123           # Rollback to specific commit`,
-	Args: cobra.ExactArgs(1),
+  azud rollback abc123           # Rollback to specific commit
+  azud rollback                  # With an agent: to the release before this one
+  azud rollback sha256:...       # With an agent: to this digest`,
+	Args: rollbackArgs,
 	RunE: runRollback,
 }
 
@@ -62,6 +76,7 @@ var (
 	deploySkipBuild bool
 	deployHost      string
 	deployRole      string
+	rollbackNoPull  bool
 )
 
 func init() {
@@ -78,6 +93,7 @@ func init() {
 
 	// Rollback flags
 	rollbackCmd.Flags().StringVar(&deployHost, "host", "", "Rollback on specific host only")
+	rollbackCmd.Flags().BoolVar(&rollbackNoPull, "no-pull", false, "With an agent section, fail if the image is not on this server")
 
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(redeployCmd)
@@ -138,6 +154,10 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
 
+	if cfg.Agent.Configured() {
+		return runAgentRedeploy(cmd, log)
+	}
+
 	log.Header("Redeploy / %s", cfg.Service)
 
 	// Run pre-connect hook
@@ -168,9 +188,37 @@ func runRedeploy(cmd *cobra.Command, args []string) error {
 	return deployer.Redeploy(cmd.Context(), opts)
 }
 
+// rollbackArgs takes one version, and with an agent section also none. The configuration
+// is read here because arguments are checked before it loads, so that with no agent
+// section this fails as it always has, before a failing secrets_command could.
+func rollbackArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 && configuresAgent() {
+		return nil
+	}
+	return cobra.ExactArgs(1)(cmd, args)
+}
+
+// configuresAgent reports whether the configuration the command points at has an agent
+// section, after its destination file is merged.
+func configuresAgent() bool {
+	path := GetConfigPath()
+	if path == "" {
+		return false
+	}
+	loaded, err := config.NewLoader(path, destination).WithoutSecrets().Load()
+	return err == nil && loaded.Agent.Configured()
+}
+
 func runRollback(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
+
+	if cfg.Agent.Configured() {
+		return runAgentRollback(cmd, log, args)
+	}
+	if rollbackNoPull {
+		return fmt.Errorf("--no-pull applies to a configuration with an agent section")
+	}
 
 	version := args[0]
 	log.Header("Rolling back to %s", version)

@@ -65,6 +65,29 @@ azud history list
 azud rollback v1.2.2
 ```
 
+On a server with an agent, see what runs and what happens next, then go back:
+
+```bash
+azud status
+azud rollback               # The release before this one; again goes further back
+azud rollback sha256:...    # A digest or stored release
+azud sync                   # Check the tag now
+azud sync --retry           # Try what the tag names again
+```
+
+A stored release needs no registry while its image is on the server. The agent holds what the
+tag names until the tag moves, and a later tag move proceeds as usual. With no access to the
+server, publish the old release again with `azud release republish`: see
+[Pull-Mode Deploys](PULL_MODE.md#roll-back-with-no-access-to-the-server).
+
+## Restarts
+
+On a server with an agent, the agent restores what runs when it starts, with no registry while
+the images are there, and applies no spec changes. What an operator stopped with `azud app stop`
+or `azud accessory stop` stays stopped. To apply an edit to `deploy.yml` with
+`agent.source: image`, run `azud redeploy`. See
+[When the agent starts](PULL_MODE.md#when-the-agent-starts).
+
 ## Accessories
 
 ```bash
