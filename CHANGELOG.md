@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.7.0 - 2026-11-04
+
 - Updated dependencies. Go is 1.27.3, the build image is
   `golang:1.27.3-alpine`, and the runtime image is `alpine:3.24`.
   `golang.org/x/crypto` is v0.58.0, `golang.org/x/term` is v0.47.0, and
