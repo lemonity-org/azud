@@ -77,6 +77,31 @@ registry.password).`,
 	RunE: runReleaseInspect,
 }
 
+var releaseRepublishCmd = &cobra.Command{
+	Use:   "republish <bundle digest>",
+	Short: "Publish an old release again, for CI to promote",
+	Long: `Publish a release bundle again with a new creation time, by digest only, so
+that it passes the agent's downgrade check when promoted. This is a rollback with no
+access to the server.
+
+It needs no secrets: the image, the configuration files and the encrypted secrets are
+copied as they are, so a server added to release.recipients since then cannot read it.
+The new bundle has a new digest, and the signature on it is what authorizes the
+rollback, so moving a tag to the old bundle alone stays refused.
+
+  azud release republish sha256:... --digest-file bundle.digest
+  cosign sign --yes <repository>@$(cat bundle.digest)
+  azud release promote $(cat bundle.digest) --track production
+
+The registry password is read from the environment (the variable named in
+registry.password).`,
+	Args: cobra.ExactArgs(1),
+	Annotations: map[string]string{
+		skipSecretsAnnotation: "true",
+	},
+	RunE: runReleaseRepublish,
+}
+
 var (
 	releaseImage      string
 	releaseCommit     string
@@ -98,8 +123,10 @@ func init() {
 	_ = releasePublishCmd.MarkFlagRequired("image")
 	releasePromoteCmd.Flags().StringVar(&releaseTrack, "track", "", "Tag to point at the bundle (default: agent.track)")
 	releaseInspectCmd.Flags().BoolVar(&releaseShowConfig, "config", false, "Print the configuration files")
+	releaseRepublishCmd.Flags().StringVar(&releaseDigestFile, "digest-file", "", "Also write the new bundle digest to this file")
 
 	releaseCmd.AddCommand(releasePublishCmd)
+	releaseCmd.AddCommand(releaseRepublishCmd)
 	releaseCmd.AddCommand(releasePromoteCmd)
 	releaseCmd.AddCommand(releaseInspectCmd)
 	rootCmd.AddCommand(releaseCmd)
@@ -191,6 +218,32 @@ func runReleasePublish(cmd *cobra.Command, args []string) error {
 
 	log.Success("Published %s@%s", repo.Name(), bundle.Digest)
 	log.Info("Image %s, %d secret(s) for %d recipient(s), commit %s", image.Digest, len(names), len(cfg.Release.Recipients), orDash(info.Commit))
+	if releaseDigestFile != "" {
+		if err := os.WriteFile(releaseDigestFile, []byte(bundle.Digest+"\n"), 0o644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", releaseDigestFile, err)
+		}
+	}
+	return nil
+}
+
+func runReleaseRepublish(cmd *cobra.Command, args []string) error {
+	output.SetVerbose(verbose)
+	log := output.DefaultLogger
+
+	digest := args[0]
+	if !registry.ValidDigest(digest) {
+		return fmt.Errorf("%q is not a bundle digest (sha256:...)", digest)
+	}
+	repo, err := releaseRepository(cfg)
+	if err != nil {
+		return err
+	}
+	bundle, err := release.Republish(cmd.Context(), repo, digest, cfg.Service, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to republish %s: %w", digest, err)
+	}
+	log.Success("Published %s@%s, from %s", repo.Name(), bundle.Digest, digest)
+	log.Info("Sign it, then move the tag with 'azud release promote'")
 	if releaseDigestFile != "" {
 		if err := os.WriteFile(releaseDigestFile, []byte(bundle.Digest+"\n"), 0o644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", releaseDigestFile, err)

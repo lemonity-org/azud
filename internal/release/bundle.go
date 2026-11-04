@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -99,8 +100,10 @@ type Bundle struct {
 
 // Release is a bundle read back from a registry. Secrets stays encrypted.
 type Release struct {
-	Digest  string
-	Info    Info
+	Digest string
+	Info   Info
+	// Subject describes the image manifest, as the bundle's subject does.
+	Subject Descriptor
 	Files   []File
 	Secrets []byte
 }
@@ -109,6 +112,11 @@ type Release struct {
 // type, digest and size), which becomes the bundle's subject. secrets is the
 // encrypted secrets file, or nil when the release has none.
 func Build(info Info, image Descriptor, files []File, secrets []byte) (*Bundle, error) {
+	return build(info, image, files, secrets, nil)
+}
+
+// build assembles a bundle, with annotations added to its manifest.
+func build(info Info, image Descriptor, files []File, secrets []byte, annotations map[string]string) (*Bundle, error) {
 	info.Format = formatVersion
 	if err := validateInfo(info); err != nil {
 		return nil, err
@@ -142,6 +150,7 @@ func Build(info Info, image Descriptor, files []File, secrets []byte) (*Bundle, 
 	if info.Commit != "" {
 		m.Annotations["org.opencontainers.image.revision"] = info.Commit
 	}
+	maps.Copy(m.Annotations, annotations)
 	seen := map[string]bool{}
 	for _, f := range files {
 		if !configFileName(f.Name, info.Destination) {
@@ -240,7 +249,7 @@ func Fetch(ctx context.Context, repo *registry.Repository, digest string) (*Rele
 		return nil, fmt.Errorf("release %s: subject does not match release image %s", digest, info.Image)
 	}
 
-	rel := &Release{Digest: digest, Info: info}
+	rel := &Release{Digest: digest, Info: info, Subject: *parsed.Subject}
 	seen := map[string]bool{}
 	for _, layer := range parsed.Layers {
 		title := layer.Annotations[titleAnnotation]
