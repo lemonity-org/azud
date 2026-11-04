@@ -16,6 +16,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -552,9 +553,11 @@ func (s *service) serves() (string, error) {
 // requestWatch sends requests through the proxy until it is stopped.
 type requestWatch struct {
 	s            *service
+	started      time.Time
 	served       atomic.Int64
 	failed       atomic.Int64
 	lastFailure  atomic.Value
+	failures     []string // when each failed, how long it took and why, read after stop
 	stopRequests chan struct{}
 	done         chan struct{}
 	stop         func()
@@ -563,7 +566,7 @@ type requestWatch struct {
 // watchRequests starts a requestWatch. A request fails if it errors or answers
 // anything but allowed.
 func (s *service) watchRequests(allowed ...string) *requestWatch {
-	w := &requestWatch{s: s, stopRequests: make(chan struct{}), done: make(chan struct{})}
+	w := &requestWatch{s: s, started: time.Now(), stopRequests: make(chan struct{}), done: make(chan struct{})}
 	w.stop = sync.OnceFunc(func() {
 		close(w.stopRequests)
 		<-w.done
@@ -577,15 +580,18 @@ func (s *service) watchRequests(allowed ...string) *requestWatch {
 				return
 			default:
 			}
+			began := time.Now()
 			got, err := s.serves()
-			switch {
-			case err != nil:
+			if err == nil && !slices.Contains(allowed, got) {
+				err = errors.New("unexpected body " + got)
+			}
+			if err != nil {
 				w.failed.Add(1)
 				w.lastFailure.Store(err.Error())
-			case !slices.Contains(allowed, got):
-				w.failed.Add(1)
-				w.lastFailure.Store("unexpected body " + got)
-			default:
+				if len(w.failures) < 20 {
+					w.failures = append(w.failures, fmt.Sprintf("%s %s after %s: %v", began.UTC().Format("15:04:05.000"), began.Sub(w.started).Round(time.Millisecond), time.Since(began).Round(time.Millisecond), err))
+				}
+			} else {
 				w.served.Add(1)
 			}
 			time.Sleep(20 * time.Millisecond)
@@ -597,11 +603,33 @@ func (s *service) watchRequests(allowed ...string) *requestWatch {
 func (w *requestWatch) requireNoFailures() {
 	w.s.t.Helper()
 	if w.failed.Load() != 0 {
-		w.s.t.Errorf("%d of %d requests failed, last: %v", w.failed.Load(), w.failed.Load()+w.served.Load(), w.lastFailure.Load())
+		w.s.t.Errorf("%d of %d requests failed, last: %v\n%s\nthe proxy said:\n%s", w.failed.Load(), w.failed.Load()+w.served.Load(), w.lastFailure.Load(), strings.Join(w.failures, "\n"), proxyProblemsSince(w.started))
 	}
 	if w.served.Load() < 10 {
 		w.s.t.Errorf("only %d requests ran, so this proves little", w.served.Load())
 	}
+}
+
+// proxyProblemsSince returns what the proxy logged as a problem since t.
+func proxyProblemsSince(t time.Time) string {
+	since := t.UTC().Format(time.RFC3339)
+	var out string
+	var err error
+	if h.proxyRootful && !h.root {
+		out, err = run("sudo", "-n", "podman", "logs", "--since", since, proxyContainer)
+	} else {
+		out, err = podman("logs", "--since", since, proxyContainer)
+	}
+	if err != nil {
+		return fmt.Sprintf("cannot read its log: %v\n%s", err, out)
+	}
+	var problems []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(line, `"level":"error"`) || strings.Contains(line, `"level":"warn"`) || strings.Contains(line, "unhealthy") {
+			problems = append(problems, line)
+		}
+	}
+	return strings.Join(problems, "\n")
 }
 
 func (s *service) waitServes(want string) {
