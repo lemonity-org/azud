@@ -86,6 +86,14 @@ func (l *Logger) Warn(format string, args ...interface{}) {
 	l.writeOutRecord("WARN", Yellow, recordMessage(format, args...))
 }
 
+// WarnStderr prints a warning record to stderr. It is for a notice that does not
+// belong to the command's result, whose stdout a script may be capturing.
+func (l *Logger) WarnStderr(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.writeRecord(l.err, "WARN", Yellow, recordMessage(format, args...))
+}
+
 // Error prints an error record.
 func (l *Logger) Error(format string, args ...interface{}) {
 	l.mu.Lock()

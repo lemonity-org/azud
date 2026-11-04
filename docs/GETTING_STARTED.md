@@ -8,8 +8,9 @@ This guide takes you from zero to a first successful deploy.
 curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/v1/scripts/install.sh | sh
 ```
 
-Install the [GitHub CLI](https://cli.github.com/) first; the installer uses it to
-verify the release's signed build provenance.
+The installer verifies the release's signature before installing. It uses the
+[GitHub CLI](https://cli.github.com/) or `cosign` if you have either, and otherwise
+downloads a pinned `cosign` for that one check.
 
 ## 2) Initialize your project
 

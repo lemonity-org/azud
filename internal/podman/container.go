@@ -23,6 +23,9 @@ type Container struct {
 	Labels  map[string]string
 }
 
+// SharedNetwork is the network Azud's containers reach each other on.
+const SharedNetwork = "azud"
+
 // ContainerManager handles container lifecycle operations via Podman.
 type ContainerManager struct {
 	client *Client
@@ -48,6 +51,9 @@ func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Re
 	if err := ValidateOptions(config.Options); err != nil {
 		return "", err
 	}
+	if err := m.ensureNetworkFor(host, config); err != nil {
+		return "", err
+	}
 	cmd := config.BuildRunCommand()
 	cmd = m.client.RewriteCommand(cmd)
 	var result *ssh.Result
@@ -69,6 +75,9 @@ func (m *ContainerManager) run(host string, config *ContainerConfig, stdin io.Re
 // Create validates and creates a container without starting it.
 func (m *ContainerManager) Create(host string, config *ContainerConfig) (string, error) {
 	if err := ValidateOptions(config.Options); err != nil {
+		return "", err
+	}
+	if err := m.ensureNetworkFor(host, config); err != nil {
 		return "", err
 	}
 	cmd := config.BuildCreateCommand()
@@ -331,6 +340,23 @@ func (m *ContainerManager) HasHealthcheck(host, container string) (bool, error) 
 	}
 	count := strings.TrimSpace(result.Stdout)
 	return count != "" && count != "0", nil
+}
+
+// ensureNetworkFor creates the shared network if config joins it and this Podman
+// store lacks it. Only `azud setup` and `azud systemd enable` used to create it, so
+// a server set up any other way failed its first deploy with "network not found".
+func (m *ContainerManager) ensureNetworkFor(host string, config *ContainerConfig) error {
+	if config.Network != SharedNetwork {
+		return nil
+	}
+	result, err := m.client.Execute(host, "network", "create", "--ignore", SharedNetwork)
+	if err != nil {
+		return fmt.Errorf("failed to create network %s: %w", SharedNetwork, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to create network %s: %s", SharedNetwork, result.Stderr)
+	}
+	return nil
 }
 
 // WaitRunning waits for a brief stabilization period and then verifies the

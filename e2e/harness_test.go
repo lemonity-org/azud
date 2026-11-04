@@ -101,14 +101,14 @@ func runTests(m *testing.M) (int, error) {
 	return m.Run(), nil
 }
 
-// bootstrap does what `azud setup` leaves behind on v1 that a deploy cannot create for
-// itself: without the azud network, a deploy fails with "network not found".
+// bootstrap prepares the server. A deploy creates the azud network itself, which the
+// root job proves, because nothing else creates it there.
 func (h *harness) bootstrap() error {
-	if out, err := podman("network", "create", "--ignore", "azud"); err != nil {
-		return fmt.Errorf("create azud network: %w\n%s", err, out)
-	}
 	if h.root {
 		return nil
+	}
+	if out, err := podman("network", "create", "--ignore", "azud"); err != nil {
+		return fmt.Errorf("create azud network: %w\n%s", err, out)
 	}
 	// With a rootful proxy, an app can be the only rootless container on the network.
 	// Replacing it then makes Podman tear down the rootless network namespace, which on

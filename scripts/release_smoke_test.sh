@@ -62,6 +62,13 @@ case "$url" in
     digest=$(sha256sum "$MOCK_BINARY" | awk '{print $1}')
     printf '%s  azud-linux-amd64\n' "$digest" > "$out"
     ;;
+  */checksums.txt.sigstore.json)
+    [ -z "${MOCK_NO_BUNDLE:-}" ] || exit 22
+    printf '{}\n' > "$out"
+    ;;
+  */cosign-linux-amd64)
+    cp "$MOCK_COSIGN" "$out"
+    ;;
   *)
     echo "unexpected curl URL: $url" >&2
     exit 1
@@ -100,6 +107,96 @@ if printf '%s\n' "$output" | LC_ALL=C grep "$(printf '\033')" >/dev/null; then
 fi
 [ -x "$INSTALL_DIR/azud" ]
 grep -F "attestation verify" "$MOCK_GH_ARGS" >/dev/null
+
+# A server without the GitHub CLI verifies the signed checksums with cosign. These
+# routes need a PATH that truly has no gh or cosign, whatever the machine has.
+NO_GH_BIN="$TEST_TMP/no-gh-bin"
+MOCK_COSIGN="$TEST_TMP/mock-cosign"
+MOCK_COSIGN_ARGS="$TEST_TMP/cosign-args"
+REAL_SHA256SUM=$(command -v sha256sum)
+mkdir -p "$NO_GH_BIN"
+for tool in awk cat chmod cp grep head mkdir mktemp mv rm sed sh tr; do
+  ln -s "$(command -v "$tool")" "$NO_GH_BIN/$tool"
+done
+cp "$MOCK_BIN/curl" "$MOCK_BIN/uname" "$NO_GH_BIN/"
+cat > "$MOCK_COSIGN" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" > "$MOCK_COSIGN_ARGS"
+if [ -n "${MOCK_COSIGN_REJECTS:-}" ]; then
+  echo "none of the expected identities matched" >&2
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_COSIGN"
+
+# The mock cosign cannot match the real pin, so sha256sum reports the pin for it
+# unless a test asks for a mismatch.
+pinned_digest=$(awk '/linux-amd64\)/ { sub(/.*COSIGN_SHA256="/, ""); sub(/".*/, ""); print }' scripts/install.sh)
+cat > "$NO_GH_BIN/sha256sum" <<EOF
+#!/bin/sh
+case "\$1" in
+  */cosign) echo "\${MOCK_COSIGN_DIGEST:-$pinned_digest}  \$1" ;;
+  *) "$REAL_SHA256SUM" "\$@" ;;
+esac
+EOF
+chmod +x "$NO_GH_BIN/sha256sum"
+
+install_without_gh() {
+  rm -f "$MOCK_COSIGN_ARGS"
+  rm -rf "$INSTALL_DIR"
+  PATH="$1" \
+  AZUD_VERSION=v1.2.3 \
+  AZUD_INSTALL_DIR="$INSTALL_DIR" \
+  MOCK_BINARY="$MOCK_BINARY" \
+  MOCK_COSIGN="$MOCK_COSIGN" \
+  MOCK_COSIGN_ARGS="$MOCK_COSIGN_ARGS" \
+  sh scripts/install.sh 2>&1
+}
+
+# No gh and no cosign: downloads the pinned cosign.
+output=$(install_without_gh "$NO_GH_BIN")
+printf '%s\n' "$output" | grep -F "downloading cosign" >/dev/null
+[ -x "$INSTALL_DIR/azud" ]
+grep -F "verify-blob" "$MOCK_COSIGN_ARGS" >/dev/null
+grep -F "lemonity-org/azud/.github/workflows/release.yml@refs/tags/v1.2.3" "$MOCK_COSIGN_ARGS" >/dev/null
+grep -F "https://token.actions.githubusercontent.com" "$MOCK_COSIGN_ARGS" >/dev/null
+
+# A cosign that does not match the pin is never run.
+if output=$(MOCK_COSIGN_DIGEST=0000 install_without_gh "$NO_GH_BIN"); then
+  echo "installer accepted a cosign that does not match its pin" >&2
+  exit 1
+fi
+printf '%s\n' "$output" | grep -F "Checksum mismatch for the downloaded cosign" >/dev/null
+[ ! -e "$MOCK_COSIGN_ARGS" ]
+[ ! -e "$INSTALL_DIR/azud" ]
+
+# A bad signature stops the install and shows why.
+if output=$(MOCK_COSIGN_REJECTS=1 install_without_gh "$NO_GH_BIN"); then
+  echo "installer accepted a release whose signature did not verify" >&2
+  exit 1
+fi
+printf '%s\n' "$output" | grep -F "none of the expected identities matched" >/dev/null
+[ ! -e "$INSTALL_DIR/azud" ]
+
+# A release from before signed checksums says what it needs.
+if output=$(MOCK_NO_BUNDLE=1 install_without_gh "$NO_GH_BIN"); then
+  echo "installer accepted a release with no signed checksums" >&2
+  exit 1
+fi
+printf '%s\n' "$output" | grep -F "has no signed checksums" >/dev/null
+[ ! -e "$INSTALL_DIR/azud" ]
+
+# A cosign already on the path is used instead of downloading one.
+COSIGN_BIN="$TEST_TMP/cosign-bin"
+mkdir -p "$COSIGN_BIN"
+cp "$MOCK_COSIGN" "$COSIGN_BIN/cosign"
+output=$(install_without_gh "$COSIGN_BIN:$NO_GH_BIN")
+if printf '%s\n' "$output" | grep -F "downloading cosign" >/dev/null; then
+  echo "installer downloaded cosign although one is on the path" >&2
+  exit 1
+fi
+grep -F "verify-blob" "$MOCK_COSIGN_ARGS" >/dev/null
+[ -x "$INSTALL_DIR/azud" ]
 
 # A moving major action tag must still install binaries released before the
 # stable version --short surface existed.

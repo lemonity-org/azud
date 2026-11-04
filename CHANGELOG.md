@@ -48,6 +48,17 @@ release notes for the corresponding signed tag.
   server's own secrets, including the registry password. To fix it, set either
   path to another file, or run the agent from another directory.
 
+- Azud 2.0 removes push mode. Commands that reach a server over SSH now print a
+  notice on stderr. 1.x gets security fixes for 12 months after 2.0.
+- A deploy, proxy boot, accessory boot or cron job now creates the `azud` network
+  if it is missing. It used to fail with "network not found" unless `azud setup` or
+  `azud systemd enable` had run first, which matters for a server that only runs
+  `azud agent`.
+- `install.sh` no longer needs the GitHub CLI. Without it, it verifies the release's
+  signed checksums with `cosign`, downloading a pinned copy if there is none. A
+  release before this one has no signed checksums, so it still needs the GitHub CLI.
+- Fixed multi-architecture builds ignoring `builder.cache`'s export. Each platform's
+  build now passes `--cache-to`, as a single-architecture build always did.
 - Added `deploy.pull_timeout` (default 15m), which limits pulling one image.
   Pulls used to share `ssh.command_timeout`, so with the default of 35s a slow
   first pull failed the deploy. If `ssh.command_timeout` is longer, it applies

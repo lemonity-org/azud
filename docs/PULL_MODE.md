@@ -1,5 +1,8 @@
 # Pull-Mode Deploys
 
+Azud 2.0 removes push mode, so this is how every Azud deploy will work. Push keeps
+working on 1.x, which gets security fixes for 12 months after 2.0.
+
 In push mode, CI runs `azud deploy`, which connects to the server over SSH. In
 pull mode, `azud agent` runs on the server itself. It follows a registry tag,
 and when the tag moves to a new image it verifies the image and deploys it on

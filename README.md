@@ -60,8 +60,9 @@ one or more Podman hosts.
 curl -fsSL https://raw.githubusercontent.com/lemonity-org/azud/v1/scripts/install.sh | sh
 ```
 
-The installer requires the [GitHub CLI](https://cli.github.com/) and verifies both the
-release checksum and its GitHub/Sigstore build provenance. A source install with
+The installer verifies the release checksum and its signature, using the
+[GitHub CLI](https://cli.github.com/) or `cosign` if you have either, and otherwise a
+pinned `cosign` it downloads for that one check. A source install with
 `go install github.com/lemonity-org/azud@latest` is supported for development, but
 cannot contain the release metadata injected into official binaries.
 
