@@ -34,31 +34,31 @@ func (a *Agent) restore(ctx context.Context, skipBackoff bool) error {
 	if err != nil {
 		return err
 	}
-	intent, err := a.State.Intent()
-	if err != nil {
+	stops := &operatorStops{store: a.State}
+	if stops.last, err = a.State.Intent(); err != nil {
 		return err
 	}
 
 	var errs []error
-	if err := a.startExisting(DriftAccessory, intent.Accessories); err != nil {
+	if err := a.startExisting(DriftAccessory, stops.accessory); err != nil {
 		errs = append(errs, err)
 	}
 	if err := a.closeJournal(ctx, &st, skipBackoff); err != nil {
 		errs = append(errs, err)
 	}
-	// Closing a journal deploys, and a deploy ends an operator's stop.
-	if intent, err = a.State.Intent(); err != nil {
-		errs = append(errs, err)
-	} else if err := a.restoreRoles(ctx, &st, intent.Roles); err != nil {
+	if err := a.restoreRoles(ctx, &st, stops.role); err != nil {
 		errs = append(errs, err)
 	}
-	if err := a.startExisting(DriftCron, nil); err != nil {
+	if err := a.startExisting(DriftCron, func(string) bool { return false }); err != nil {
 		errs = append(errs, err)
+	}
+	if stops.err != nil {
+		errs = append(errs, stops.err)
 	}
 	return errors.Join(errs...)
 }
 
-func (a *Agent) startExisting(kind string, stopped []string) error {
+func (a *Agent) startExisting(kind string, stopped func(string) bool) error {
 	if a.StartExisting == nil {
 		return nil
 	}
@@ -102,9 +102,11 @@ func (a *Agent) closeJournal(ctx context.Context, st *State, skipBackoff bool) e
 }
 
 // restoreRoles brings back the current release's role containers, under the deploy lock.
-// A journal still open means the secrets file may not be this release's, so it starts
-// only what exists: a container keeps the environment it was created with.
-func (a *Agent) restoreRoles(ctx context.Context, st *State, stopped []string) error {
+// A journal still open means the secrets file may not be this release's, and so does a
+// file it could not write, so both start only what exists: a container keeps the
+// environment it was created with. A file it could not write fails the restore, so the
+// next check tries again.
+func (a *Agent) restoreRoles(ctx context.Context, st *State, stopped func(string) bool) error {
 	if a.DeployUndoes {
 		a.log().Info("agent.deploy_command owns this service's containers and proxy, so the agent starts none of them")
 		return nil
@@ -120,14 +122,16 @@ func (a *Agent) restoreRoles(ctx context.Context, st *State, stopped []string) e
 	if err != nil {
 		return fmt.Errorf("stored release %s: %w", short(rec.Digest), err)
 	}
-	whole := st.Journal == nil
+	recreate := st.Journal == nil
 	return a.lock(func() error {
-		if whole {
+		var activateErr error
+		if recreate {
 			if err := a.Source.Activate(rec, rec); err != nil {
-				a.log().Warn("Cannot write this release's secrets file: %v", err)
+				activateErr = fmt.Errorf("writing the secrets file of release %s: %w", short(rec.Digest), err)
+				recreate = false
 			}
 		}
-		return a.RestoreRoles(ctx, cfg, rec.Image, stopped, whole)
+		return errors.Join(activateErr, a.RestoreRoles(ctx, cfg, rec.Image, stopped, recreate))
 	})
 }
 

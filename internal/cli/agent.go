@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -272,7 +271,7 @@ func newAgent(cmd *cobra.Command) (*agent.Agent, func(), error) {
 			return deploy.NewDeployer(release, client, log).StopRoles([]string{host}, roles)
 		},
 		RunningRoles: runningRoles(containers, host),
-		RestoreRoles: func(ctx context.Context, release *config.Config, image string, stopped []string, recreate bool) error {
+		RestoreRoles: func(ctx context.Context, release *config.Config, image string, stopped func(string) bool, recreate bool) error {
 			pinned := *release
 			pinned.Image = image
 			client, closeClient := releaseClient(commandContext, sshClient, cfg, release, host)
@@ -581,10 +580,10 @@ func runningRoles(containers *podman.ContainerManager, host string) func(*config
 }
 
 // startExisting returns a function that starts this service's stopped containers of a
-// kind, except those named in stopped, as they are. Each keeps the image, spec and
+// kind, except those stopped reports, as they are. Each keeps the image, spec and
 // environment it was created with, so this applies nothing and reads no secrets file.
-func startExisting(containers *podman.ContainerManager, service, host string, log *output.Logger) func(string, []string) error {
-	return func(kind string, stopped []string) error {
+func startExisting(containers *podman.ContainerManager, service, host string, log *output.Logger) func(string, func(string) bool) error {
+	return func(kind string, stopped func(string) bool) error {
 		list, err := containers.List(host, true, map[string]string{"label": "azud.service=" + service})
 		if err != nil {
 			return err
@@ -595,12 +594,19 @@ func startExisting(containers *podman.ContainerManager, service, host string, lo
 			switch {
 			case name == "", container.State == "running", container.State == "paused":
 				continue
-			case slices.Contains(stopped, name):
+			case stopped(name):
 				log.Host(host, "An operator stopped %s; leaving it stopped", container.Name)
 				continue
 			}
 			log.Host(host, "Starting %s...", container.Name)
-			if err := containers.Start(host, container.Name); err != nil {
+			err := containers.Start(host, container.Name)
+			// A stop takes no lock and records itself first, so one that came during
+			// the start may have found nothing to stop, and only this sees it.
+			if stopped(name) {
+				log.Host(host, "An operator stopped %s during the restore; stopping it", container.Name)
+				err = errors.Join(err, containers.Stop(host, container.Name, accessoryStopTimeout))
+			}
+			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", container.Name, err))
 			}
 		}

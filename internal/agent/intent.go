@@ -24,6 +24,39 @@ type Intent struct {
 	Accessories []string `json:"accessories,omitempty"`
 }
 
+// operatorStops answers whether an operator has stopped something, from the record as it
+// is now, since a restore can wait a long time for the deploy lock.
+//
+// A stop takes no lock and can come at any moment, but it records itself before it acts.
+// So whatever starts something asks before and again after. A stop that came in between
+// may have found nothing to stop, and the second answer says to stop it. One that came
+// later finds the container running and stops it itself.
+//
+// A record that cannot be read keeps the last answer, and err says so.
+type operatorStops struct {
+	store *Store
+	last  Intent
+	err   error
+}
+
+func (o *operatorStops) read() Intent {
+	intent, err := o.store.Intent()
+	if err != nil {
+		o.err = err
+		return o.last
+	}
+	o.last = intent
+	return intent
+}
+
+func (o *operatorStops) role(name string) bool {
+	return slices.Contains(o.read().Roles, name)
+}
+
+func (o *operatorStops) accessory(name string) bool {
+	return slices.Contains(o.read().Accessories, name)
+}
+
 // WithStopped adds names to a list of stopped things.
 func WithStopped(list []string, names ...string) []string {
 	for _, name := range names {

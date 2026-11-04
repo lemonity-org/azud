@@ -1568,9 +1568,9 @@ func (d *Deployer) Redeploy(ctx context.Context, opts *DeployOptions) error {
 // server restarted. It boots the proxy, leaves a running container as it is, starts one
 // that exists, and with recreate creates a missing one from the pinned image, which needs
 // no registry while the image is on host. It runs no pre-deploy command and writes no
-// history, and the caller holds the deploy lock. Roles in stopped are left as they are.
-// Every role is tried, whatever happens to the others.
-func (d *Deployer) RestoreRoles(ctx context.Context, host string, stopped []string, recreate bool) error {
+// history, and the caller holds the deploy lock. Roles that stopped reports are left as
+// they are. Every role is tried, whatever happens to the others.
+func (d *Deployer) RestoreRoles(ctx context.Context, host string, stopped func(role string) bool, recreate bool) error {
 	targets, err := d.getTargets(&DeployOptions{Hosts: []string{host}})
 	if err != nil {
 		return err
@@ -1582,11 +1582,18 @@ func (d *Deployer) RestoreRoles(ctx context.Context, host string, stopped []stri
 		}
 	}
 	for _, target := range targets {
-		if slices.Contains(stopped, target.Role) {
+		if stopped(target.Role) {
 			d.log.Host(host, "An operator stopped the %s role; leaving it stopped", target.Role)
 			continue
 		}
-		if err := d.restoreTarget(ctx, target, recreate); err != nil {
+		err := d.restoreTarget(ctx, target, recreate)
+		// A stop takes no lock and records itself first, so one that came during the
+		// start may have found nothing to stop, and only this sees it.
+		if stopped(target.Role) {
+			d.log.Host(host, "An operator stopped the %s role during the restore; stopping it", target.Role)
+			err = errors.Join(err, d.stopContainerConfirmed(host, RoleContainerName(d.cfg, target.Role), d.cfg.GetRoleStopTimeout(target.Role)))
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s role: %w", target.Role, err))
 		}
 	}
@@ -1609,7 +1616,7 @@ func (d *Deployer) restoreTarget(ctx context.Context, target deploymentTarget, r
 	}
 	if !exists {
 		if !recreate {
-			d.log.Warn("%s does not exist on %s, and is not created while a deploy has not finished", name, host)
+			d.log.Warn("%s does not exist on %s, and is not created now, because the secrets file may not be this release's", name, host)
 			return nil
 		}
 		return d.recreateTarget(ctx, target)

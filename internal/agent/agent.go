@@ -112,13 +112,15 @@ type Agent struct {
 	// RunningRoles returns the roles of cfg with a running container.
 	RunningRoles func(cfg *config.Config) ([]string, error)
 	// RestoreRoles boots the proxy and brings back the role containers of cfg, except
-	// the roles in stopped, with image pinned. Recreate means create a role's container
+	// the roles stopped reports, with image pinned. It asks before starting a role and
+	// again after, as operatorStops explains. Recreate means create a role's container
 	// when it does not exist, which reads the runtime secrets file. The deploy lock is
 	// held. Optional.
-	RestoreRoles func(ctx context.Context, cfg *config.Config, image string, stopped []string, recreate bool) error
+	RestoreRoles func(ctx context.Context, cfg *config.Config, image string, stopped func(role string) bool, recreate bool) error
 	// StartExisting starts this service's stopped containers of a kind, DriftAccessory
-	// or DriftCron, except those named in stopped. Optional.
-	StartExisting func(kind string, stopped []string) error
+	// or DriftCron, except those stopped reports, which it asks as RestoreRoles does.
+	// Optional.
+	StartExisting func(kind string, stopped func(name string) bool) error
 
 	State *Store
 	Log   *output.Logger

@@ -37,13 +37,15 @@ func restoreDeployer(containers *fakeContainerLifecycle, proxyManager *fakeDeplo
 	}
 }
 
+func noneStopped(string) bool { return false }
+
 func TestRestoreRolesStartsWhatExistsAndLeavesWhatRuns(t *testing.T) {
 	containers := newFakeContainerLifecycle("shop-worker")
 	containers.exists["shop"] = true
 	proxyManager := &fakeDeploymentProxy{}
 	d := restoreDeployer(containers, proxyManager)
 
-	if err := d.RestoreRoles(context.Background(), "host", nil, true); err != nil {
+	if err := d.RestoreRoles(context.Background(), "host", noneStopped, true); err != nil {
 		t.Fatalf("RestoreRoles: %v", err)
 	}
 	if !containers.running["shop"] {
@@ -66,7 +68,7 @@ func TestRestoreRolesLeavesStoppedRolesAndStillBootsTheProxy(t *testing.T) {
 	proxyManager := &fakeDeploymentProxy{}
 	d := restoreDeployer(containers, proxyManager)
 
-	if err := d.RestoreRoles(context.Background(), "host", []string{"web", "worker"}, true); err != nil {
+	if err := d.RestoreRoles(context.Background(), "host", func(string) bool { return true }, true); err != nil {
 		t.Fatalf("RestoreRoles: %v", err)
 	}
 	if containers.running["shop"] || containers.running["shop-worker"] {
@@ -80,10 +82,35 @@ func TestRestoreRolesLeavesStoppedRolesAndStillBootsTheProxy(t *testing.T) {
 	}
 }
 
+// A stop takes no lock, so it can come while this starts the role, and find nothing to stop.
+func TestRestoreRolesStopsARoleAnOperatorStoppedDuringItsStart(t *testing.T) {
+	containers := newFakeContainerLifecycle()
+	containers.exists["shop"], containers.exists["shop-worker"] = true, true
+	d := restoreDeployer(containers, &fakeDeploymentProxy{})
+	asked := map[string]int{}
+	stopped := func(role string) bool {
+		asked[role]++
+		return role == "worker" && asked[role] > 1
+	}
+
+	if err := d.RestoreRoles(context.Background(), "host", stopped, true); err != nil {
+		t.Fatalf("RestoreRoles: %v", err)
+	}
+	if containers.running["shop-worker"] {
+		t.Fatalf("a role an operator stopped is running: %v", containers.operations)
+	}
+	if !containers.running["shop"] {
+		t.Fatalf("the other role did not start: %v", containers.operations)
+	}
+	if asked["web"] != 2 || asked["worker"] != 2 {
+		t.Fatalf("asked %v; each role is asked before and after its start", asked)
+	}
+}
+
 func TestRestoreRolesOnlyStartsWhenNotAllowedToCreate(t *testing.T) {
 	containers := newFakeContainerLifecycle()
 	d := restoreDeployer(containers, &fakeDeploymentProxy{})
-	if err := d.RestoreRoles(context.Background(), "host", nil, false); err != nil {
+	if err := d.RestoreRoles(context.Background(), "host", noneStopped, false); err != nil {
 		t.Fatalf("RestoreRoles: %v", err)
 	}
 	if len(containers.exists) != 0 {
@@ -96,7 +123,7 @@ func TestRestoreRolesBootsNoProxyForARoleThatServesNoTraffic(t *testing.T) {
 	proxyManager := &fakeDeploymentProxy{}
 	d := restoreDeployer(containers, proxyManager)
 	delete(d.cfg.Servers, "web")
-	if err := d.RestoreRoles(context.Background(), "host", nil, true); err != nil {
+	if err := d.RestoreRoles(context.Background(), "host", noneStopped, true); err != nil {
 		t.Fatalf("RestoreRoles: %v", err)
 	}
 	if proxyManager.booted != 0 {
@@ -113,7 +140,7 @@ func TestRestoreRolesTriesEveryRole(t *testing.T) {
 	delete(containers.failBefore, "start shop")
 	containers.failBefore["start shop-worker"] = true
 
-	err := d.RestoreRoles(context.Background(), "host", nil, true)
+	err := d.RestoreRoles(context.Background(), "host", noneStopped, true)
 	if err == nil || !strings.Contains(err.Error(), "proxy is down") || !strings.Contains(err.Error(), "worker role") {
 		t.Fatalf("RestoreRoles = %v", err)
 	}
@@ -138,7 +165,7 @@ func restoreOverFake(t *testing.T, answer func(cmd string) (string, int)) (*Depl
 
 func TestRestoreRolesCreatesAMissingRoleWithoutPullingAnImageItHas(t *testing.T) {
 	d, fake := restoreOverFake(t, func(string) (string, int) { return "", 0 })
-	if err := d.RestoreRoles(context.Background(), "host", nil, true); err != nil {
+	if err := d.RestoreRoles(context.Background(), "host", noneStopped, true); err != nil {
 		t.Fatalf("RestoreRoles: %v", err)
 	}
 	if !ranContainer(fake, "alpha") || !ranContainer(fake, "beta") {
@@ -164,7 +191,7 @@ func TestRestoreRolesPullsAMissingImageAndReportsWhenItCannot(t *testing.T) {
 		}
 		return "", 0
 	})
-	err := d.RestoreRoles(context.Background(), "host", nil, true)
+	err := d.RestoreRoles(context.Background(), "host", noneStopped, true)
 	if err == nil || !strings.Contains(err.Error(), "failed to pull image") {
 		t.Fatalf("RestoreRoles = %v", err)
 	}
@@ -182,7 +209,7 @@ func TestRestoreRolesRefusesToCreateWithoutItsSecrets(t *testing.T) {
 	})
 	d.cfg.Env.Secret = []string{"DATABASE_URL"}
 	d.cfg.SecretsRemotePath = "/srv/secrets"
-	err := d.RestoreRoles(context.Background(), "host", nil, true)
+	err := d.RestoreRoles(context.Background(), "host", noneStopped, true)
 	if err == nil {
 		t.Fatalf("RestoreRoles succeeded; commands = %q", fake.Commands())
 	}

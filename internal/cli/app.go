@@ -530,6 +530,9 @@ func runAccessoryBoot(cmd *cobra.Command, args []string) error {
 	return deployAccessoriesOnHost(sshClient, log, accessoryHost, name)
 }
 
+// accessoryStopTimeout is how many seconds an accessory gets to stop.
+const accessoryStopTimeout = 30
+
 func runAccessoryStop(cmd *cobra.Command, args []string) error {
 	output.SetVerbose(verbose)
 	log := output.DefaultLogger
@@ -562,7 +565,7 @@ func runAccessoryStop(cmd *cobra.Command, args []string) error {
 
 	var stopErrors []string
 	for _, host := range hosts {
-		if err := containerManager.Stop(host, containerName, 30); err != nil {
+		if err := containerManager.Stop(host, containerName, accessoryStopTimeout); err != nil {
 			stopErrors = append(stopErrors, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}

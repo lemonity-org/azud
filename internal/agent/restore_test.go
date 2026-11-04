@@ -18,7 +18,7 @@ import (
 // restoreSeams records what Restore asks for, in order.
 type restoreSeams struct {
 	calls    []string
-	stopped  map[string][]string
+	stopped  map[string]func(string) bool
 	recreate []bool
 	images   []string
 	roleErr  error
@@ -27,8 +27,8 @@ type restoreSeams struct {
 }
 
 func (r *restoreSeams) attach(a *Agent, f *fakeServer) {
-	r.stopped = map[string][]string{}
-	a.RestoreRoles = func(_ context.Context, _ *config.Config, image string, stopped []string, recreate bool) error {
+	r.stopped = map[string]func(string) bool{}
+	a.RestoreRoles = func(_ context.Context, _ *config.Config, image string, stopped func(string) bool, recreate bool) error {
 		r.calls = append(r.calls, "roles")
 		r.stopped["roles"] = stopped
 		r.recreate = append(r.recreate, recreate)
@@ -36,7 +36,7 @@ func (r *restoreSeams) attach(a *Agent, f *fakeServer) {
 		r.locked = append(r.locked, f.locked)
 		return r.roleErr
 	}
-	a.StartExisting = func(kind string, stopped []string) error {
+	a.StartExisting = func(kind string, stopped func(string) bool) error {
 		r.calls = append(r.calls, kind)
 		r.stopped[kind] = stopped
 		return r.kindErr[kind]
@@ -87,11 +87,70 @@ func TestRestoreLeavesWhatAnOperatorStopped(t *testing.T) {
 	if err := a.Restore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := seams.stopped["roles"]; !slices.Equal(got, []string{"web", "worker"}) {
-		t.Fatalf("stopped roles = %v", got)
+	for _, role := range []string{"web", "worker"} {
+		if !seams.stopped["roles"](role) {
+			t.Fatalf("role %s is not stopped", role)
+		}
 	}
-	if got := seams.stopped[DriftAccessory]; !slices.Equal(got, []string{"db"}) {
-		t.Fatalf("stopped accessories = %v", got)
+	if seams.stopped["roles"]("db") || seams.stopped["roles"]("other") {
+		t.Fatal("a role nobody stopped counts as stopped")
+	}
+	if !seams.stopped[DriftAccessory]("db") {
+		t.Fatal("accessory db is not stopped")
+	}
+	if seams.stopped[DriftAccessory]("web") || seams.stopped[DriftCron]("db") {
+		t.Fatal("something nobody stopped counts as stopped")
+	}
+}
+
+// A stop takes no lock, so it can come while a restore waits for the deploy lock.
+func TestRestoreSeesAStopThatCameWhileItWaitedForTheLock(t *testing.T) {
+	f := &fakeServer{}
+	a := deployedChain(t, f, digestA)
+	seams := &restoreSeams{}
+	seams.attach(a, f)
+	lock := a.Lock
+	a.Lock = func(fn func() error) error {
+		if err := a.State.UpdateIntent(func(intent *Intent) { intent.Roles = WithStopped(intent.Roles, "web") }); err != nil {
+			t.Fatal(err)
+		}
+		return lock(fn)
+	}
+
+	if err := a.Restore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !seams.stopped["roles"]("web") {
+		t.Fatal("the restore would start a role an operator has stopped")
+	}
+}
+
+// The second question is what catches a stop during the start, and it must not stop a
+// role over a record it cannot read.
+func TestAStopRecordThatCannotBeReadKeepsTheLastAnswerAndFailsTheRestore(t *testing.T) {
+	f := &fakeServer{}
+	a := deployedChain(t, f, digestA)
+	seams := &restoreSeams{}
+	seams.attach(a, f)
+	if err := a.State.UpdateIntent(func(intent *Intent) { intent.Roles = WithStopped(intent.Roles, "worker") }); err != nil {
+		t.Fatal(err)
+	}
+	var web, worker bool
+	roles := a.RestoreRoles
+	a.RestoreRoles = func(ctx context.Context, cfg *config.Config, image string, stopped func(string) bool, recreate bool) error {
+		if err := os.WriteFile(a.State.intentPath(), []byte("not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		web, worker = stopped("web"), stopped("worker")
+		return roles(ctx, cfg, image, stopped, recreate)
+	}
+
+	err := a.Restore(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("Restore = %v; a record it cannot read must not look restored", err)
+	}
+	if web || !worker {
+		t.Fatalf("web stopped %v, worker stopped %v; want the answers from before the record broke", web, worker)
 	}
 }
 
@@ -295,7 +354,7 @@ func TestRestoreAppliesNoEditFromDisk(t *testing.T) {
 	before := loadState(t, a).Current
 	var restored *config.Config
 	inner := a.RestoreRoles
-	a.RestoreRoles = func(ctx context.Context, cfg *config.Config, image string, stopped []string, recreate bool) error {
+	a.RestoreRoles = func(ctx context.Context, cfg *config.Config, image string, stopped func(string) bool, recreate bool) error {
 		restored = cfg
 		return inner(ctx, cfg, image, stopped, recreate)
 	}
@@ -343,7 +402,7 @@ func TestRestoreWritesTheBundlesSecretsBeforeBringingRolesBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	var seen string
-	e.agent.RestoreRoles = func(context.Context, *config.Config, string, []string, bool) error {
+	e.agent.RestoreRoles = func(context.Context, *config.Config, string, func(string) bool, bool) error {
 		seen = e.env()
 		return nil
 	}
@@ -352,6 +411,48 @@ func TestRestoreWritesTheBundlesSecretsBeforeBringingRolesBack(t *testing.T) {
 	}
 	if seen != "DATABASE_URL=one\n" {
 		t.Fatalf("secrets when roles came back = %q", seen)
+	}
+}
+
+// A role created now reads whatever the file holds, which is not known to be this
+// release's. One that exists keeps the environment it was created with.
+func TestRestoreCreatesNothingUntilItCanWriteTheSecretsFile(t *testing.T) {
+	e := newBundleEnv(t)
+	first := e.publish(webOnApp1, "DATABASE_URL=one\n", day)
+	if err := e.apply(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(e.envPath, []byte("DATABASE_URL=stale\n")); err != nil {
+		t.Fatal(err)
+	}
+	var recreate []bool
+	e.agent.RestoreRoles = func(_ context.Context, _ *config.Config, _ string, _ func(string) bool, create bool) error {
+		recreate = append(recreate, create)
+		return nil
+	}
+	identity := e.source.Identity
+	e.source.Identity = filepath.Join(t.TempDir(), "missing")
+
+	err := e.agent.Restore(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "secrets file") {
+		t.Fatalf("Restore = %v; it must not look restored, or the agent never tries again", err)
+	}
+	if !slices.Equal(recreate, []bool{false}) {
+		t.Fatalf("recreate = %v; existing containers still start, and nothing is created", recreate)
+	}
+	if got := e.env(); got != "DATABASE_URL=stale\n" {
+		t.Fatalf("secrets = %q", got)
+	}
+
+	e.source.Identity = identity
+	if err := e.agent.Restore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(recreate, []bool{false, true}) {
+		t.Fatalf("recreate = %v after the identity came back", recreate)
+	}
+	if got := e.env(); got != "DATABASE_URL=one\n" {
+		t.Fatalf("secrets = %q", got)
 	}
 }
 
@@ -364,7 +465,7 @@ func TestRunRetriesARestoreUntilItWorks(t *testing.T) {
 	defer cancel()
 	attempts := 0
 	inner := a.RestoreRoles
-	a.RestoreRoles = func(ctx2 context.Context, cfg *config.Config, image string, stopped []string, recreate bool) error {
+	a.RestoreRoles = func(ctx2 context.Context, cfg *config.Config, image string, stopped func(string) bool, recreate bool) error {
 		attempts++
 		if attempts == 2 {
 			seams.roleErr = nil

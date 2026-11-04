@@ -350,17 +350,50 @@ func TestStartExistingStartsOnlyWhatItShould(t *testing.T) {
 		return names
 	}
 
-	if err := start(agent.DriftAccessory, []string{"cache"}); err != nil {
+	if err := start(agent.DriftAccessory, func(name string) bool { return name == "cache" }); err != nil {
 		t.Fatal(err)
 	}
 	if got := started(); !slices.Equal(got, []string{"app-db"}) {
 		t.Fatalf("started = %v, commands %q", got, fake.Commands())
 	}
-	if err := start(agent.DriftCron, nil); err != nil {
+	if err := start(agent.DriftCron, func(string) bool { return false }); err != nil {
 		t.Fatal(err)
 	}
 	if got := started(); !slices.Equal(got, []string{"app-db", "app-cron-sweep"}) {
 		t.Fatalf("started = %v", got)
+	}
+}
+
+// A stop takes no lock, so it can come while this starts the accessory, and find nothing
+// to stop.
+func TestStartExistingStopsAnAccessoryAnOperatorStoppedDuringItsStart(t *testing.T) {
+	const listing = `id1|app-db|busybox|Exited|exited||{"azud.service":"app","azud.accessory":"db"}` + "\n" +
+		`id2|app-cache|busybox|Exited|exited||{"azud.service":"app","azud.accessory":"cache"}`
+	fake := &localtest.Fake{Handle: func(cmd string, _ io.Reader) (string, string, int) {
+		if strings.Contains(cmd, " ps ") {
+			return listing, "", 0
+		}
+		return "", "", 0
+	}}
+	start := startExisting(podman.NewContainerManager(podman.NewClient(fake)), "app", "host", output.NewLogger(io.Discard, io.Discard, false))
+	asked := map[string]int{}
+
+	err := start(agent.DriftAccessory, func(name string) bool {
+		asked[name]++
+		return name == "db" && asked[name] > 1
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopsDB, stopsCache := false, false
+	for _, cmd := range fake.Commands() {
+		if strings.Contains(cmd, " stop ") {
+			stopsDB = stopsDB || strings.HasSuffix(cmd, " app-db")
+			stopsCache = stopsCache || strings.HasSuffix(cmd, " app-cache")
+		}
+	}
+	if !stopsDB || stopsCache {
+		t.Fatalf("stopped db %v, cache %v; commands %q", stopsDB, stopsCache, fake.Commands())
 	}
 }
 
