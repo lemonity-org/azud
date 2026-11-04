@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/lemonity-org/azud/internal/config"
@@ -37,6 +39,8 @@ const (
 	recordFile = "record.json"
 	infoFile   = "release.json"
 	notesFile  = "notes.json"
+	// resolvedPrefix starts the name of a configuration file's resolved copy.
+	resolvedPrefix = "resolved."
 )
 
 // Record is a release this server accepted, stored whole and never changed, so
@@ -60,6 +64,11 @@ type Record struct {
 	// Files are the configuration files as written: deploy.yml first, then the
 	// destination file if there is one.
 	Files []release.File `json:"-"`
+	// Resolved are a bundle's Files with their environment references replaced by the
+	// values they had when this server accepted it, so a later rollback, run from another
+	// shell, deploys what this meant then. A release v1 stored has none, and an image's
+	// Files are resolved already.
+	Resolved []release.File `json:"-"`
 	// Sealed is a bundle's encrypted secrets, nil if it has none.
 	Sealed []byte `json:"-"`
 	// Ignored and NotApplied are what the agent did not take from a bundle.
@@ -70,8 +79,12 @@ type Record struct {
 // Config returns the configuration the record deploys with: its own files, with
 // every trust setting taken from server, the configuration this agent runs with.
 func (r *Record) Config(server *config.Config) (*config.Config, []string, error) {
+	files := r.Files
+	if len(r.Resolved) > 0 {
+		files = r.Resolved
+	}
 	var base, dest []byte
-	for _, f := range r.Files {
+	for _, f := range files {
 		if f.Name == "deploy.yml" {
 			base = f.Data
 		} else {
@@ -84,6 +97,13 @@ func (r *Record) Config(server *config.Config) (*config.Config, []string, error)
 // HasFiles reports whether files are the record's configuration files as written.
 func (r *Record) HasFiles(files []release.File) bool {
 	return slices.EqualFunc(r.Files, files, func(a, b release.File) bool {
+		return a.Name == b.Name && bytes.Equal(a.Data, b.Data)
+	})
+}
+
+// resolvedLike reports whether r's resolved files are other's.
+func (r *Record) resolvedLike(other *Record) bool {
+	return slices.EqualFunc(r.Resolved, other.Resolved, func(a, b release.File) bool {
 		return a.Name == b.Name && bytes.Equal(a.Data, b.Data)
 	})
 }
@@ -135,6 +155,12 @@ func (r *Records) Load(id string) (*Record, error) {
 			return nil, fmt.Errorf("stored release %s: %w", short(rec.Digest), err)
 		}
 		rec.Files = append(rec.Files, release.File{Name: name, Data: data})
+		resolved, err := os.ReadFile(filepath.Join(dir, resolvedPrefix+name))
+		if err == nil {
+			rec.Resolved = append(rec.Resolved, release.File{Name: name, Data: resolved})
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stored release %s: %w", short(rec.Digest), err)
+		}
 	}
 	return rec, nil
 }
@@ -200,6 +226,69 @@ func (r *Records) loadBundleFiles(rec *Record) error {
 	return nil
 }
 
+// recordIDPattern matches a digest's hex, which names a bundle's record, and an image
+// record's id. It keeps a name an operator typed inside the releases directory.
+var recordIDPattern = regexp.MustCompile(`^[0-9a-f]{64}(-[0-9a-f]{8})?$`)
+
+// Find returns the stored record target names, or nil if there is none. target is a
+// record's id or a digest. An image digest can have a record for each configuration it
+// was applied with, and names the one applied last, or else the one stored last.
+func (r *Records) Find(target string, applied []string) (*Record, error) {
+	id := digestHex(target)
+	if !recordIDPattern.MatchString(id) {
+		return nil, fmt.Errorf("%q is not a digest (sha256:...) or a stored release", target)
+	}
+	if rec, err := r.Load(id); rec != nil || err != nil {
+		return rec, err
+	}
+	if strings.Contains(id, "-") {
+		return nil, nil
+	}
+	for _, other := range applied {
+		if recordDigest(other) == id {
+			if rec, err := r.Load(other); rec != nil || err != nil {
+				return rec, err
+			}
+		}
+	}
+	stored, err := r.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range stored {
+		if recordDigest(rec.ID) == id {
+			return r.Load(rec.ID)
+		}
+	}
+	return nil, nil
+}
+
+// List returns what is known of each stored record, newest first, without its files.
+func (r *Records) List() ([]*Record, error) {
+	entries, err := os.ReadDir(r.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var records []*Record
+	for _, entry := range entries {
+		if !recordIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		rec, err := r.loadMeta(entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if rec != nil {
+			records = append(records, rec)
+		}
+	}
+	slices.SortStableFunc(records, func(a, b *Record) int { return b.StoredAt.Compare(a.StoredAt) })
+	return records, nil
+}
+
 // Store writes a record unless it is already there. Records are immutable, so
 // the first one stored under an id stays: re-applying a release does not change
 // its origin or notes. It appears all at once, so a crash leaves no half-written
@@ -241,6 +330,9 @@ func (r *Record) files() (map[string][]byte, error) {
 	files := map[string][]byte{recordFile: meta}
 	for _, f := range r.Files {
 		files[f.Name] = f.Data
+	}
+	for _, f := range r.Resolved {
+		files[resolvedPrefix+f.Name] = f.Data
 	}
 	if r.Source != SourceBundle {
 		return files, nil

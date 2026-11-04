@@ -80,6 +80,18 @@ type Journal struct {
 	// Abandoned lists records of unfinished deploys this journal replaced, until the
 	// roles only they have are stopped, so a crash does not lose track of them.
 	Abandoned []string `json:"abandoned,omitempty"`
+	// Move means an operator chose Target over what the tag names, with
+	// `azud rollback`, `azud redeploy` or `azud sync --digest`. A crash finishes it
+	// rather than undoing it, and a failure leaves FailedDigest as it was.
+	Move bool `json:"move,omitempty"`
+	// Hold is what the tag may not deploy once a Move finishes, which is what
+	// FailedDigest then holds. Until then Decide treats it as refused.
+	Hold string `json:"hold,omitempty"`
+	// Back reports that a Move returns to an earlier release, so its deploy, and any
+	// resume of it, skips the pre-deploy command.
+	Back bool `json:"back,omitempty"`
+	// NoPull reports that a Move must not fetch its image, on any attempt.
+	NoPull bool `json:"no_pull,omitempty"`
 	// Tries counts failed undos, and NextTry is when the next one may run.
 	Tries     int       `json:"tries,omitempty"`
 	NextTry   time.Time `json:"next_try,omitzero"`

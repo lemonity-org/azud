@@ -26,14 +26,24 @@ import (
 type Candidate struct {
 	Record *Record
 	Config *config.Config
+	// Move is set when an operator chose this release over what the tag names, and
+	// goes into the journal before anything changes.
+	Move *moveIntent
 }
 
 // Source is the only place image and bundle differ.
 type Source interface {
+	// Kind returns the source of the records this Source deploys.
+	Kind() string
 	// Load produces the candidate digest names. The agent has verified digest,
-	// and previous is the record a failure would return to, or nil. An error
-	// means the release is refused, and nothing has changed.
+	// and previous is the record a failure would return to. A nil previous skips the
+	// downgrade check, because only an operator's move passes it, and a shell on this
+	// server already has that authority. An error means the release is refused, and
+	// nothing has changed.
 	Load(ctx context.Context, digest string, previous *Record) (*Candidate, error)
+	// Reapply produces the candidate that re-applies what is deployed, given its record
+	// (current, possibly nil) and digest. It needs no registry.
+	Reapply(current *Record, deployed string) (*Candidate, error)
 	// Previous returns the record a failure returns to, given the record of what
 	// is deployed (current, possibly nil) and the deployed digest. A new record
 	// it returns is adopted, and nil means there is nothing to return to.
@@ -44,14 +54,19 @@ type Source interface {
 	Restore(previous *Record) error
 }
 
-// ImageSource deploys images the tag names, with the configuration the agent
-// loaded. An edit to the files on disk applies when the agent restarts.
+// ImageSource deploys images the tag names, with the configuration on disk when the
+// release is applied. So an edit applies with `azud redeploy` or the next release, and a
+// running agent cannot put back what it read when it started. Trust settings stay those
+// of Server until the agent restarts.
 type ImageSource struct {
-	// Server is the configuration on disk.
+	// Server is the configuration the agent loaded when it started.
 	Server *config.Config
 	// Files are the files Server was loaded from, with environment references
 	// resolved. ReadConfigFiles returns them.
-	Files       []release.File
+	Files []release.File
+	// Reload returns the files as they are now, as ReadConfigFiles does. With none, the
+	// files are Files.
+	Reload      func() ([]release.File, error)
 	Destination string
 	Repository  string
 }
@@ -96,9 +111,47 @@ func readResolvedConfig(path string) ([]byte, error) {
 	return resolved, nil
 }
 
-// Load returns the image with the configuration on disk.
+// Kind returns SourceImage.
+func (s *ImageSource) Kind() string { return SourceImage }
+
+// Load returns the image with the configuration on disk. Server is that configuration
+// until the files change. A file that no longer reads refuses the release.
 func (s *ImageSource) Load(_ context.Context, digest string, _ *Record) (*Candidate, error) {
-	return &Candidate{Record: s.record(digest, ""), Config: s.Server}, nil
+	rec, err := s.record(digest, "")
+	if err != nil {
+		return nil, err
+	}
+	if rec.HasFiles(s.Files) {
+		return &Candidate{Record: rec, Config: s.Server}, nil
+	}
+	cfg, _, err := rec.Config(s.Server)
+	if err != nil {
+		return nil, err
+	}
+	return &Candidate{Record: rec, Config: cfg}, nil
+}
+
+// Reapply returns what is deployed with the configuration on disk, so an edit makes a
+// new record for the same digest. The configuration comes from the record, so a later
+// read of the file cannot change what the record means. The origin is what is deployed's,
+// since the image is the same.
+func (s *ImageSource) Reapply(current *Record, deployed string) (*Candidate, error) {
+	origin := OriginAdopted
+	if current != nil {
+		if current.Source != SourceImage {
+			return nil, fmt.Errorf("release %s is a bundle, and this server follows images. To apply this server's configuration, move the tag to an image", short(current.Digest))
+		}
+		origin = current.Origin
+	}
+	rec, err := s.record(deployed, origin)
+	if err != nil {
+		return nil, err
+	}
+	cfg, _, err := rec.Config(s.Server)
+	if err != nil {
+		return nil, err
+	}
+	return &Candidate{Record: rec, Config: cfg}, nil
 }
 
 // Previous returns current, or adopts the deployed digest with today's
@@ -110,7 +163,7 @@ func (s *ImageSource) Previous(current *Record, deployed string) (*Record, error
 	if deployed == "" {
 		return nil, nil
 	}
-	return s.record(deployed, OriginAdopted), nil
+	return s.record(deployed, OriginAdopted)
 }
 
 // Activate does nothing: image mode leaves the secrets file to the operator.
@@ -120,16 +173,23 @@ func (s *ImageSource) Activate(_, _ *Record) error { return nil }
 // would mean keeping each release's plaintext.
 func (s *ImageSource) Restore(*Record) error { return nil }
 
-func (s *ImageSource) record(digest, origin string) *Record {
+func (s *ImageSource) record(digest, origin string) (*Record, error) {
+	files := s.Files
+	if s.Reload != nil {
+		var err error
+		if files, err = s.Reload(); err != nil {
+			return nil, fmt.Errorf("reading this server's configuration: %w", err)
+		}
+	}
 	return &Record{
-		ID:          imageRecordID(digest, s.Files),
+		ID:          imageRecordID(digest, files),
 		Source:      SourceImage,
 		Origin:      origin,
 		Digest:      digest,
 		Image:       s.Repository + "@" + digest,
 		Destination: s.Destination,
-		Files:       s.Files,
-	}
+		Files:       files,
+	}, nil
 }
 
 // imageRecordID names an image release: <digest hex>-<8 hex of the configuration
@@ -169,6 +229,22 @@ type BundleSource struct {
 	Log          *output.Logger
 }
 
+// Kind returns SourceBundle.
+func (s *BundleSource) Kind() string { return SourceBundle }
+
+// Reapply returns the stored bundle as it is: its configuration is what was signed, and
+// nothing on this server edits it.
+func (s *BundleSource) Reapply(current *Record, _ string) (*Candidate, error) {
+	if current == nil || current.Source != SourceBundle {
+		return nil, errors.New("what is deployed has no stored bundle to apply again. Move the tag to a release")
+	}
+	cfg, _, err := current.Config(s.Server)
+	if err != nil {
+		return nil, err
+	}
+	return &Candidate{Record: current, Config: cfg}, nil
+}
+
 // Load fetches the bundle digest names and checks it can be applied, before
 // anything changes.
 func (s *BundleSource) Load(ctx context.Context, digest string, previous *Record) (*Candidate, error) {
@@ -177,8 +253,8 @@ func (s *BundleSource) Load(ctx context.Context, digest string, previous *Record
 		return nil, err
 	}
 	if previous != nil && previous.Info != nil && rel.Info.Created.Before(previous.Info.Created) && !s.AllowDowngrade {
-		return nil, fmt.Errorf("release %s (created %s) is older than the deployed release %s (created %s); to roll back to it, run: azud agent run --once --allow-downgrade",
-			short(rel.Digest), rel.Info.Created.Format("2006-01-02 15:04"), short(previous.Digest), previous.Info.Created.Format("2006-01-02 15:04"))
+		return nil, fmt.Errorf("release %s (created %s) is older than the deployed release %s (created %s). To bring it back, publish it again with `azud release republish` and promote what that prints; on this server, run `azud rollback %s` or `azud agent run --once --allow-downgrade`",
+			short(rel.Digest), rel.Info.Created.Format("2006-01-02 15:04"), short(previous.Digest), previous.Info.Created.Format("2006-01-02 15:04"), rel.Digest)
 	}
 
 	rec := &Record{
@@ -190,6 +266,13 @@ func (s *BundleSource) Load(ctx context.Context, digest string, previous *Record
 		Info:        &rel.Info,
 		Files:       rel.Files,
 		Sealed:      rel.Secrets,
+	}
+	for _, f := range rel.Files {
+		data, err := config.ResolveEnvReferences(f.Data)
+		if err != nil {
+			return nil, fmt.Errorf("release %s: %s: %w", short(rel.Digest), f.Name, err)
+		}
+		rec.Resolved = append(rec.Resolved, release.File{Name: f.Name, Data: data})
 	}
 	cfg, ignored, err := rec.Config(s.Server)
 	if err != nil {

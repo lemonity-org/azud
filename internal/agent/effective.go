@@ -21,6 +21,9 @@ type Effective struct {
 	Settling bool
 	// Journal is the open journal, nil when not Settling.
 	Journal *Journal
+	// Target is the record of what the open journal is applying, nil when there is none
+	// or it cannot be read.
+	Target *Record
 	// Record is the current release's record, nil when there is none: before the
 	// first deploy, or an image deployed before the agent kept records.
 	Record *Record
@@ -37,6 +40,9 @@ func LoadEffective(server *config.Config, stateDir string) (*Effective, error) {
 	}
 	effective := &Effective{Config: server, Settling: st.Journal != nil, Journal: st.Journal}
 	repository := config.RepositoryOf(server.Image)
+	if st.Journal != nil {
+		effective.Target, _ = store.Records(repository).Load(st.Journal.Target)
+	}
 
 	if st.Current != "" {
 		rec, err := store.Records(repository).Load(st.Current)

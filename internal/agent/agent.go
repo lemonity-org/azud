@@ -64,6 +64,12 @@ type DeployOptions struct {
 	// Local means use the image if it is already on this server, so the deploy
 	// needs no registry.
 	Local bool
+	// NoPull means fail, as a deploy that changed nothing, if the image is not on
+	// this server.
+	NoPull bool
+	// Move means an operator chose this release. With Undo it returns to an earlier
+	// release, but a failure stops at the first role, because a failed move is undone.
+	Move bool
 	// Hooks means run hooks. They never run for a bundle: they are host commands
 	// outside what its signature covers.
 	Hooks bool
@@ -105,6 +111,14 @@ type Agent struct {
 	StopRoles func(cfg *config.Config, roles []string) error
 	// RunningRoles returns the roles of cfg with a running container.
 	RunningRoles func(cfg *config.Config) ([]string, error)
+	// RestoreRoles boots the proxy and brings back the role containers of cfg, except
+	// the roles in stopped, with image pinned. Recreate means create a role's container
+	// when it does not exist, which reads the runtime secrets file. The deploy lock is
+	// held. Optional.
+	RestoreRoles func(ctx context.Context, cfg *config.Config, image string, stopped []string, recreate bool) error
+	// StartExisting starts this service's stopped containers of a kind, DriftAccessory
+	// or DriftCron, except those named in stopped. Optional.
+	StartExisting func(kind string, stopped []string) error
 
 	State *Store
 	Log   *output.Logger
@@ -172,13 +186,7 @@ func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, strin
 	st.LastCheckAt = a.now()
 
 	in := Input{Tag: tag, DeployedDigest: st.DeployedDigest, FailedDigest: st.FailedDigest, Journal: st.Journal, Retry: retryFailed, Now: a.now()}
-	action := Decide(in)
-	if a.DeployUndoes && (action.Kind == ActionUndo || action.Kind == ActionCleanup) {
-		// The agent has no undo to run, and the command was the one to run it.
-		a.log().Warn("Closing the interrupted deploy of %s: agent.deploy_command owns its undo", a.Image(action.Digest))
-		st.Journal, in.Journal = nil, nil
-		action = Decide(in)
-	}
+	action := a.decide(&st, in)
 
 	switch action.Kind {
 	case ActionNone:
@@ -217,12 +225,26 @@ func (a *Agent) Reconcile(ctx context.Context, retryFailed bool) (Outcome, strin
 	return a.apply(ctx, &st, tag)
 }
 
-// Run checks the tag every interval until ctx is canceled. Failed checks are
-// logged and retried on the next tick; they never stop the agent.
+// decide returns the next action. A deploy_command owns its undo, so a journal that
+// only an undo could end is closed here, and st is what Decide then sees.
+func (a *Agent) decide(st *State, in Input) Action {
+	action := Decide(in)
+	if a.DeployUndoes && (action.Kind == ActionUndo || action.Kind == ActionCleanup) {
+		a.log().Warn("Closing the interrupted deploy of %s: agent.deploy_command owns its undo", a.Image(action.Digest))
+		st.Journal, in.Journal = nil, nil
+		action = Decide(in)
+	}
+	return action
+}
+
+// Run restores this server, then checks the tag every interval until ctx is canceled.
+// Failed checks are logged and retried on the next tick, and so is a restore until it
+// has worked; they never stop the agent.
 func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 	log := a.log()
 	log.Info("Following %s every %s", a.Ref, interval)
 
+	restored, restoring := false, false
 	skippedDigest := ""
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -232,6 +254,15 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 			log.Info("Agent stopped")
 			return nil
 		case <-timer.C:
+		}
+
+		if !restored {
+			if err := a.restore(ctx, !restoring); err != nil {
+				log.Error("Restoring this server: %v", err)
+			} else {
+				restored = true
+			}
+			restoring = true
 		}
 
 		outcome, digest, err := a.Reconcile(ctx, false)
@@ -244,14 +275,14 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 			log.Success("Deployed %s", a.Image(digest))
 		case SkippedFailed:
 			if skippedDigest != digest {
-				log.Warn("%s failed before; waiting for %s to move (retry with: azud agent run --once --retry-failed)", a.Image(digest), a.Ref)
+				log.Warn("%s failed before; waiting for %s to move (retry with: azud sync --retry)", a.Image(digest), a.Ref)
 			}
 		case Failed:
 			if err != nil {
 				log.Error("%v", err)
 			}
 		case Recovered:
-			log.Warn("Undid the failed deploy of %s; waiting for %s to move (retry with: azud agent run --once --retry-failed)", a.Image(digest), a.Ref)
+			log.Warn("Undid the failed deploy of %s; waiting for %s to move (retry with: azud sync --retry)", a.Image(digest), a.Ref)
 		case Waiting:
 			log.Debug("Waiting to retry undoing the failed deploy of %s", a.Image(digest))
 		}

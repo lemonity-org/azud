@@ -85,12 +85,18 @@ func Decide(in Input) Action {
 		}
 		return Action{ActionApply, in.Tag}
 	}
+	refused = refused || in.Tag == j.Hold && !in.Retry
 
 	switch {
 	case in.Tag != j.Digest && in.Tag != j.PreviousDigest && !refused:
 		// A different release ends the mixed state as a whole.
 		return Action{ActionApply, in.Tag}
 	case in.Tag == j.Digest && !refused && (j.Phase == PhaseForward || in.Retry):
+		return Action{ActionResume, j.Digest}
+	case j.Move && j.Phase == PhaseForward && !in.Retry:
+		// An operator chose this release over what the tag names, so the journal's
+		// previous release is what they moved away from, and undoing would return
+		// to it.
 		return Action{ActionResume, j.Digest}
 	case !in.Retry && in.Now.Before(j.NextTry):
 		return Action{ActionWait, j.Digest}
