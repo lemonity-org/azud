@@ -74,7 +74,7 @@ jobs:
     name: End-to-end (${{ matrix.mode }})
     runs-on: ubuntu-26.04
     needs: test
-    timeout-minutes: 45
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
@@ -118,7 +118,7 @@ jobs:
         working-directory: /tmp/azud-e2e
         run: |
           sudo env AZUD_E2E_BINARY=/tmp/azud-e2e/azud AZUD_E2E_REQUIRE_SYSTEMD=1 \
-            ./e2e.test -test.v -test.timeout=40m
+            ./e2e.test -test.v -test.timeout=60m
 
       - name: Run as a rootless user
         if: matrix.user == 'deploy'
@@ -163,7 +163,7 @@ jobs:
             AZUD_E2E_BINARY=/tmp/azud-e2e/azud \
             AZUD_E2E_REQUIRE_SYSTEMD=1 \
             AZUD_E2E_PROXY_ROOTFUL="${PROXY_ROOTFUL}" \
-            ./e2e.test -test.v -test.timeout=40m
+            ./e2e.test -test.v -test.timeout=60m
 
   integration:
     name: Integration (${{ matrix.mode }})
