@@ -18,6 +18,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -374,6 +376,13 @@ func (s *service) publishBroken(version string) string {
 
 func (s *service) publishImage(version, cmd string) string {
 	s.t.Helper()
+	return s.publishImageWith(version, cmd, nil)
+}
+
+// publishImageWith is publishImage with extra executable files, by their
+// path under /www, such as CGI scripts in cgi-bin.
+func (s *service) publishImageWith(version, cmd string, files map[string]string) string {
+	s.t.Helper()
 	s.built++
 	ctx := filepath.Join(s.dir, fmt.Sprintf("build-%d", s.built))
 	if err := os.MkdirAll(ctx, 0o755); err != nil {
@@ -382,7 +391,15 @@ func (s *service) publishImage(version, cmd string) string {
 	if err := os.WriteFile(filepath.Join(ctx, "index.html"), []byte(version+"\n"), 0o644); err != nil {
 		s.t.Fatal(err)
 	}
-	containerfile := "FROM docker.io/library/busybox:1.37\nCOPY index.html /www/index.html\n" + cmd + "\n"
+	containerfile := "FROM docker.io/library/busybox:1.37\nCOPY index.html /www/index.html\n"
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		local := strings.ReplaceAll(name, "/", "_")
+		if err := os.WriteFile(filepath.Join(ctx, local), []byte(files[name]), 0o755); err != nil {
+			s.t.Fatal(err)
+		}
+		containerfile += fmt.Sprintf("COPY --chmod=0755 %s /www/%s\n", local, name)
+	}
+	containerfile += cmd + "\n"
 	if err := os.WriteFile(filepath.Join(ctx, "Containerfile"), []byte(containerfile), 0o644); err != nil {
 		s.t.Fatal(err)
 	}
