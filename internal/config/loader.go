@@ -493,6 +493,9 @@ func mergeConfigs(base, dest *Config, destNode *yaml.Node) *Config {
 	if dest.Proxy.SSLPrivateKey != "" {
 		merged.Proxy.SSLPrivateKey = dest.Proxy.SSLPrivateKey
 	}
+	if has("proxy", "on_demand_tls") || destNode == nil && dest.Proxy.OnDemandTLS.Enabled() {
+		merged.Proxy.OnDemandTLS = dest.Proxy.OnDemandTLS
+	}
 	if dest.Proxy.Healthcheck.Path != "" {
 		merged.Proxy.Healthcheck.Path = dest.Proxy.Healthcheck.Path
 	}

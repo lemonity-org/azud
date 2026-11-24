@@ -370,3 +370,31 @@ func TestPullTimeoutDefaultsMergesAndValidates(t *testing.T) {
 		t.Errorf("negative pull_timeout error = %v", err)
 	}
 }
+
+func TestFromReleaseKeepsTheServersOnDemandTLS(t *testing.T) {
+	server := releaseServer(t)
+	base := []byte(`service: app
+image: ghcr.io/acme/app
+servers:
+  web:
+    hosts: [app-1]
+proxy:
+  host: app.example.com
+  on_demand_tls:
+    ask: /tls/ask
+`)
+	cfg, ignored, err := FromRelease(base, nil, server)
+	if err != nil {
+		t.Fatalf("FromRelease: %v", err)
+	}
+	if cfg.Proxy.OnDemandTLS != server.Proxy.OnDemandTLS {
+		t.Fatalf("a release turned on on-demand TLS the server does not set: %+v", cfg.Proxy.OnDemandTLS)
+	}
+	found := false
+	for _, key := range ignored {
+		found = found || strings.HasPrefix(key, "proxy")
+	}
+	if !found {
+		t.Fatalf("ignored = %v, want the shared proxy settings reported", ignored)
+	}
+}

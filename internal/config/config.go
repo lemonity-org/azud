@@ -337,6 +337,10 @@ type ProxyConfig struct {
 	// Custom SSL private key (secret name containing PEM content)
 	SSLPrivateKey string `yaml:"ssl_private_key"`
 
+	// On-demand TLS: certificates for hosts not listed in host/hosts, issued
+	// when a client first connects, after the app approves the host.
+	OnDemandTLS OnDemandTLSConfig `yaml:"on_demand_tls"`
+
 	// Application port inside container
 	AppPort int `yaml:"app_port"`
 
@@ -382,6 +386,20 @@ type ProxyConfig struct {
 
 	// Logging configuration
 	Logging LoggingConfig `yaml:"logging"`
+}
+
+// OnDemandTLSConfig lets the proxy serve hosts it does not know in advance.
+// Caddy asks the app whether a host may have a certificate the first time a
+// client connects to it, and routes every such host to this service.
+type OnDemandTLSConfig struct {
+	// Path on this service that Caddy calls with ?domain=<host>. A 2xx answer
+	// allows a certificate for the host; anything else refuses it.
+	Ask string `yaml:"ask"`
+}
+
+// Enabled reports whether on-demand TLS is configured.
+func (o OnDemandTLSConfig) Enabled() bool {
+	return o.Ask != ""
 }
 
 const (

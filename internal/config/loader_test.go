@@ -602,3 +602,67 @@ request_headers:
 		t.Fatalf("expected new field to take precedence, got %v", cfg2.RedactRequestHeaders)
 	}
 }
+
+func TestMergeConfigs_OnDemandTLS(t *testing.T) {
+	merge := func(base *Config, destYAML string) *Config {
+		t.Helper()
+		var dest Config
+		if err := yaml.Unmarshal([]byte(destYAML), &dest); err != nil {
+			t.Fatalf("failed to parse dest config: %v", err)
+		}
+		var node yaml.Node
+		if err := yaml.Unmarshal([]byte(destYAML), &node); err != nil {
+			t.Fatalf("failed to parse dest YAML node: %v", err)
+		}
+		return mergeConfigs(base, &dest, &node)
+	}
+
+	set := merge(&Config{}, "proxy:\n  on_demand_tls:\n    ask: /tls/ask\n")
+	if set.Proxy.OnDemandTLS.Ask != "/tls/ask" {
+		t.Fatalf("destination on_demand_tls not applied: %+v", set.Proxy.OnDemandTLS)
+	}
+
+	base := &Config{Proxy: ProxyConfig{OnDemandTLS: OnDemandTLSConfig{Ask: "/tls/ask"}}}
+	kept := merge(base, "proxy:\n  host: staging.example.com\n")
+	if kept.Proxy.OnDemandTLS.Ask != "/tls/ask" {
+		t.Fatalf("a destination that leaves on_demand_tls out changed it: %+v", kept.Proxy.OnDemandTLS)
+	}
+	cleared := merge(base, "proxy:\n  on_demand_tls: {}\n")
+	if cleared.Proxy.OnDemandTLS.Enabled() {
+		t.Fatalf("an explicit empty on_demand_tls did not turn it off: %+v", cleared.Proxy.OnDemandTLS)
+	}
+}
+
+func TestLoad_OnDemandTLSKeysAreKnown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deploy.yml")
+	content := `service: app
+image: ghcr.io/acme/app
+servers:
+  web:
+    hosts: [192.0.2.10]
+proxy:
+  host: app.example.com
+  ssl: true
+  acme_email: ops@example.com
+  on_demand_tls:
+    ask: /tls/ask
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := NewLoader(path, "").Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Proxy.OnDemandTLS.Ask != "/tls/ask" {
+		t.Fatalf("on_demand_tls.ask = %q", cfg.Proxy.OnDemandTLS.Ask)
+	}
+
+	typo := strings.Replace(content, "    ask:", "    asks:", 1)
+	if err := os.WriteFile(path, []byte(typo), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLoader(path, "").Load(); err == nil || !strings.Contains(err.Error(), "proxy.on_demand_tls.asks") {
+		t.Fatalf("expected an unknown-key error for proxy.on_demand_tls.asks, got %v", err)
+	}
+}

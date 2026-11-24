@@ -418,6 +418,8 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	errs = append(errs, validateOnDemandTLS(cfg)...)
+
 	// The registry server and username become podman login arguments; reject
 	// values that podman could parse as options.
 	if cfg.Registry.Server != "" && !isValidRegistryServer(cfg.Registry.Server) {
@@ -1599,4 +1601,35 @@ func hasTrustedFingerprint(cfg *Config, host string) bool {
 	}
 
 	return false
+}
+
+// validateOnDemandTLS checks proxy.on_demand_tls. Caddy issues on-demand
+// certificates through ACME and asks this service's web role for permission,
+// so the option needs automatic TLS, no custom certificate and a web role.
+func validateOnDemandTLS(cfg *Config) []ValidationError {
+	onDemand := cfg.Proxy.OnDemandTLS
+	if !onDemand.Enabled() {
+		return nil
+	}
+	var errs []ValidationError
+	add := func(message string) {
+		errs = append(errs, ValidationError{Field: "proxy.on_demand_tls.ask", Message: message})
+	}
+	if !strings.HasPrefix(onDemand.Ask, "/") {
+		add(fmt.Sprintf("ask must be a path on this service starting with /, got %q", onDemand.Ask))
+	} else if strings.ContainsAny(onDemand.Ask, "#") || strings.IndexFunc(onDemand.Ask, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		add(fmt.Sprintf("ask must be a plain URL path without spaces or a fragment, got %q", onDemand.Ask))
+	}
+	if !cfg.Proxy.SSL {
+		add("on-demand TLS requires proxy.ssl: true")
+	}
+	if cfg.Proxy.SSLCertificate != "" || cfg.Proxy.SSLPrivateKey != "" {
+		add("on-demand TLS issues certificates through ACME and cannot be combined with ssl_certificate and ssl_private_key")
+	}
+	if !cfg.HasRole(WebRoleName) {
+		add("on-demand TLS routes hosts to the web role, and this service has no web role")
+	}
+	return errs
 }

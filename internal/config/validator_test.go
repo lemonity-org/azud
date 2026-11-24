@@ -2013,3 +2013,58 @@ func TestRoleTmpfsContainerSpec(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_OnDemandTLS(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Service: "test",
+			Image:   "test:latest",
+			Servers: map[string]RoleConfig{"web": {Hosts: []string{"localhost"}}},
+			Proxy: ProxyConfig{
+				Host:        "test.example.com",
+				SSL:         true,
+				ACMEEmail:   "admin@example.com",
+				OnDemandTLS: OnDemandTLSConfig{Ask: "/tls/ask"},
+			},
+			SSH: SSHConfig{Port: 22},
+		}
+	}
+
+	if err := Validate(base()); err != nil {
+		t.Fatalf("valid on-demand TLS rejected: %v", err)
+	}
+	withQuery := base()
+	withQuery.Proxy.OnDemandTLS.Ask = "/tls/ask?source=proxy"
+	if err := Validate(withQuery); err != nil {
+		t.Fatalf("ask path with a query rejected: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		configure func(*Config)
+		want      string
+	}{
+		{"relative path", func(cfg *Config) { cfg.Proxy.OnDemandTLS.Ask = "tls/ask" }, "starting with /"},
+		{"absolute URL", func(cfg *Config) { cfg.Proxy.OnDemandTLS.Ask = "http://app:3000/tls/ask" }, "starting with /"},
+		{"space in path", func(cfg *Config) { cfg.Proxy.OnDemandTLS.Ask = "/tls ask" }, "without spaces"},
+		{"fragment", func(cfg *Config) { cfg.Proxy.OnDemandTLS.Ask = "/tls/ask#x" }, "fragment"},
+		{"ssl off", func(cfg *Config) { cfg.Proxy.SSL = false }, "proxy.ssl: true"},
+		{"custom certificate", func(cfg *Config) {
+			cfg.Proxy.SSLCertificate = "TLS_CERT"
+			cfg.Proxy.SSLPrivateKey = "TLS_KEY"
+		}, "cannot be combined with ssl_certificate"},
+		{"no web role", func(cfg *Config) {
+			cfg.Servers = map[string]RoleConfig{"worker": {Hosts: []string{"localhost"}, Cmd: "bin/worker"}}
+		}, "no web role"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.configure(cfg)
+			err := Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), "proxy.on_demand_tls.ask") || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected proxy.on_demand_tls.ask error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
+}

@@ -125,6 +125,7 @@ func sharedProxy(p ProxyConfig) ProxyConfig {
 		ACMEStaging:      p.ACMEStaging,
 		SSLCertificate:   p.SSLCertificate,
 		SSLPrivateKey:    p.SSLPrivateKey,
+		OnDemandTLS:      p.OnDemandTLS,
 		HTTPPort:         p.HTTPPort,
 		HTTPSPort:        p.HTTPSPort,
 		Rootful:          p.Rootful,
@@ -138,6 +139,7 @@ func applySharedProxy(dst *ProxyConfig, src ProxyConfig) {
 	dst.SSL, dst.SSLRedirect = src.SSL, src.SSLRedirect
 	dst.ACMEEmail, dst.ACMEStaging = src.ACMEEmail, src.ACMEStaging
 	dst.SSLCertificate, dst.SSLPrivateKey = src.SSLCertificate, src.SSLPrivateKey
+	dst.OnDemandTLS = src.OnDemandTLS
 	dst.HTTPPort, dst.HTTPSPort = src.HTTPPort, src.HTTPSPort
 	dst.Rootful = src.Rootful
 	dst.MaxHeaderBytes, dst.EnableFullDuplex = src.MaxHeaderBytes, src.EnableFullDuplex
