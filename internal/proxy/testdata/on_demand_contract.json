@@ -1,0 +1,225 @@
+{
+  "admin": {
+    "listen": "unix//run/azud-admin/admin.sock|0600"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "srv0": {
+          "listen": [
+            ":443"
+          ],
+          "routes": [
+            {
+              "@id": "azud-route-blog",
+              "handle": [
+                {
+                  "@id": "azud-proxy-blog",
+                  "handler": "reverse_proxy",
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Forwarded-For": [
+                          "{http.request.remote.host}"
+                        ],
+                        "X-Forwarded-Host": [
+                          "{http.request.host}"
+                        ],
+                        "X-Forwarded-Port": [
+                          "{http.request.port}"
+                        ],
+                        "X-Forwarded-Proto": [
+                          "{http.request.scheme}"
+                        ],
+                        "X-Real-IP": [
+                          "{http.request.remote.host}"
+                        ]
+                      }
+                    }
+                  },
+                  "load_balancing": {
+                    "selection_policy": {
+                      "policy": "round_robin"
+                    },
+                    "try_duration": "5s",
+                    "try_interval": "250ms"
+                  },
+                  "upstreams": [
+                    {
+                      "dial": "blog:80"
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "blog.example.org"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "@id": "azud-route-app",
+              "handle": [
+                {
+                  "@id": "azud-proxy-app",
+                  "handler": "reverse_proxy",
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Forwarded-For": [
+                          "{http.request.remote.host}"
+                        ],
+                        "X-Forwarded-Host": [
+                          "{http.request.host}"
+                        ],
+                        "X-Forwarded-Port": [
+                          "{http.request.port}"
+                        ],
+                        "X-Forwarded-Proto": [
+                          "{http.request.scheme}"
+                        ],
+                        "X-Real-IP": [
+                          "{http.request.remote.host}"
+                        ]
+                      }
+                    }
+                  },
+                  "health_checks": {
+                    "active": {
+                      "headers": {
+                        "X-Forwarded-Proto": [
+                          "https"
+                        ]
+                      },
+                      "interval": "10s",
+                      "path": "/up",
+                      "timeout": "5s"
+                    },
+                    "passive": {
+                      "fail_duration": "30s",
+                      "max_fails": 3
+                    }
+                  },
+                  "load_balancing": {
+                    "selection_policy": {
+                      "policy": "round_robin"
+                    },
+                    "try_duration": "5s",
+                    "try_interval": "250ms"
+                  },
+                  "upstreams": [
+                    {
+                      "dial": "app:3000"
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "app.example.com"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "@id": "azud-on-demand-app",
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Forwarded-For": [
+                          "{http.request.remote.host}"
+                        ],
+                        "X-Forwarded-Host": [
+                          "{http.request.host}"
+                        ],
+                        "X-Forwarded-Port": [
+                          "{http.request.port}"
+                        ],
+                        "X-Forwarded-Proto": [
+                          "{http.request.scheme}"
+                        ],
+                        "X-Real-IP": [
+                          "{http.request.remote.host}"
+                        ]
+                      }
+                    }
+                  },
+                  "health_checks": {
+                    "active": {
+                      "headers": {
+                        "X-Forwarded-Proto": [
+                          "https"
+                        ]
+                      },
+                      "interval": "10s",
+                      "path": "/up",
+                      "timeout": "5s"
+                    },
+                    "passive": {
+                      "fail_duration": "30s",
+                      "max_fails": 3
+                    }
+                  },
+                  "load_balancing": {
+                    "selection_policy": {
+                      "policy": "round_robin"
+                    },
+                    "try_duration": "5s",
+                    "try_interval": "250ms"
+                  },
+                  "upstreams": [
+                    {
+                      "dial": "app:3000"
+                    }
+                  ]
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "on_demand": {
+          "permission": {
+            "endpoint": "http://app:3000/tls/ask",
+            "module": "http"
+          }
+        },
+        "policies": [
+          {
+            "issuers": [
+              {
+                "email": "ops@example.com",
+                "module": "acme"
+              }
+            ],
+            "subjects": [
+              "app.example.com",
+              "blog.example.org"
+            ]
+          },
+          {
+            "issuers": [
+              {
+                "email": "ops@example.com",
+                "module": "acme"
+              }
+            ],
+            "on_demand": true
+          }
+        ]
+      }
+    }
+  }
+}

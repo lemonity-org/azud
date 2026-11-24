@@ -11,7 +11,16 @@
 #   - --resume keeps arbitrary JSON and the socket listener across restarts;
 #   - an autosave's admin.listen overrides CADDY_ADMIN, which is why Azud
 #     normalizes the autosave before every start, and the normalized autosave
-#     brings the listener back to the socket.
+#     brings the listener back to the socket;
+#   - the configuration Azud generates for proxy.on_demand_tls
+#     (internal/proxy/testdata/on_demand_contract.json) loads; plain HTTP
+#     for a host no route names is redirected to HTTPS; an unknown host gets
+#     a certificate during the handshake only when the app's permission
+#     check allows it, which Caddy calls without X-Forwarded-For while
+#     proxied requests carry it; PUT on a routes index inserts before the
+#     host-less route; the permission endpoint can be patched; and an
+#     on-demand certificate survives a restart instead of being obtained
+#     again.
 set -eu
 
 if [ -n "${CONTAINER_RUNTIME:-}" ]; then
@@ -33,6 +42,7 @@ image=${CADDY_CONTRACT_IMAGE:-$pinned_image}
 prefix=${CADDY_CONTRACT_PREFIX:-azud-caddy-contract}
 name="$prefix-$$"
 peer="$name-peer"
+app="$name-app"
 network="$name-net"
 data_volume="$name-data"
 config_volume="$name-config"
@@ -43,7 +53,7 @@ admin_listen="unix/$socket|0600"
 admin_tmpfs=/run/azud-admin:rw,nosuid,nodev,noexec,mode=0700,size=64k
 
 cleanup() {
-  "$runtime" rm -f "$name" "$peer" >/dev/null 2>&1 || true
+  "$runtime" rm -f "$name" "$peer" "$app" >/dev/null 2>&1 || true
   "$runtime" network rm "$network" >/dev/null 2>&1 || true
   "$runtime" volume rm "$data_volume" "$config_volume" >/dev/null 2>&1 || true
   rm -f "$config_file"
@@ -192,4 +202,75 @@ assert_peer_cannot_reach_admin "normalized autosave"
 normalized=$(admin http://localhost/config/)
 [ "$normalized" = "$after" ] || fail "normalized autosave did not restore the same live config"
 
-printf 'PASS %s: private admin socket, hardened flags, admin verbs, arbitrary JSON preservation, and --resume persistence (%s)\n' "$image" "$runtime"
+# On-demand TLS. The app answers the permission check on app:3000/tls/ask:
+# yes for allowed.example.com when the request has no X-Forwarded-For, as
+# Caddy's own check has none, and no otherwise. Every other request echoes
+# the host and X-Forwarded-For.
+app_config='{"admin":{"disabled":true},"apps":{"http":{"servers":{"app":{"listen":[":3000"],"automatic_https":{"disable":true},"routes":[
+{"match":[{"path":["/tls/ask"],"query":{"domain":["allowed.example.com"]},"header":{"X-Forwarded-For":null}}],"handle":[{"handler":"static_response","status_code":200,"body":"yes"}]},
+{"match":[{"path":["/tls/ask"]}],"handle":[{"handler":"static_response","status_code":404,"body":"no"}]},
+{"handle":[{"handler":"static_response","body":"app {http.request.host} xff={http.request.header.X-Forwarded-For}"}]}]}}}}}'
+"$runtime" run -d --name "$app" --network "$network" --network-alias app -e "APP_CONFIG=$app_config" \
+  --entrypoint /bin/sh "$image" -c 'printf "%s" "$APP_CONFIG" > /tmp/app.json && exec caddy run --config /tmp/app.json' >/dev/null
+
+# The fixture's ACME issuer is swapped for Caddy's internal CA, so the
+# contract needs no public DNS.
+on_demand_fixture="$script_dir/../internal/proxy/testdata/on_demand_contract.json"
+[ -f "$on_demand_fixture" ] || fail "missing $on_demand_fixture"
+sed -e 's/"module": "acme"/"module": "internal"/' -e '/"email": /d' "$on_demand_fixture" >"$config_file"
+grep -F '"on_demand": true' "$config_file" >/dev/null || fail "the on-demand fixture has no on-demand policy"
+admin_with_body -X POST http://localhost/load <"$config_file" >/dev/null ||
+  fail "Caddy refused the configuration Azud generates for on-demand TLS"
+
+# https_get HOST PATH [curl flags]: HTTPS to the proxy with HOST as SNI.
+https_get() {
+  host=$1
+  path=$2
+  shift 2
+  peer_curl -sS -k -m 10 --connect-to "$host:443:$name:443" "$@" "https://$host$path"
+}
+
+attempt=0
+until known=$(https_get app.example.com /known 2>/dev/null); do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 50 ] || fail "app.example.com was not served over HTTPS"
+  sleep 0.2
+done
+case "$known" in "app app.example.com xff="?*) ;; *) fail "app.example.com answered $known" ;; esac
+
+redirect=$(peer_curl -sS -m 5 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: unknown.example.net' "http://$name/path?x=1")
+[ "$redirect" = "308 https://unknown.example.net/path?x=1" ] ||
+  fail "plain HTTP for a host no route names answered '$redirect', want a redirect to HTTPS"
+
+allowed=$(https_get allowed.example.com /hello) || fail "allowed.example.com was not served over HTTPS"
+case "$allowed" in "app allowed.example.com xff="?*) ;; *) fail "allowed.example.com answered $allowed" ;; esac
+
+if https_get denied.example.com / >/dev/null 2>&1; then
+  fail "denied.example.com completed a handshake although the permission check refused it"
+fi
+
+proxied=$(https_get allowed.example.com '/tls/ask?domain=allowed.example.com' -o /dev/null -w '%{http_code}')
+[ "$proxied" = 404 ] || fail "a proxied permission check answered $proxied; proxied requests must carry X-Forwarded-For"
+
+printf '%s' '{"@id":"azud-route-docs","match":[{"host":["docs.example.org"]}],"handle":[{"handler":"static_response","body":"docs"}],"terminal":true}' |
+  admin_with_body -X PUT http://localhost/config/apps/http/servers/srv0/routes/2 >/dev/null
+order=$(admin http://localhost/config/apps/http/servers/srv0/routes | grep -o '"@id":"azud-\(route\|on-demand\)-[a-z]*"' | tr '\n' ' ')
+[ "$order" = '"@id":"azud-route-blog" "@id":"azud-route-app" "@id":"azud-route-docs" "@id":"azud-on-demand-app" ' ] ||
+  fail "PUT on a routes index did not insert before the on-demand route: $order"
+
+printf '%s' '"http://app:3000/tls/ask?moved=1"' |
+  admin_with_body -X PATCH http://localhost/config/apps/tls/automation/on_demand/permission/endpoint >/dev/null
+admin http://localhost/config/apps/tls | grep -F '"endpoint":"http://app:3000/tls/ask?moved=1"' >/dev/null ||
+  fail "the on-demand permission endpoint could not be patched"
+
+issued=$(https_get allowed.example.com / -v 2>&1 | sed -n 's/^.*start date: //p')
+[ -n "$issued" ] || fail "could not read the on-demand certificate"
+"$runtime" stop "$name" >/dev/null
+"$runtime" rm "$name" >/dev/null
+run_proxy
+wait_for_admin
+reissued=$(https_get allowed.example.com / -v 2>&1 | sed -n 's/^.*start date: //p')
+[ "$reissued" = "$issued" ] ||
+  fail "the on-demand certificate was obtained again after a restart ($issued, then $reissued); Caddy's /data must persist"
+
+printf 'PASS %s: private admin socket, hardened flags, admin verbs, arbitrary JSON preservation, --resume persistence, and on-demand TLS (%s)\n' "$image" "$runtime"

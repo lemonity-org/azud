@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -1201,5 +1203,65 @@ func TestOnDemandRouteIDsCannotCollideWithServiceRoutes(t *testing.T) {
 		if isAzudOwnedRoute(&Route{ID: onDemandRouteID(service)}) {
 			t.Fatalf("on-demand route ID %s looks like a service route", onDemandRouteID(service))
 		}
+	}
+}
+
+// TestOnDemandContractFixtureIsTheGeneratedConfig holds the configuration
+// scripts/caddy_admin_contract_test.sh loads into the pinned Caddy image to
+// the one Azud generates for a proxy with on-demand TLS. Rewrite it with
+// AZUD_UPDATE_TESTDATA=1 go test ./internal/proxy -run ContractFixture.
+func TestOnDemandContractFixtureIsTheGeneratedConfig(t *testing.T) {
+	manager := &Manager{}
+	settings := onDemandProxyConfig()
+	app := &ServiceConfig{Name: "app", Host: "app.example.com", Upstreams: []string{"app:3000"}, HealthPath: "/up", HTTPS: true, OnDemand: true}
+	blog := &ServiceConfig{Name: "blog", Host: "blog.example.org", Upstreams: []string{"blog:80"}, HTTPS: true}
+	routes := []*Route{manager.buildServiceRoute(blog), manager.buildServiceRoute(app)}
+	data, err := json.Marshal(routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawRoutes, parsed, err := parseRouteIdentities(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDemand, err := manager.onDemandSettings(settings, rawRoutes, parsed, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := manager.buildBaseConfig()
+	manager.applyProxySettingsFrom(cfg, settings, onDemand)
+	cfg.Apps.HTTP.Servers["srv0"].Routes = routes
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := decodeJSONObject(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror, err := onDemandMirror(rawRoutes[1], onDemandRouteID("app"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv0, _ := jsonPath(root, "apps", "http", "servers", "srv0").(map[string]interface{})
+	srv0["routes"] = append(srv0["routes"].([]interface{}), mirror)
+	generated, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated = append(generated, '\n')
+
+	fixture := filepath.Join("testdata", "on_demand_contract.json")
+	if os.Getenv("AZUD_UPDATE_TESTDATA") == "1" {
+		if err := os.WriteFile(fixture, generated, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(want) != string(generated) {
+		t.Fatalf("%s is not the generated config; rewrite it with AZUD_UPDATE_TESTDATA=1:\n%s", fixture, generated)
 	}
 }
