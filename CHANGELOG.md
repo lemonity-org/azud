@@ -6,6 +6,15 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+- Added `proxy.on_demand_tls`, which serves hosts the configuration does not
+  list, such as domains customers point at the server. Caddy obtains a
+  certificate for such a host during the first handshake, after a `GET` to
+  the `ask` path on the service with `?domain=<host>` returns 2xx, and a
+  host-less route, kept last, sends those hosts to the service. Listed hosts
+  keep certificates obtained ahead of time. Only one service per proxy can
+  use it, and in pull mode the server's configuration decides it. See
+  "On-demand TLS" in `docs/CONFIG_REFERENCE.md`.
+
 ## 1.7.0 - 2026-11-04
 
 - Updated dependencies. Go is 1.27.3, the build image is

@@ -147,6 +147,7 @@ succeed.
 Other useful fields:
 
 - `ssl_redirect`, `acme_email`, `acme_staging`
+- `on_demand_tls` (certificates for hosts the config does not list; see below)
 - `http_port`, `https_port`
 - `upstream_protocol` (`http`, `h2c`, or `https`)
 - `rootful` (run proxy container with rootful Podman)
@@ -197,6 +198,73 @@ reconciled on later deploys without replacing active upstreams. A negative
 `flush_interval` is valid; `stream_close_delay` must not be negative. Enable
 `stream_close_delay` before admitting long-lived streams: the first reload that
 adds it cannot protect streams owned by the previous zero-delay handler.
+
+### On-demand TLS
+
+`on_demand_tls` serves hosts that are not in `host` or `hosts`, such as
+domains your customers point at your server. Caddy obtains a certificate for
+such a host the first time a client connects to it, after asking your app
+whether the host may have one:
+
+```yaml
+proxy:
+  hosts:
+    - app.example.com
+  ssl: true
+  acme_email: ops@example.com
+  app_port: 3000
+  on_demand_tls:
+    ask: /tls/ask
+```
+
+`ask` is a path on this service. Before obtaining a certificate, Caddy sends
+`GET <ask>?domain=<host>` straight to the app's container, not through the
+proxy. A 2xx answer allows the certificate; any other answer, or no answer,
+refuses it, and the client's handshake fails. Answer 2xx only for hosts your
+app recognizes: every allowed host costs a certificate from the CA, and CAs
+limit how many they issue.
+
+From this, Azud derives:
+
+- two TLS automation policies: the names the proxy's routes list keep
+  certificates obtained ahead of time, and every other name uses an
+  on-demand policy with the same ACME issuer;
+- the permission check, `http://<service>:<app_port><ask>` on the shared
+  network. With host-port upstreams (`podman.rootless: true` and
+  `proxy.rootful: true`), it uses the service's current `127.0.0.1` port
+  instead and follows it through every deploy;
+- a route, `azud-on-demand-<service>`, that sends every host no other route
+  matches to the service. It has the service's handlers and upstreams, and is
+  kept last: Azud inserts other services' routes before it and moves it back
+  to the end on the service's next deploy.
+
+Plain HTTP for an on-demand host is redirected to HTTPS when `ssl_redirect` is
+on, as for listed hosts.
+
+Your app sees the requested host in `Host` and should serve only the hosts it
+allows. Requests that come through the proxy carry `X-Forwarded-For`; Caddy's
+own permission check does not. An app that never answers the `ask` path to a
+request with `X-Forwarded-For` keeps the check private.
+
+Rules and requirements:
+
+- `on_demand_tls` needs `ssl: true` and a `web` role, cannot be combined with
+  `ssl_certificate`, and `ask` must be a path starting with `/`.
+- Only one service per proxy can use it. A second service's deploy fails
+  before the proxy changes and names the service that has it. Other services
+  on the proxy keep working, and their deploys keep the permission check.
+- Point customer hosts straight at the server with DNS-only records. A CDN
+  that terminates TLS answers the handshake itself, so Caddy's certificate
+  and the permission check never take part.
+- Certificates live in the proxy's `caddy_data` volume and survive proxy
+  restarts and recreation.
+- In pull mode, `on_demand_tls` is a setting of the shared proxy: the server's
+  configuration decides it, and a bundle's value is ignored.
+
+Remove `on_demand_tls` and deploy to turn it off: the route and the on-demand
+policy are removed, and hosts that only it served stop working.
+
+### Proxy notes
 
 Note:
 - With `podman.rootless: true` and `proxy.rootful: false`, proxy

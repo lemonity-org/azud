@@ -282,7 +282,7 @@ digest; sign the bundle digest that `azud release publish` prints.
 **The server's configuration is the trust anchor.** From it the agent takes
 `agent`, `ssh`, `security`, `registry`, `builder`, `podman`, `hooks`,
 `hooks_path`, the `secrets_*` settings, and the proxy settings shared by every app on the host
-(TLS, ACME, listener ports, header limits, logging, `rootful`). The bundle's
+(TLS, ACME, `on_demand_tls`, listener ports, header limits, logging, `rootful`). The bundle's
 values for them are ignored (the repository's `deploy.yml` sets several of
 them for push mode). If the server leaves `ssh.command_timeout` unset, it is
 derived from the bundle's deploy and stop timeouts. Everything else, including the app's own route, comes
