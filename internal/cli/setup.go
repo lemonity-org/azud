@@ -151,6 +151,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			LoggingEnabled:        cfg.Proxy.Logging.Enabled,
 			RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
 			RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
+			Service:               cfg.Service,
+			AppPort:               cfg.Proxy.AppPort,
+			OnDemandAsk:           cfg.Proxy.OnDemandTLS.Ask,
 		}
 		if hosts := cfg.Proxy.AllHosts(); len(hosts) > 0 {
 			proxyConfig.Hosts = hosts

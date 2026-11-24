@@ -58,6 +58,9 @@ type fakeProxyHost struct {
 	// sessions blocked on it.
 	caddyLock   chan struct{}
 	lockWaiters int
+
+	// admin, when set, answers admin API requests from an in-memory config.
+	admin *fakeCaddyAdmin
 }
 
 func newFakeProxyHost(autosave string, containers map[string]*fakeProxyContainer) *fakeProxyHost {
@@ -205,6 +208,8 @@ func (h *fakeProxyHost) handle(command string, stdin io.Reader) (string, string,
 			return "", "Error: can only create exec sessions on running containers: container state improper", 255
 		case container.legacy:
 			return "", "curl: (7) Failed to connect to localhost: Could not connect to server", 7
+		case h.admin != nil:
+			return h.admin.serve(command, stdin)
 		}
 		_, _ = io.ReadAll(stdin)
 		return `{"admin":{"listen":"` + CaddyAdminListen + `"},"apps":{}}`, "", 0

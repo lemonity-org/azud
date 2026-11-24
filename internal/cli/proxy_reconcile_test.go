@@ -6,6 +6,7 @@ import (
 
 	"github.com/lemonity-org/azud/internal/config"
 	"github.com/lemonity-org/azud/internal/deploy"
+	"github.com/lemonity-org/azud/internal/output"
 	"github.com/lemonity-org/azud/internal/podman"
 )
 
@@ -76,5 +77,24 @@ func TestValidateCanaryContainersRejectsScaledInstances(t *testing.T) {
 	}
 	if err := validateCanaryContainers([]string{"shop", "shop-canary", "shop-2"}, "shop", "shop-canary"); err == nil {
 		t.Fatal("scaled container during canary accepted")
+	}
+}
+
+func TestBuildProxyConfigCarriesOnDemandTLS(t *testing.T) {
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = &config.Config{
+		Service: "app",
+		Proxy: config.ProxyConfig{
+			Host:        "app.example.com",
+			SSL:         true,
+			ACMEEmail:   "ops@example.com",
+			AppPort:     4000,
+			OnDemandTLS: config.OnDemandTLSConfig{Ask: "/tls/ask"},
+		},
+	}
+	got := buildProxyConfig(output.DefaultLogger)
+	if got.Service != "app" || got.AppPort != 4000 || got.OnDemandAsk != "/tls/ask" {
+		t.Fatalf("on-demand settings were not propagated: %#v", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -182,7 +183,7 @@ func TestCopyManagedProxySettingsRemovesLogCredentials(t *testing.T) {
 		})
 		manager := &Manager{}
 		desiredConfig := manager.buildBaseConfig()
-		manager.applyProxySettingsFrom(desiredConfig, &ProxyConfig{LoggingEnabled: loggingEnabled})
+		manager.applyProxySettingsFrom(desiredConfig, &ProxyConfig{LoggingEnabled: loggingEnabled}, nil)
 		data, err := json.Marshal(desiredConfig)
 		if err != nil {
 			t.Fatal(err)
@@ -278,5 +279,253 @@ func TestSystemctlStopCommandMatchesProxyRuntime(t *testing.T) {
 				t.Fatalf("systemctl command = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// onDemandTestConfig is a live proxy with one unrelated service route.
+const onDemandTestConfig = `{"admin":{"listen":"unix//run/azud-admin/admin.sock|0600"},"apps":{"http":{"servers":{"srv0":{"listen":[":443"],"routes":[
+	{"@id":"azud-route-blog","match":[{"host":["blog.example.org"]}],"handle":[{"@id":"azud-proxy-blog","handler":"reverse_proxy","upstreams":[{"dial":"blog:80"}]}],"terminal":true}
+]}}}}}`
+
+func onDemandTestManager(t *testing.T, config string, hostPorts bool) (*Manager, *fakeCaddyAdmin) {
+	t.Helper()
+	h := newFakeProxyHost("", map[string]*fakeProxyContainer{CaddyContainerName: {running: true}})
+	h.admin = newFakeCaddyAdmin(t, config)
+	manager, _ := startFakeProxySSH(t, h)
+	manager.hostPorts = hostPorts
+	return manager, h.admin
+}
+
+func onDemandService(upstream string) *ServiceConfig {
+	return &ServiceConfig{
+		Name:       "app",
+		Host:       "app.example.com",
+		Hosts:      []string{"app.example.com"},
+		Upstreams:  []string{upstream},
+		HealthPath: "/up",
+		HTTPS:      true,
+		OnDemand:   true,
+	}
+}
+
+func TestOnDemandRouteIsAddedLastAndStaysLast(t *testing.T) {
+	manager, admin := onDemandTestManager(t, onDemandTestConfig, false)
+
+	if err := manager.RegisterService("127.0.0.1", onDemandService("app:3000")); err != nil {
+		t.Fatalf("RegisterService: %v", err)
+	}
+	if got, want := admin.routeIDs(t), []string{"azud-route-blog", "azud-route-app", "azud-on-demand-app"}; !slices.Equal(got, want) {
+		t.Fatalf("routes = %v, want %v", got, want)
+	}
+	mirror := admin.route(t, "azud-on-demand-app")
+	if _, hasMatch := mirror["match"]; hasMatch || !slices.Equal(upstreamDials(mirror), []string{"app:3000"}) {
+		t.Fatalf("on-demand route is not a host-less copy of the service route: %v", mirror)
+	}
+
+	// Another service's first deploy is inserted before the catch-all.
+	other := &ServiceConfig{Name: "docs", Host: "docs.example.org", Upstreams: []string{"docs:8080"}}
+	if err := manager.RegisterService("127.0.0.1", other); err != nil {
+		t.Fatalf("RegisterService(docs): %v", err)
+	}
+	if got, want := admin.routeIDs(t), []string{"azud-route-blog", "azud-route-app", "azud-route-docs", "azud-on-demand-app"}; !slices.Equal(got, want) {
+		t.Fatalf("routes after another service = %v, want %v", got, want)
+	}
+
+	// A route appended by hand after it is moved ahead on the owner's next deploy.
+	if _, status := admin.apply("POST", "/config/apps/http/servers/srv0/routes", map[string]interface{}{"@id": "manual"}); status != 200 {
+		t.Fatalf("append manual route: %d", status)
+	}
+	if err := manager.EnsureServiceHosts("127.0.0.1", onDemandService("")); err != nil {
+		t.Fatalf("EnsureServiceHosts: %v", err)
+	}
+	if got := admin.routeIDs(t); got[len(got)-1] != "azud-on-demand-app" {
+		t.Fatalf("on-demand route is not last after the owner's deploy: %v", got)
+	}
+}
+
+func TestOnDemandRouteFollowsUpstreamSwapsAndCanaryWeights(t *testing.T) {
+	manager, admin := onDemandTestManager(t, onDemandTestConfig, false)
+	if err := manager.RegisterService("127.0.0.1", onDemandService("app:3000")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.AddUpstream("127.0.0.1", "app.example.com", "app-new-1:3000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := upstreamDials(admin.route(t, "azud-on-demand-app")); !slices.Equal(got, []string{"app:3000", "app-new-1:3000"}) {
+		t.Fatalf("on-demand upstreams after add = %v", got)
+	}
+	if err := manager.RemoveUpstream("127.0.0.1", "app.example.com", "app:3000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := upstreamDials(admin.route(t, "azud-on-demand-app")); !slices.Equal(got, []string{"app-new-1:3000"}) {
+		t.Fatalf("on-demand upstreams after remove = %v", got)
+	}
+
+	if err := manager.SetCanaryWeights("127.0.0.1", "app.example.com", "app-new-1:3000", 75, "app-canary:3000", 25); err != nil {
+		t.Fatal(err)
+	}
+	mirror := admin.route(t, "azud-on-demand-app")
+	if got := upstreamDials(mirror); !slices.Equal(got, []string{"app-new-1:3000", "app-new-1:3000", "app-new-1:3000", "app-canary:3000"}) {
+		t.Fatalf("on-demand upstreams after canary weights = %v", got)
+	}
+	if policy := jsonPath(mirror, "handle"); policy == nil || !strings.Contains(admin.dump(), `"policy": "random"`) {
+		t.Fatalf("canary policy did not reach the on-demand route: %s", admin.dump())
+	}
+	primary, _ := json.Marshal(withoutCaddyIDs(admin.route(t, "azud-route-app")["handle"]))
+	copied, _ := json.Marshal(mirror["handle"])
+	if string(primary) != string(copied) {
+		t.Fatalf("on-demand handlers differ from the service route:\n%s\n%s", primary, copied)
+	}
+
+	if err := manager.DeregisterService("127.0.0.1", "app.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if got := admin.routeIDs(t); !slices.Equal(got, []string{"azud-route-blog"}) {
+		t.Fatalf("routes after deregistration = %v", got)
+	}
+}
+
+func TestOnDemandPermissionFollowsHostPortSwaps(t *testing.T) {
+	manager, admin := onDemandTestManager(t, onDemandTestConfig, true)
+	settings := &ProxyConfig{
+		Hosts: []string{"app.example.com"}, AutoHTTPS: true, SSLRedirect: true, Email: "ops@example.com",
+		Service: "app", AppPort: 3000, OnDemandAsk: "/tls/ask",
+	}
+	manager.SetProxyConfig(settings)
+	endpoint := func() interface{} {
+		return admin.value("apps", "tls", "automation", "on_demand", "permission", "endpoint")
+	}
+
+	// First deploy: no route yet, so the permission check refuses until one exists.
+	if err := manager.EnsureConfig("127.0.0.1"); err != nil {
+		t.Fatalf("EnsureConfig: %v", err)
+	}
+	if got := endpoint(); got != "http://app:3000/tls/ask" {
+		t.Fatalf("endpoint before the first route = %v", got)
+	}
+	if err := manager.RegisterService("127.0.0.1", onDemandService("127.0.0.1:41000")); err != nil {
+		t.Fatal(err)
+	}
+	if got := endpoint(); got != "http://127.0.0.1:41000/tls/ask" {
+		t.Fatalf("endpoint after the first route = %v", got)
+	}
+
+	// A rolling deploy adds the new container's port, then removes the old one.
+	if err := manager.EnsureConfig("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.AddUpstream("127.0.0.1", "app.example.com", "127.0.0.1:42000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := endpoint(); got != "http://127.0.0.1:41000/tls/ask" {
+		t.Fatalf("endpoint while both containers serve = %v", got)
+	}
+	if err := manager.RemoveUpstream("127.0.0.1", "app.example.com", "127.0.0.1:41000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := endpoint(); got != "http://127.0.0.1:42000/tls/ask" {
+		t.Fatalf("endpoint after the swap = %v", got)
+	}
+}
+
+func TestSecondOnDemandOwnerIsRefusedWithoutChanges(t *testing.T) {
+	config := `{"admin":{"listen":"unix//run/azud-admin/admin.sock|0600"},"apps":{"http":{"servers":{"srv0":{"listen":[":443"],"routes":[
+		{"@id":"azud-route-shop","match":[{"host":["shop.example.com"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"shop:4000"}]}],"terminal":true},
+		{"@id":"azud-on-demand-shop","handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"shop:4000"}]}],"terminal":true}
+	]}}},"tls":{"automation":{"policies":[{"subjects":["shop.example.com"]},{"on_demand":true}],"on_demand":{"permission":{"module":"http","endpoint":"http://shop:4000/check"}}}}}}`
+	manager, admin := onDemandTestManager(t, config, false)
+	before := admin.dump()
+
+	manager.SetProxyConfig(&ProxyConfig{
+		Hosts: []string{"app.example.com"}, AutoHTTPS: true, SSLRedirect: true, Email: "ops@example.com",
+		Service: "app", AppPort: 3000, OnDemandAsk: "/tls/ask",
+	})
+	if err := manager.EnsureConfig("127.0.0.1"); err == nil || !strings.Contains(err.Error(), "belongs to service shop") {
+		t.Fatalf("EnsureConfig accepted a second on-demand owner: %v", err)
+	}
+	if err := manager.RegisterService("127.0.0.1", onDemandService("app:3000")); err == nil || !strings.Contains(err.Error(), "belongs to service shop") {
+		t.Fatalf("RegisterService accepted a second on-demand owner: %v", err)
+	}
+	if after := admin.dump(); after != before {
+		t.Fatalf("a refused owner changed the proxy:\n%s", after)
+	}
+
+	// The same app without on-demand TLS deploys and keeps the owner's check.
+	manager.SetProxyConfig(&ProxyConfig{
+		Hosts: []string{"app.example.com"}, AutoHTTPS: true, SSLRedirect: true, Email: "ops@example.com",
+		Service: "app", AppPort: 3000,
+	})
+	if err := manager.EnsureConfig("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := admin.value("apps", "tls", "automation", "on_demand", "permission", "endpoint"); got != "http://shop:4000/check" {
+		t.Fatalf("another app's deploy dropped the owner's permission check: %v", got)
+	}
+	plain := onDemandService("app:3000")
+	plain.OnDemand = false
+	if err := manager.RegisterService("127.0.0.1", plain); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := admin.routeIDs(t), []string{"azud-route-shop", "azud-route-app", "azud-on-demand-shop"}; !slices.Equal(got, want) {
+		t.Fatalf("routes = %v, want %v", got, want)
+	}
+}
+
+func TestTurningOnDemandOffRemovesTheRouteAndPolicy(t *testing.T) {
+	manager, admin := onDemandTestManager(t, onDemandTestConfig, false)
+	settings := &ProxyConfig{
+		Hosts: []string{"app.example.com"}, AutoHTTPS: true, SSLRedirect: true, Email: "ops@example.com",
+		Service: "app", AppPort: 3000, OnDemandAsk: "/tls/ask",
+	}
+	manager.SetProxyConfig(settings)
+	if err := manager.EnsureConfig("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RegisterService("127.0.0.1", onDemandService("app:3000")); err != nil {
+		t.Fatal(err)
+	}
+
+	off := *settings
+	off.OnDemandAsk = ""
+	manager.SetProxyConfig(&off)
+	if err := manager.EnsureConfig("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	service := onDemandService("")
+	service.OnDemand = false
+	if err := manager.EnsureServiceHosts("127.0.0.1", service); err != nil {
+		t.Fatal(err)
+	}
+	if got := admin.routeIDs(t); !slices.Equal(got, []string{"azud-route-blog", "azud-route-app"}) {
+		t.Fatalf("routes after turning on-demand TLS off = %v", got)
+	}
+	tlsApp, _ := json.Marshal(admin.value("apps", "tls"))
+	if want := `{"automation":{"policies":[{"issuers":[{"email":"ops@example.com","module":"acme"}]}]}}`; string(tlsApp) != want {
+		t.Fatalf("TLS app after turning on-demand TLS off = %s, want %s", tlsApp, want)
+	}
+}
+
+func TestReconcileServiceReportsAndRepairsTheOnDemandRoute(t *testing.T) {
+	manager, admin := onDemandTestManager(t, onDemandTestConfig, false)
+	plain := onDemandService("app:3000")
+	plain.OnDemand = false
+	if err := manager.RegisterService("127.0.0.1", plain); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := manager.ReconcileService("127.0.0.1", onDemandService("app:3000"), false)
+	if err != nil || status != ReconcileStale {
+		t.Fatalf("status with a missing on-demand route = %s, %v", status, err)
+	}
+	if _, err := manager.ReconcileService("127.0.0.1", onDemandService("app:3000"), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := admin.routeIDs(t); got[len(got)-1] != "azud-on-demand-app" {
+		t.Fatalf("repair did not add the on-demand route: %v", got)
+	}
+	status, err = manager.ReconcileService("127.0.0.1", onDemandService("app:3000"), false)
+	if err != nil || status != ReconcileInSync {
+		t.Fatalf("status after repair = %s, %v", status, err)
 	}
 }

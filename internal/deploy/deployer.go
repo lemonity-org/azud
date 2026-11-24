@@ -84,6 +84,9 @@ func newProxyConfigFromCfg(cfg *config.Config) *proxy.ProxyConfig {
 		LoggingEnabled:        cfg.Proxy.Logging.Enabled,
 		RedactRequestHeaders:  cfg.Proxy.Logging.RedactRequestHeaders,
 		RedactResponseHeaders: cfg.Proxy.Logging.RedactResponseHeaders,
+		Service:               cfg.Service,
+		AppPort:               cfg.Proxy.AppPort,
+		OnDemandAsk:           cfg.Proxy.OnDemandTLS.Ask,
 	}
 
 	if cfg.Proxy.SSLCertificate != "" && cfg.Proxy.SSLPrivateKey != "" {
@@ -1277,6 +1280,7 @@ func BuildProxyServiceConfig(cfg *config.Config, upstreams []string, weights []p
 		MaxRequestBody:        cfg.Proxy.Buffering.MaxRequestBody,
 		BufferMemory:          cfg.Proxy.Buffering.Memory,
 		HTTPS:                 cfg.Proxy.SSL,
+		OnDemand:              cfg.Proxy.OnDemandTLS.Enabled(),
 	}
 }
 

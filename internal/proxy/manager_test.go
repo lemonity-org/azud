@@ -640,14 +640,14 @@ func TestApplyProxySettingsIncludesServerTransportContract(t *testing.T) {
 	manager.applyProxySettingsFrom(cfg, &ProxyConfig{
 		MaxHeaderBytes:   2 * 1024 * 1024,
 		EnableFullDuplex: true,
-	})
+	}, nil)
 
 	server := cfg.Apps.HTTP.Servers["srv0"]
 	if server.MaxHeaderBytes != 2*1024*1024 || !server.EnableFullDuplex {
 		t.Fatalf("server transport contract was not applied: %#v", server)
 	}
 
-	manager.applyProxySettingsFrom(cfg, &ProxyConfig{})
+	manager.applyProxySettingsFrom(cfg, &ProxyConfig{}, nil)
 	if server.MaxHeaderBytes != 0 || server.EnableFullDuplex {
 		t.Fatalf("server transport contract was not cleared: %#v", server)
 	}
@@ -662,7 +662,7 @@ func TestCustomTLSDisablesAutomaticCertificateIssuance(t *testing.T) {
 		SSLCertificate:    "certificate-pem",
 		SSLPrivateKey:     "private-key-pem",
 		CustomCertificate: true,
-	})
+	}, nil)
 	server := cfg.Apps.HTTP.Servers["srv0"]
 	if server.AutoHTTPS == nil || !server.AutoHTTPS.DisableCertificates {
 		t.Fatalf("custom TLS permits automatic issuance: %#v", server.AutoHTTPS)
@@ -905,7 +905,7 @@ func TestApplyProxySettingsClearsDisabledManagedState(t *testing.T) {
 	cfg.Apps.HTTP.Servers["srv0"].AutoHTTPS = &AutoHTTPSConfig{DisableRedirects: true}
 	cfg.Apps.TLS = &TLSApp{Certificates: &CertificatesConfig{LoadPEM: []LoadedCertificate{{Certificate: "old-cert", Key: "old-key"}}}}
 
-	manager.applyProxySettingsFrom(cfg, &ProxyConfig{AutoHTTPS: false, LoggingEnabled: false})
+	manager.applyProxySettingsFrom(cfg, &ProxyConfig{AutoHTTPS: false, LoggingEnabled: false}, nil)
 	server := cfg.Apps.HTTP.Servers["srv0"]
 	if server.AutoHTTPS == nil || !server.AutoHTTPS.Disable {
 		t.Fatalf("automatic HTTPS was not explicitly disabled: %#v", server.AutoHTTPS)
@@ -917,7 +917,7 @@ func TestApplyProxySettingsClearsDisabledManagedState(t *testing.T) {
 		t.Fatalf("stale TLS state was not cleared: %#v", cfg.Apps.TLS)
 	}
 
-	manager.applyProxySettingsFrom(cfg, &ProxyConfig{AutoHTTPS: true, SSLRedirect: true})
+	manager.applyProxySettingsFrom(cfg, &ProxyConfig{AutoHTTPS: true, SSLRedirect: true}, nil)
 	if server.AutoHTTPS != nil {
 		t.Fatalf("default HTTPS redirects should clear overrides: %#v", server.AutoHTTPS)
 	}
@@ -955,7 +955,7 @@ func TestApplyProxySettingsUsesProtocolCorrectListeners(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := &Manager{}
 			cfg := manager.buildBaseConfig()
-			manager.applyProxySettingsFrom(cfg, tt.config)
+			manager.applyProxySettingsFrom(cfg, tt.config, nil)
 
 			got := cfg.Apps.HTTP.Servers["srv0"].Listen
 			if !slices.Equal(got, tt.want) {
@@ -1004,5 +1004,202 @@ func TestPersistConfigCommandsProtectPrivateCaddyState(t *testing.T) {
 				t.Fatalf("restore command does not refuse symlinks before chmod: %q", restore)
 			}
 		})
+	}
+}
+
+// onDemandProxyConfig is a service's proxy settings with on-demand TLS.
+func onDemandProxyConfig() *ProxyConfig {
+	return &ProxyConfig{
+		Hosts:       []string{"app.example.com"},
+		AutoHTTPS:   true,
+		SSLRedirect: true,
+		Email:       "ops@example.com",
+		Service:     "app",
+		AppPort:     3000,
+		OnDemandAsk: "/tls/ask",
+	}
+}
+
+func tlsJSON(t *testing.T, cfg *CaddyConfig) string {
+	t.Helper()
+	data, err := json.Marshal(cfg.Apps.TLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestTLSWithoutOnDemandKeepsTheSinglePolicy(t *testing.T) {
+	manager := &Manager{}
+	settings := onDemandProxyConfig()
+	settings.OnDemandAsk = ""
+	onDemand, err := manager.onDemandSettings(settings, nil, nil, nil)
+	if err != nil || onDemand != nil {
+		t.Fatalf("onDemandSettings without the option = %+v, %v", onDemand, err)
+	}
+	cfg := manager.buildBaseConfig()
+	manager.applyProxySettingsFrom(cfg, settings, onDemand)
+	want := `{"automation":{"policies":[{"issuers":[{"module":"acme","email":"ops@example.com"}]}]}}`
+	if got := tlsJSON(t, cfg); got != want {
+		t.Fatalf("TLS app changed for a proxy without on-demand TLS:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestOnDemandTLSKeepsKnownHostsAheadOfTheOnDemandPolicy(t *testing.T) {
+	manager := &Manager{}
+	settings := onDemandProxyConfig()
+	settings.Staging = true
+	routes := `[
+		{"@id":"azud-route-app","match":[{"host":["app.example.com","www.app.example.com"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"app:3000"}]}]},
+		{"@id":"azud-route-blog","match":[{"host":["blog.example.org","localhost","10.0.0.5"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"blog:80"}]}]}
+	]`
+	rawRoutes, parsed, err := parseRouteIdentities([]byte(routes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDemand, err := manager.onDemandSettings(settings, rawRoutes, parsed, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := manager.buildBaseConfig()
+	manager.applyProxySettingsFrom(cfg, settings, onDemand)
+
+	issuer := `{"module":"acme","ca":"https://acme-staging-v02.api.letsencrypt.org/directory","email":"ops@example.com"}`
+	want := `{"automation":{"policies":[` +
+		`{"subjects":["app.example.com","www.app.example.com","blog.example.org"],"issuers":[` + issuer + `]},` +
+		`{"issuers":[` + issuer + `],"on_demand":true}],` +
+		`"on_demand":{"permission":{"module":"http","endpoint":"http://app:3000/tls/ask"}}}}`
+	if got := tlsJSON(t, cfg); got != want {
+		t.Fatalf("on-demand TLS app:\n got %s\nwant %s", got, want)
+	}
+	if server := cfg.Apps.HTTP.Servers["srv0"]; server.AutoHTTPS != nil || !slices.Equal(server.Listen, []string{":443"}) {
+		t.Fatalf("on-demand TLS changed the listener or automatic HTTPS: %#v", server)
+	}
+}
+
+func TestOnDemandTLSWithoutKnownHostsHasOnlyTheOnDemandPolicy(t *testing.T) {
+	manager := &Manager{}
+	settings := onDemandProxyConfig()
+	settings.Hosts = []string{"localhost"}
+	onDemand, err := manager.onDemandSettings(settings, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := manager.buildBaseConfig()
+	manager.applyProxySettingsFrom(cfg, settings, onDemand)
+	policies := cfg.Apps.TLS.Automation.Policies
+	if len(policies) != 1 || !policies[0].OnDemand {
+		t.Fatalf("a subject policy with no subjects would shadow the on-demand policy: %s", tlsJSON(t, cfg))
+	}
+}
+
+func TestOnDemandPermissionFollowsHostPortUpstreams(t *testing.T) {
+	routes := `[
+		{"@id":"azud-route-app","match":[{"host":["app.example.com"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"127.0.0.1:41000"}]}]},
+		{"@id":"azud-on-demand-app","handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"127.0.0.1:42000"}]}]}
+	]`
+	rawRoutes, parsed, err := parseRouteIdentities([]byte(routes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name      string
+		hostPorts bool
+		raw       []json.RawMessage
+		routes    []*Route
+		want      string
+	}{
+		{"shared network uses the stable name", false, rawRoutes, parsed, "http://app:3000/tls/ask"},
+		{"host ports follow the on-demand route", true, rawRoutes, parsed, "http://127.0.0.1:42000/tls/ask"},
+		{"host ports follow the service route", true, rawRoutes[:1], parsed[:1], "http://127.0.0.1:41000/tls/ask"},
+		{"host ports before any route refuse", true, nil, nil, "http://app:3000/tls/ask"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &Manager{hostPorts: tt.hostPorts}
+			if got := manager.onDemandEndpoint(onDemandProxyConfig(), tt.raw, tt.routes); got != tt.want {
+				t.Fatalf("endpoint = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOnDemandSettingsRespectAnotherServicesOwnership(t *testing.T) {
+	routes := `[
+		{"@id":"azud-route-shop","match":[{"host":["shop.example.com"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"shop:4000"}]}]},
+		{"@id":"azud-on-demand-shop","handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"shop:4000"}]}]}
+	]`
+	rawRoutes, parsed, err := parseRouteIdentities([]byte(routes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := json.RawMessage(`{"endpoint":"http://shop:4000/check","module":"http"}`)
+	manager := &Manager{}
+
+	if _, err := manager.onDemandSettings(onDemandProxyConfig(), rawRoutes, parsed, live); err == nil || !strings.Contains(err.Error(), "belongs to service shop") {
+		t.Fatalf("a second on-demand owner was not refused: %v", err)
+	}
+
+	other := onDemandProxyConfig()
+	other.OnDemandAsk = ""
+	onDemand, err := manager.onDemandSettings(other, rawRoutes, parsed, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDemand == nil || string(onDemand.permission) != string(live) {
+		t.Fatalf("another app's deploy dropped the owner's permission check: %+v", onDemand)
+	}
+	if !slices.Equal(onDemand.subjects, []string{"app.example.com", "shop.example.com"}) {
+		t.Fatalf("subjects = %v, want both services' hosts kept ahead of time", onDemand.subjects)
+	}
+
+	owner := onDemandProxyConfig()
+	owner.Service, owner.OnDemandAsk = "shop", ""
+	if onDemand, err := manager.onDemandSettings(owner, rawRoutes, parsed, live); err != nil || onDemand != nil {
+		t.Fatalf("the owner turning on-demand TLS off kept it: %+v, %v", onDemand, err)
+	}
+}
+
+func TestPublicCertificateNamesFollowCertMagic(t *testing.T) {
+	got := publicCertificateNames([]string{
+		"App.Example.com", "app.example.com", "*.example.net", "localhost", "printer.local",
+		"db.internal", "192.0.2.1", "[2001:db8::1]", "intranet", "a.*.example.com", "",
+	})
+	want := []string{"app.example.com", "*.example.net"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("publicCertificateNames = %v, want %v", got, want)
+	}
+}
+
+func TestOnDemandMirrorCopiesHandlersWithoutHostsOrIDs(t *testing.T) {
+	primary := json.RawMessage(`{"@id":"azud-route-app","match":[{"host":["app.example.com"]}],"terminal":true,"handle":[` +
+		`{"handler":"request_body","max_size":16},` +
+		`{"@id":"azud-proxy-app","handler":"reverse_proxy","upstreams":[{"dial":"app:3000","max_requests":7}],` +
+		`"routes":[{"@id":"nested"}]}]}`)
+	mirror, err := onDemandMirror(primary, "azud-on-demand-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(mirror)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"@id":"azud-on-demand-app","handle":[{"handler":"request_body","max_size":16},` +
+		`{"handler":"reverse_proxy","routes":[{}],"upstreams":[{"dial":"app:3000","max_requests":7}]}],"terminal":true}`
+	if string(data) != want {
+		t.Fatalf("mirror:\n got %s\nwant %s", data, want)
+	}
+}
+
+func TestOnDemandRouteIDsCannotCollideWithServiceRoutes(t *testing.T) {
+	// Service names allow hyphens, so a suffix such as "-on-demand" on the
+	// service's own route ID could name another service's route.
+	for _, service := range []string{"app", "app-on-demand", "on-demand-app"} {
+		if strings.HasPrefix(serviceRouteID(service), azudOnDemandRouteIDPrefix) {
+			t.Fatalf("route ID %s looks like an on-demand route", serviceRouteID(service))
+		}
+		if isAzudOwnedRoute(&Route{ID: onDemandRouteID(service)}) {
+			t.Fatalf("on-demand route ID %s looks like a service route", onDemandRouteID(service))
+		}
 	}
 }

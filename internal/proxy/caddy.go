@@ -213,7 +213,22 @@ type LoadedCertificate struct {
 
 // TLSAutomation configures automatic certificate management
 type TLSAutomation struct {
-	Policies []*TLSPolicy `json:"policies,omitempty"`
+	Policies []*TLSPolicy    `json:"policies,omitempty"`
+	OnDemand *OnDemandConfig `json:"on_demand,omitempty"`
+}
+
+// OnDemandConfig configures certificates obtained during the TLS handshake.
+type OnDemandConfig struct {
+	// Permission is the module Caddy asks before obtaining a certificate for
+	// a name. It is kept as raw JSON so a preserved module stays byte-exact.
+	Permission json.RawMessage `json:"permission,omitempty"`
+}
+
+// HTTPPermission is Caddy's "http" permission module: a GET to Endpoint with
+// ?domain=<name>, where a 2xx answer allows the certificate.
+type HTTPPermission struct {
+	Module   string `json:"module"`
+	Endpoint string `json:"endpoint"`
 }
 
 // TLSPolicy defines a TLS automation policy

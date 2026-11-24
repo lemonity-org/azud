@@ -49,3 +49,32 @@ func TestNewProxyConfigFromCfgIncludesCustomCertificates(t *testing.T) {
 		t.Fatalf("route streaming settings were not propagated: %#v", route)
 	}
 }
+
+func TestProxyConfigsCarryOnDemandTLS(t *testing.T) {
+	cfg := &config.Config{
+		Service: "app",
+		Proxy: config.ProxyConfig{
+			Host:        "app.example.com",
+			SSL:         true,
+			ACMEEmail:   "ops@example.com",
+			AppPort:     4000,
+			OnDemandTLS: config.OnDemandTLSConfig{Ask: "/tls/ask"},
+		},
+	}
+
+	got := newProxyConfigFromCfg(cfg)
+	if got.Service != "app" || got.AppPort != 4000 || got.OnDemandAsk != "/tls/ask" {
+		t.Fatalf("on-demand settings were not propagated: %#v", got)
+	}
+	if route := BuildProxyServiceConfig(cfg, []string{"app:4000"}, nil); !route.OnDemand {
+		t.Fatalf("route does not ask for an on-demand route: %#v", route)
+	}
+
+	cfg.Proxy.OnDemandTLS = config.OnDemandTLSConfig{}
+	if got := newProxyConfigFromCfg(cfg); got.OnDemandAsk != "" {
+		t.Fatalf("OnDemandAsk = %q without the option", got.OnDemandAsk)
+	}
+	if route := BuildProxyServiceConfig(cfg, []string{"app:4000"}, nil); route.OnDemand {
+		t.Fatal("route asks for an on-demand route without the option")
+	}
+}

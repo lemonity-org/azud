@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"reflect"
 	"sort"
@@ -69,6 +70,12 @@ const (
 
 	azudRouteIDPrefix   = "azud-route-"
 	azudHandlerIDPrefix = "azud-proxy-"
+
+	// azudOnDemandRouteIDPrefix names the host-less route that sends every
+	// on-demand TLS host to its service. It differs from azudRouteIDPrefix
+	// before any service name starts, so no service's own route ID can equal
+	// another service's on-demand route ID.
+	azudOnDemandRouteIDPrefix = "azud-on-demand-"
 
 	// upstreamTryDuration and upstreamTryInterval keep a request alive while a
 	// route momentarily has no available upstream, which is what a container
@@ -645,6 +652,18 @@ type ProxyConfig struct {
 
 	// Response headers to redact from access logs
 	RedactResponseHeaders []string
+
+	// Service is the app these settings come from. On-demand TLS uses it to
+	// reach the app and to tell its own on-demand route from another's.
+	Service string
+
+	// AppPort is the port the app listens on inside its container.
+	AppPort int
+
+	// OnDemandAsk enables on-demand TLS when set: the path on the service
+	// that Caddy asks, with ?domain=<name>, before it obtains a certificate
+	// for a name the proxy does not route explicitly.
+	OnDemandAsk string
 }
 
 // Boot starts the Caddy proxy on a host
@@ -1192,8 +1211,12 @@ func (m *Manager) loadInitialConfig(host string, config *ProxyConfig) error {
 	if err := validateProxyConfig(config); err != nil {
 		return err
 	}
+	onDemand, err := m.onDemandSettings(config, nil, nil, nil)
+	if err != nil {
+		return err
+	}
 	caddyConfig := m.buildBaseConfig()
-	m.applyProxySettingsFrom(caddyConfig, config)
+	m.applyProxySettingsFrom(caddyConfig, config, onDemand)
 
 	if config != nil && config.SSLCertificate != "" {
 		m.log.Host(host, "Configuring custom SSL certificates...")
@@ -1237,8 +1260,16 @@ func (m *Manager) applyConfigPreservingRoutes(host string, config *ProxyConfig) 
 	if err != nil {
 		return fmt.Errorf("failed to parse running Caddy config: %w", err)
 	}
+	rawRoutes, routes, err := liveRoutes(currentRaw)
+	if err != nil {
+		return err
+	}
+	onDemand, err := m.onDemandSettings(config, rawRoutes, routes, livePermission(currentRaw))
+	if err != nil {
+		return err
+	}
 	desired := m.buildBaseConfig()
-	m.applyProxySettingsFrom(desired, config)
+	m.applyProxySettingsFrom(desired, config, onDemand)
 
 	desiredData, err := json.Marshal(desired)
 	if err != nil {
@@ -1366,7 +1397,7 @@ func (m *Manager) buildBaseConfig() *CaddyConfig {
 // applyProxySettingsFrom applies TLS, AutoHTTPS, and logging settings from the
 // given ProxyConfig onto a Caddy config. Accepts an explicit config to avoid
 // temporary field swaps on the Manager.
-func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *ProxyConfig) {
+func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *ProxyConfig, onDemand *onDemandTLS) {
 	if config == nil {
 		return
 	}
@@ -1449,25 +1480,199 @@ func (m *Manager) applyProxySettingsFrom(caddyConfig *CaddyConfig, config *Proxy
 				},
 			},
 		}
-	} else if config.AutoHTTPS && config.Email != "" {
-		issuer := &Issuer{
-			Module: "acme",
-			Email:  config.Email,
-		}
-		if config.Staging {
-			issuer.CA = "https://acme-staging-v02.api.letsencrypt.org/directory"
+	} else if config.AutoHTTPS && (config.Email != "" || onDemand != nil) {
+		var issuers []*Issuer
+		if config.Email != "" {
+			issuer := &Issuer{
+				Module: "acme",
+				Email:  config.Email,
+			}
+			if config.Staging {
+				issuer.CA = "https://acme-staging-v02.api.letsencrypt.org/directory"
+			}
+			issuers = []*Issuer{issuer}
 		}
 
-		caddyConfig.Apps.TLS = &TLSApp{
-			Automation: &TLSAutomation{
-				Policies: []*TLSPolicy{
-					{
-						Issuers: []*Issuer{issuer},
-					},
+		automation := &TLSAutomation{
+			Policies: []*TLSPolicy{
+				{
+					Issuers: issuers,
 				},
 			},
 		}
+		if onDemand != nil {
+			// Names the proxy routes explicitly keep certificates obtained
+			// ahead of time. Every other name falls through to the
+			// subject-less on-demand policy, whose certificates Caddy only
+			// obtains during a handshake after the permission check allows
+			// the name. A subject policy with no subjects would be a second
+			// catch-all and shadow the on-demand one, so it is left out.
+			automation.Policies = nil
+			if len(onDemand.subjects) > 0 {
+				automation.Policies = append(automation.Policies, &TLSPolicy{Subjects: onDemand.subjects, Issuers: issuers})
+			}
+			automation.Policies = append(automation.Policies, &TLSPolicy{OnDemand: true, Issuers: issuers})
+			automation.OnDemand = &OnDemandConfig{Permission: onDemand.permission}
+		}
+		caddyConfig.Apps.TLS = &TLSApp{Automation: automation}
 	}
+}
+
+// onDemandTLS is the on-demand part of the TLS app for one apply.
+type onDemandTLS struct {
+	// subjects are the names that keep certificates obtained ahead of time:
+	// every name the proxy routes explicitly that qualifies for a public
+	// certificate.
+	subjects []string
+	// permission is the module Caddy asks before an on-demand certificate.
+	permission json.RawMessage
+}
+
+// onDemandSettings decides the on-demand part of the TLS app from the
+// desired settings and the live routes. The TLS app is rebuilt from the
+// deploying service's settings on every apply, so a proxy whose on-demand
+// route belongs to another service keeps that service's permission check;
+// otherwise another app's deploy would stop its on-demand certificates.
+// Only one service per proxy may own on-demand TLS.
+func (m *Manager) onDemandSettings(config *ProxyConfig, rawRoutes []json.RawMessage, routes []*Route, live json.RawMessage) (*onDemandTLS, error) {
+	if config == nil || !config.AutoHTTPS || config.SSLCertificate != "" {
+		return nil, nil
+	}
+	owner := onDemandOwner(routes)
+	var permission json.RawMessage
+	switch {
+	case config.OnDemandAsk != "":
+		if owner != "" && owner != config.Service {
+			return nil, fmt.Errorf("on-demand TLS on this proxy belongs to service %s; only one service per proxy can set proxy.on_demand_tls", owner)
+		}
+		data, err := json.Marshal(HTTPPermission{Module: "http", Endpoint: m.onDemandEndpoint(config, rawRoutes, routes)})
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode on-demand permission: %w", err)
+		}
+		permission = data
+	case owner != "" && owner != config.Service && len(live) > 0:
+		permission = live
+	default:
+		return nil, nil
+	}
+
+	names := append([]string{}, config.Hosts...)
+	for _, route := range routes {
+		names = append(names, routeHosts(route)...)
+	}
+	return &onDemandTLS{subjects: publicCertificateNames(names), permission: permission}, nil
+}
+
+// onDemandEndpoint is the URL Caddy calls to ask whether a name may have a
+// certificate. On the shared network the service's stable name follows every
+// deploy. Host-port upstreams change with each container instead, so the
+// endpoint follows the service's route, and syncOnDemandRoute moves it as
+// the route's upstreams change. Before the service has a route there is no
+// address to ask, and the stable name, which does not resolve from the
+// proxy's host network, refuses every name until the route exists.
+func (m *Manager) onDemandEndpoint(config *ProxyConfig, rawRoutes []json.RawMessage, routes []*Route) string {
+	dial := fmt.Sprintf("%s:%d", config.Service, config.AppPort)
+	if m.hostPorts {
+		for _, id := range []string{onDemandRouteID(config.Service), serviceRouteID(config.Service)} {
+			if first := firstUpstreamDial(rawRoutes, routes, id); first != "" {
+				dial = first
+				break
+			}
+		}
+	}
+	return "http://" + dial + config.OnDemandAsk
+}
+
+// firstUpstreamDial returns the first upstream of the route with the given
+// ID, or "" when the route or its upstreams are missing.
+func firstUpstreamDial(rawRoutes []json.RawMessage, routes []*Route, id string) string {
+	for i, route := range routes {
+		if route == nil || route.ID != id || i >= len(rawRoutes) {
+			continue
+		}
+		handler, _, err := parseReverseProxyIdentity(rawRoutes[i])
+		if err != nil {
+			return ""
+		}
+		for _, upstream := range handler.Upstreams {
+			if upstream != nil && upstream.Dial != "" {
+				return upstream.Dial
+			}
+		}
+	}
+	return ""
+}
+
+// publicCertificateNames returns the de-duplicated names that Caddy would
+// obtain public certificates for, in their first order. Internal names, such
+// as localhost or IP addresses, keep Caddy's own handling.
+func publicCertificateNames(names []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" || seen[name] || !qualifiesForPublicCertificate(name) {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// qualifiesForPublicCertificate follows CertMagic's rule for names an ACME
+// CA can certify: a DNS name with a dot, at most one leading wildcard label,
+// and not an IP address or an internal name.
+func qualifiesForPublicCertificate(name string) bool {
+	if net.ParseIP(strings.Trim(name, "[]")) != nil || !strings.Contains(name, ".") {
+		return false
+	}
+	for _, suffix := range []string{".localhost", ".local", ".internal", ".home.arpa"} {
+		if strings.HasSuffix(name, suffix) {
+			return false
+		}
+	}
+	wildcard := strings.TrimPrefix(name, "*.")
+	return !strings.ContainsAny(wildcard, "*/ ") && !strings.HasPrefix(name, ".") && !strings.HasSuffix(name, ".")
+}
+
+// liveRoutes returns srv0's routes from a decoded live configuration.
+func liveRoutes(config map[string]interface{}) ([]json.RawMessage, []*Route, error) {
+	value := jsonPath(config, "apps", "http", "servers", "srv0", "routes")
+	if value == nil {
+		return nil, nil, nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode live routes: %w", err)
+	}
+	return parseRouteIdentities(data)
+}
+
+// livePermission returns the live on-demand permission module, if any.
+func livePermission(config map[string]interface{}) json.RawMessage {
+	value := jsonPath(config, "apps", "tls", "automation", "on_demand", "permission")
+	if value == nil {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// jsonPath walks nested JSON objects and returns nil when a key is missing.
+func jsonPath(root map[string]interface{}, path ...string) interface{} {
+	var current interface{} = root
+	for _, key := range path {
+		object, ok := current.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		current = object[key]
+	}
+	return current
 }
 
 // proxyListenAddresses keeps plaintext and TLS traffic on distinct listeners
@@ -1762,7 +1967,7 @@ func (m *Manager) RegisterService(host string, service *ServiceConfig) error {
 		if err := m.upsertRoute(host, service.Host, route); err != nil {
 			return fmt.Errorf("failed to update owned service route without replacing Caddy config: %w", err)
 		}
-		return nil
+		return m.reconcileOnDemandRoute(host, service)
 	}); err != nil {
 		return err
 	}
@@ -1828,7 +2033,7 @@ func (m *Manager) EnsureServiceHosts(host string, service *ServiceConfig) error 
 			if err := m.reconcileStringField(host, handlerPath+"/stream_close_delay", handler.StreamCloseDelay, desiredHandler.StreamCloseDelay, closeDelayPresent); err != nil {
 				return fmt.Errorf("failed to reconcile stream_close_delay: %w", err)
 			}
-			return nil
+			return m.reconcileOnDemandRoute(host, service)
 		}
 
 		return nil
@@ -1912,6 +2117,15 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 		return nil
 	}
 
+	// An on-demand route matches every host, so a route appended after it
+	// would never be reached. PUT on an array index inserts before it.
+	if index := firstOnDemandRouteIndex(routes); index >= 0 {
+		if _, err := m.caddyClient.apiRequest(host, "PUT", fmt.Sprintf("%s/%d", routesPath, index), route); err != nil {
+			return fmt.Errorf("failed to insert route before the on-demand route: %w", err)
+		}
+		return nil
+	}
+
 	// Route doesn't exist — POST appends one Azud-owned route without replacing
 	// routes or handlers owned by other services and manual operators.
 	_, err = m.caddyClient.apiRequest(host, "POST", routesPath, routeAppendPayload(routes, route))
@@ -1920,6 +2134,250 @@ func (m *Manager) upsertRoute(host, serviceHost string, route *Route) error {
 	}
 
 	return nil
+}
+
+// reconcileOnDemandRoute makes the service's on-demand route match its
+// settings. With on-demand TLS off the route is removed. Otherwise it is a
+// copy of the service's own route without a host matcher, so it takes every
+// host no other route matches, and it is kept last in srv0 so it never takes
+// a host another route serves. Only one service per proxy may own one. The
+// caller holds the Caddy lock.
+func (m *Manager) reconcileOnDemandRoute(host string, service *ServiceConfig) error {
+	routesPath := "/config/apps/http/servers/srv0/routes"
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to read routes for on-demand TLS: %w", err)
+	}
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		return err
+	}
+	id := onDemandRouteID(service.Name)
+	own, primary := -1, -1
+	for i, route := range routes {
+		switch {
+		case route == nil:
+		case route.ID == id:
+			own = i
+		case route.ID == serviceRouteID(service.Name):
+			primary = i
+		case isOnDemandRoute(route) && service.OnDemand:
+			return fmt.Errorf("on-demand TLS on this proxy belongs to service %s; only one service per proxy can set proxy.on_demand_tls", strings.TrimPrefix(route.ID, azudOnDemandRouteIDPrefix))
+		}
+	}
+
+	if !service.OnDemand {
+		if own < 0 {
+			return nil
+		}
+		if _, err := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(id), nil); err != nil {
+			return fmt.Errorf("failed to remove on-demand route: %w", err)
+		}
+		return nil
+	}
+	if primary < 0 {
+		// Nothing to copy yet; RegisterService creates both routes.
+		return nil
+	}
+
+	mirror, err := onDemandMirror(rawRoutes[primary], id)
+	if err != nil {
+		return err
+	}
+	switch {
+	case own == len(routes)-1:
+		if !sameJSON(rawRoutes[own], mirror) {
+			if _, err := m.caddyClient.apiRequest(host, "PATCH", caddyIDPath(id), mirror); err != nil {
+				return fmt.Errorf("failed to update on-demand route: %w", err)
+			}
+		}
+	case own >= 0:
+		// A route was appended after it, for example by hand. Move it back
+		// to the end so that route's hosts are reachable again.
+		if _, err := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(id), nil); err != nil {
+			return fmt.Errorf("failed to move on-demand route: %w", err)
+		}
+		if _, err := m.caddyClient.apiRequest(host, "POST", routesPath, mirror); err != nil {
+			return fmt.Errorf("failed to move on-demand route: %w", err)
+		}
+	default:
+		if _, err := m.caddyClient.apiRequest(host, "POST", routesPath, mirror); err != nil {
+			return fmt.Errorf("failed to add on-demand route: %w", err)
+		}
+	}
+	return m.syncOnDemandPermission(host, mirror)
+}
+
+// syncOnDemandRoute copies the service's own route onto its on-demand route
+// after an upstream or weight change, so on-demand hosts follow the same
+// upstreams. It does nothing for a service without an on-demand route. The
+// caller holds the Caddy lock.
+func (m *Manager) syncOnDemandRoute(host, primaryID string) error {
+	service, ok := strings.CutPrefix(primaryID, azudRouteIDPrefix)
+	if !ok || service == "" {
+		return nil
+	}
+	routesPath := "/config/apps/http/servers/srv0/routes"
+	data, err := m.caddyClient.apiRequest(host, "GET", routesPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to read routes for on-demand TLS: %w", err)
+	}
+	rawRoutes, routes, err := parseRouteIdentities(data)
+	if err != nil {
+		return err
+	}
+	id := onDemandRouteID(service)
+	own, primary := -1, -1
+	for i, route := range routes {
+		switch {
+		case route == nil:
+		case route.ID == id:
+			own = i
+		case route.ID == primaryID:
+			primary = i
+		}
+	}
+	if own < 0 || primary < 0 {
+		return nil
+	}
+	mirror, err := onDemandMirror(rawRoutes[primary], id)
+	if err != nil {
+		return err
+	}
+	if !sameJSON(rawRoutes[own], mirror) {
+		if _, err := m.caddyClient.apiRequest(host, "PATCH", caddyIDPath(id), mirror); err != nil {
+			return fmt.Errorf("failed to update on-demand route: %w", err)
+		}
+	}
+	return m.syncOnDemandPermission(host, mirror)
+}
+
+// syncOnDemandPermission points the on-demand permission check at the
+// route's first upstream when upstreams are host ports, which change with
+// every container. On the shared network the endpoint uses the service's
+// stable name and never moves. The caller holds the Caddy lock.
+func (m *Manager) syncOnDemandPermission(host string, mirror map[string]interface{}) error {
+	if !m.hostPorts {
+		return nil
+	}
+	dial := ""
+	handlers, _ := jsonObjectSlice(mirror["handle"])
+	if reverse := findJSONHandler(handlers, "reverse_proxy"); reverse != nil {
+		upstreams, _ := jsonObjectSlice(reverse["upstreams"])
+		for _, upstream := range upstreams {
+			if value, ok := upstream["dial"].(string); ok && value != "" {
+				dial = value
+				break
+			}
+		}
+	}
+	if dial == "" {
+		return nil
+	}
+
+	data, err := m.caddyClient.apiRequest(host, "GET", "/config/apps/tls", nil)
+	if err != nil {
+		return fmt.Errorf("failed to read TLS settings for on-demand TLS: %w", err)
+	}
+	value, err := decodeJSONValue(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse TLS settings: %w", err)
+	}
+	tlsApp, _ := value.(map[string]interface{})
+	permission, _ := jsonPath(tlsApp, "automation", "on_demand", "permission").(map[string]interface{})
+	endpoint, _ := permission["endpoint"].(string)
+	if permission["module"] != "http" || endpoint == "" {
+		return nil
+	}
+	target, err := url.Parse(endpoint)
+	if err != nil || target.Host == dial {
+		return nil
+	}
+	target.Host = dial
+	if _, err := m.caddyClient.apiRequest(host, "PATCH", "/config/apps/tls/automation/on_demand/permission/endpoint", target.String()); err != nil {
+		return fmt.Errorf("failed to move the on-demand permission check to %s: %w", dial, err)
+	}
+	return nil
+}
+
+// onDemandMirror builds an on-demand route from the service's own route: the
+// same handlers without the host matcher. Caddy refuses a configuration with
+// a duplicate @id, so the copy carries none except its own.
+func onDemandMirror(rawPrimary json.RawMessage, id string) (map[string]interface{}, error) {
+	route, err := decodeJSONObject(rawPrimary)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode service route: %w", err)
+	}
+	mirror, _ := withoutCaddyIDs(route).(map[string]interface{})
+	delete(mirror, "match")
+	mirror["@id"] = id
+	mirror["terminal"] = true
+	return mirror, nil
+}
+
+// withoutCaddyIDs returns a deep copy of a decoded JSON value without any
+// "@id" keys.
+func withoutCaddyIDs(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(typed))
+		for key, child := range typed {
+			if key != "@id" {
+				out[key] = withoutCaddyIDs(child)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(typed))
+		for i, child := range typed {
+			out[i] = withoutCaddyIDs(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// sameJSON reports whether raw JSON and a decoded value encode the same.
+func sameJSON(raw json.RawMessage, value interface{}) bool {
+	decoded, err := decodeJSONValue(raw)
+	if err != nil {
+		return false
+	}
+	left, leftErr := json.Marshal(decoded)
+	right, rightErr := json.Marshal(value)
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
+}
+
+func onDemandRouteID(service string) string {
+	if service == "" {
+		return ""
+	}
+	return azudOnDemandRouteIDPrefix + service
+}
+
+func isOnDemandRoute(route *Route) bool {
+	return route != nil && strings.HasPrefix(route.ID, azudOnDemandRouteIDPrefix)
+}
+
+// onDemandOwner returns the service whose on-demand route is on the proxy,
+// or "" when there is none.
+func onDemandOwner(routes []*Route) string {
+	for _, route := range routes {
+		if isOnDemandRoute(route) {
+			return strings.TrimPrefix(route.ID, azudOnDemandRouteIDPrefix)
+		}
+	}
+	return ""
+}
+
+func firstOnDemandRouteIndex(routes []*Route) int {
+	for i, route := range routes {
+		if isOnDemandRoute(route) {
+			return i
+		}
+	}
+	return -1
 }
 
 func parseRouteIdentities(data []byte) ([]json.RawMessage, []*Route, error) {
@@ -2223,6 +2681,10 @@ type ServiceConfig struct {
 
 	// Enable HTTPS
 	HTTPS bool
+
+	// OnDemand routes every host that no other route matches to this
+	// service, for on-demand TLS. See reconcileOnDemandRoute.
+	OnDemand bool
 }
 
 func (m *Manager) buildServiceRoute(service *ServiceConfig) *Route {
@@ -2389,6 +2851,9 @@ func (m *Manager) ReconcileService(host string, service *ServiceConfig, repair b
 		}
 	}
 	status, _, _ := reconcileRawRouteStatus(rawRoutes, routes, desired, service.Host, hasDesiredUpstreams)
+	if status == ReconcileInSync && !onDemandRouteInSync(rawRoutes, routes, service, hasDesiredUpstreams) {
+		status = ReconcileStale
+	}
 	if !repair || status == ReconcileInSync {
 		return status, nil
 	}
@@ -2410,14 +2875,44 @@ func (m *Manager) ReconcileService(host string, service *ServiceConfig, repair b
 		if !hasDesiredUpstreams {
 			_, liveOwned, _ := reconcileRawRouteStatus(liveRawRoutes, liveRoutes, desired, service.Host, false)
 			if liveOwned >= 0 {
-				_, deleteErr := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(desired.ID), nil)
-				return deleteErr
+				if _, deleteErr := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(desired.ID), nil); deleteErr != nil {
+					return deleteErr
+				}
 			}
-			return nil
+			return m.deleteOnDemandRoute(host, liveRoutes, desired.ID)
 		}
-		return m.upsertRoute(host, service.Host, desired)
+		if err := m.upsertRoute(host, service.Host, desired); err != nil {
+			return err
+		}
+		return m.reconcileOnDemandRoute(host, service)
 	})
 	return status, err
+}
+
+// onDemandRouteInSync reports whether the service's on-demand route is what
+// reconcileOnDemandRoute would leave: absent when on-demand TLS is off or
+// the service has no upstreams, and otherwise last and a copy of the
+// service's own route.
+func onDemandRouteInSync(rawRoutes []json.RawMessage, routes []*Route, service *ServiceConfig, hasDesiredUpstreams bool) bool {
+	id := onDemandRouteID(service.Name)
+	own, primary := -1, -1
+	for i, route := range routes {
+		switch {
+		case route == nil:
+		case route.ID == id:
+			own = i
+		case route.ID == serviceRouteID(service.Name):
+			primary = i
+		}
+	}
+	if !service.OnDemand || !hasDesiredUpstreams {
+		return own < 0
+	}
+	if own != len(routes)-1 || primary < 0 || own >= len(rawRoutes) {
+		return false
+	}
+	mirror, err := onDemandMirror(rawRoutes[primary], id)
+	return err == nil && sameJSON(rawRoutes[own], mirror)
 }
 
 func reconcileRawRouteStatus(rawRoutes []json.RawMessage, routes []*Route, desired *Route, serviceHost string, hasDesiredUpstreams bool) (ReconcileStatus, int, int) {
@@ -2583,7 +3078,7 @@ func (m *Manager) DeregisterService(host, serviceHost string) error {
 			if _, err := m.caddyClient.apiRequest(host, "DELETE", routeAPIPath(routesPath, i, route), nil); err != nil {
 				return fmt.Errorf("failed to delete owned route: %w", err)
 			}
-			return nil
+			return m.deleteOnDemandRoute(host, routes, route.ID)
 		}
 		return nil
 	}); err != nil {
@@ -2612,6 +3107,41 @@ func (m *Manager) AddUpstream(host, serviceHost, upstream string) error {
 
 	m.log.HostSuccess(host, "Upstream added")
 	return nil
+}
+
+// deleteOnDemandRoute removes the on-demand route of the service whose own
+// route has primaryID, if routes lists one.
+func (m *Manager) deleteOnDemandRoute(host string, routes []*Route, primaryID string) error {
+	service, ok := strings.CutPrefix(primaryID, azudRouteIDPrefix)
+	if !ok || service == "" {
+		return nil
+	}
+	id := onDemandRouteID(service)
+	for _, route := range routes {
+		if route != nil && route.ID == id {
+			if _, err := m.caddyClient.apiRequest(host, "DELETE", caddyIDPath(id), nil); err != nil {
+				return fmt.Errorf("failed to delete on-demand route: %w", err)
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// hasOnDemandRoute reports whether routes include the on-demand route of the
+// service whose own route has primaryID.
+func hasOnDemandRoute(routes []*Route, primaryID string) bool {
+	service, ok := strings.CutPrefix(primaryID, azudRouteIDPrefix)
+	if !ok || service == "" {
+		return false
+	}
+	id := onDemandRouteID(service)
+	for _, route := range routes {
+		if route != nil && route.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func addUpstreamIfMissing(upstreams []*Upstream, dial string) []*Upstream {
@@ -2711,6 +3241,9 @@ func (m *Manager) modifyUpstreams(host, serviceHost string, transform func([]*Up
 		upstreamsPath := handlerAPIPath(routesPath, i, handlerIndex, handler) + "/upstreams"
 		if _, err := m.caddyClient.apiRequest(host, method, upstreamsPath, merged); err != nil {
 			return fmt.Errorf("failed to update upstreams without replacing the owned handler: %w", err)
+		}
+		if hasOnDemandRoute(routes, route.ID) {
+			return m.syncOnDemandRoute(host, route.ID)
 		}
 		return nil
 	}
@@ -3101,13 +3634,19 @@ func (m *Manager) modifyRoute(host, serviceHost string, transform func(*Handler)
 		if _, err := m.caddyClient.apiRequest(host, upstreamMethod, handlerPath+"/upstreams", mergedUpstreams); err != nil {
 			return fmt.Errorf("failed to update canary upstreams: %w", err)
 		}
+		syncOnDemand := func() error {
+			if hasOnDemandRoute(routes, route.ID) {
+				return m.syncOnDemandRoute(host, route.ID)
+			}
+			return nil
+		}
 		rawLoadBalancingValue, loadBalancingExists := rawHandler["load_balancing"]
 		if !loadBalancingExists {
 			body := map[string]interface{}{"selection_policy": handler.LoadBalancing.SelectionPolicy}
 			if _, err := m.caddyClient.apiRequest(host, "PUT", handlerPath+"/load_balancing", body); err != nil {
 				return fmt.Errorf("failed to create canary load balancing policy: %w", err)
 			}
-			return nil
+			return syncOnDemand()
 		}
 		rawLoadBalancing, ok := rawLoadBalancingValue.(map[string]interface{})
 		if !ok {
@@ -3120,7 +3659,7 @@ func (m *Manager) modifyRoute(host, serviceHost string, transform func(*Handler)
 		if _, err := m.caddyClient.apiRequest(host, selectionMethod, handlerPath+"/load_balancing/selection_policy", handler.LoadBalancing.SelectionPolicy); err != nil {
 			return fmt.Errorf("failed to update canary selection policy: %w", err)
 		}
-		return nil
+		return syncOnDemand()
 	}
 	return fmt.Errorf("no route found for host %s", serviceHost)
 }
