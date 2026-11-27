@@ -6,6 +6,8 @@ release notes for the corresponding signed tag.
 
 ## Unreleased
 
+## 1.8.0 - 2026-11-28
+
 - Added `proxy.on_demand_tls`, which serves hosts the configuration does not
   list, such as domains customers point at the server. Caddy obtains a
   certificate for such a host during the first handshake, after a `GET` to
