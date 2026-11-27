@@ -14,6 +14,9 @@ release notes for the corresponding signed tag.
   keep certificates obtained ahead of time. Only one service per proxy can
   use it, and in pull mode the server's configuration decides it. See
   "On-demand TLS" in `docs/CONFIG_REFERENCE.md`.
+- Updated Go to 1.27.4, which fixes GO-2026-6859 in `net/http`. The build
+  image is `golang:1.27.4-alpine`, and CI and the release workflow build with
+  the same version.
 
 ## 1.7.0 - 2026-11-04
 

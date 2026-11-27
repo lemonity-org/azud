@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
 
       - name: Verify dependencies
@@ -98,7 +98,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
 
       - name: Install Podman
@@ -210,7 +210,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
 
       - name: Install Podman and SSH server
